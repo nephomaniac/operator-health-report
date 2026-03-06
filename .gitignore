@@ -1,0 +1,52 @@
+# Operator Health Report - Git Ignore
+# Project: operator_health_report
+
+# Generated output files
+*.json
+*.html
+*.log
+*.csv
+*.txt
+
+# Except documentation files
+!README*.md
+!*_GUIDE.md
+!*_FIXES.md
+!VERSION_*.md
+
+# Cluster lists (may contain sensitive IDs)
+*.list
+clusters*.txt
+test*.txt
+
+# Cache and temporary files
+.health_check_cache.sh
+*_cache_*
+*.tmp
+*.bak
+*.backup
+*.out
+
+# Debug files
+debug_*.log
+debug_*.html
+
+# Test output directories
+junk/
+resource_stats/
+prod/
+
+# Environment configuration
+config.env
+.env
+*.local.sh
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

@@ -1,0 +1,12 @@
+# Example cluster list file
+# One cluster ID per line (no comments or blank lines in actual file)
+#
+# To use this file:
+#   1. Copy to clusters.list: cp examples/clusters.list.example clusters.list
+#   2. Replace with your actual cluster IDs
+#   3. Run: ./collect_from_multiple_clusters.sh --cluster-list clusters.list -r "TICKET-123"
+#
+# Example cluster IDs (replace with real ones):
+# abc123def456ghi789
+# xyz789uvw456rst123
+# pqr456mno789jkl012
