@@ -69,6 +69,7 @@ OUTPUT_FILE=""  # Will be set after parsing arguments
 DEPLOYMENT="configure-alertmanager-operator"
 NAMESPACE="openshift-monitoring"
 CLUSTER_LIST=""
+CLUSTER_FILTER="all"
 MAX_CLUSTERS=""
 OP_VER_ONLY=false
 HEALTH_CHECK=false
@@ -77,6 +78,7 @@ METRICS_CHECK=false
 VERSION_COMPARE=false
 CHECK_HCP_CONTROLLERS=false
 CHECK_SECRETS=false
+GENERATE_HTML=true
 OPERATORS_TO_COLLECT=()
 
 # Operator configurations
@@ -102,10 +104,19 @@ OPTIONS:
     --deployment, -d DEPLOY     Deployment name (default: configure-alertmanager-operator)
     --namespace, -n NAMESPACE   Namespace (default: openshift-monitoring)
     --cluster-list, -c FILE     File with cluster IDs (one per line)
+                                If not provided, clusters are fetched from OCM using --cluster-filter
+    --cluster-filter FILTER     OCM cluster filter (default: all)
+                                Options:
+                                  all              - All ready ROSA/OSD clusters (includes MC/SC)
+                                  no-hcp           - Exclude HyperShift management/service clusters
+                                  custom:QUERY     - Custom OCM search query
+                                Ignored if --cluster-list is provided
     --max-clusters, -m NUM      Maximum number of clusters to process
     --op-ver                    Only fetch operator version (cluster ID, name, operator version)
     --health                    Perform health checks for production readiness (pod uptime, errors)
     --comprehensive-health      Comprehensive health check (version verification, memory leaks, log errors)
+                                Automatically generates HTML report unless --no-html is specified
+    --no-html                   Skip HTML report generation (only output JSON for --comprehensive-health)
     --secrets                   Enable extended secret-based health checks (requires backplane elevation)
                                 Checks: alertmanager-main secret, CAMO ConfigMap, PagerDuty secret
     --metrics                   Collect CAMO Prometheus metrics (secrets, configmaps, validation status)
@@ -120,8 +131,14 @@ EXAMPLES:
     # Interactive mode (will prompt for reason)
     $0 --comprehensive-health
 
-    # Collect from all operators with specific reason
+    # Collect from all operators with specific reason (fetches all ready clusters from OCM)
     $0 --reason "SREP-12345 capacity planning"
+
+    # Fetch clusters excluding HyperShift MC/SC clusters
+    $0 -r "SREP-12345" --cluster-filter no-hcp
+
+    # Use custom OCM query
+    $0 -r "SREP-12345" --cluster-filter "custom:product.id='rosa' and region.id='us-east-1'"
 
     # Collect only from CAMO operator
     $0 -r "SREP-12345" --oper camo
@@ -171,10 +188,12 @@ while [[ $# -gt 0 ]]; do
         --deployment|-d) DEPLOYMENT="$2"; shift 2 ;;
         --namespace|-n) NAMESPACE="$2"; shift 2 ;;
         --cluster-list|-c) CLUSTER_LIST="$2"; shift 2 ;;
+        --cluster-filter) CLUSTER_FILTER="$2"; shift 2 ;;
         --max-clusters|-m) MAX_CLUSTERS="$2"; shift 2 ;;
         --op-ver) OP_VER_ONLY=true; shift ;;
         --health) HEALTH_CHECK=true; shift ;;
         --comprehensive-health) COMPREHENSIVE_HEALTH=true; shift ;;
+        --no-html) GENERATE_HTML=false; shift ;;
         --secrets) CHECK_SECRETS=true; shift ;;
         --metrics) METRICS_CHECK=true; shift ;;
         --version-compare) VERSION_COMPARE=true; shift ;;
@@ -290,29 +309,55 @@ if [ "$COMPREHENSIVE_HEALTH" = true ]; then
         source "$CACHE_HELPER"
         echo "Cache initialized: $CACHE_DIR"
 
-        # Pre-fetch and cache staging versions for all operators
+        # Detect OCM environment for caching
+        OCM_ENV_CACHE=$(ocm config get url 2>/dev/null | grep -oE '(integration|stage|production)' | head -1)
+        if [ -z "$OCM_ENV_CACHE" ]; then
+            if [[ "$(ocm config get url 2>/dev/null)" == "https://api.openshift.com" ]]; then
+                OCM_ENV_CACHE="production"
+            else
+                OCM_ENV_CACHE="unknown"
+            fi
+        fi
+
+        # Pre-fetch and cache versions for all operators
         for op in "${OPERATORS_TO_COLLECT[@]}"; do
+            # Set environment-aware saas file
             if [ "$op" = "camo" ]; then
-                saas_file="saas-configure-alertmanager-operator.yaml"
-                # Use environment variable or default staging clusters
-                staging_clusters="${CAMO_STAGING_CLUSTERS:-staging-cluster-1,staging-cluster-2,staging-cluster-3}"
+                case "$OCM_ENV_CACHE" in
+                    integration)
+                        saas_file="saas-configure-alertmanager-operator-pko.yaml"
+                        target_name="camo-pko-integration"
+                        ;;
+                    stage)
+                        saas_file="saas-configure-alertmanager-operator.yaml"
+                        target_name="camo-hive-stage-01"
+                        ;;
+                    production)
+                        saas_file="saas-configure-alertmanager-operator.yaml"
+                        target_name="production"
+                        ;;
+                    *)
+                        saas_file="saas-configure-alertmanager-operator.yaml"
+                        target_name="staging"
+                        ;;
+                esac
             elif [ "$op" = "rmo" ]; then
                 saas_file="saas-route-monitor-operator.yaml"
-                # Use environment variable or default staging clusters
-                staging_clusters="${RMO_STAGING_CLUSTERS:-staging-cluster-1,staging-cluster-2,staging-cluster-3}"
+                target_name="staging"
             fi
 
-            if [ -n "${saas_file:-}" ]; then
-                echo "Pre-caching staging versions for $op..."
-                canonical_version=$(get_canonical_staging_version "$saas_file" "$staging_clusters" 2>/dev/null || echo "")
-                canonical_image_tag=$(get_canonical_staging_image_tag "$saas_file" "$staging_clusters" 2>/dev/null || echo "")
-                if [ -n "$canonical_version" ]; then
-                    echo "  Cached: $canonical_version (tag: $canonical_image_tag)"
-                    # Export for use in sub-shells
-                    export "CACHED_STAGING_VERSION_${op}=$canonical_version"
-                    export "CACHED_STAGING_IMAGE_TAG_${op}=$canonical_image_tag"
-                fi
-            fi
+            # TODO: Implement version caching functions
+            # if [ -n "${saas_file:-}" ]; then
+            #     echo "Pre-caching staging versions for $op..."
+            #     canonical_version=$(get_canonical_staging_version "$saas_file" "$staging_clusters" 2>/dev/null || echo "")
+            #     canonical_image_tag=$(get_canonical_staging_image_tag "$saas_file" "$staging_clusters" 2>/dev/null || echo "")
+            #     if [ -n "$canonical_version" ]; then
+            #         echo "  Cached: $canonical_version (tag: $canonical_image_tag)"
+            #         # Export for use in sub-shells
+            #         export "CACHED_STAGING_VERSION_${op}=$canonical_version"
+            #         export "CACHED_STAGING_IMAGE_TAG_${op}=$canonical_image_tag"
+            #     fi
+            # fi
         done
         echo ""
     fi
@@ -352,8 +397,10 @@ if [ -n "$CLUSTER_LIST" ]; then
 
         batch_ids=("${clusters[@]:$i:$batch_size}")
 
-        # Build search query: id in ('id1', 'id2', 'id3')
-        search_query="id in ($(printf "'%s'," "${batch_ids[@]}" | sed 's/,$//'))"
+        # Build search query: id in ('id1', 'id2', 'id3') OR name in ('name1', 'name2', 'name3')
+        # This handles both cluster IDs and cluster names
+        id_list=$(printf "'%s'," "${batch_ids[@]}" | sed 's/,$//')
+        search_query="id in ($id_list) or name in ($id_list)"
 
         echo "  Fetching batch $((i/batch_size + 1)): clusters $((i+1))-${batch_end} of ${total_to_fetch}..."
 
@@ -364,9 +411,14 @@ if [ -n "$CLUSTER_LIST" ]; then
             # Parse batch results
             while IFS=$'\t' read -r id name version created; do
                 if [ -n "$id" ] && [ "$id" != "null" ]; then
+                    # Store by ID (for ID-based lookups)
                     cluster_names["$id"]="$name"
                     cluster_versions["$id"]="$version"
                     cluster_creation_dates["$id"]="$created"
+                    # Also store by name (for name-based lookups)
+                    cluster_names["$name"]="$name"
+                    cluster_versions["$name"]="$version"
+                    cluster_creation_dates["$name"]="$created"
                 fi
             done < <(echo "$batch_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
         fi
@@ -374,36 +426,106 @@ if [ -n "$CLUSTER_LIST" ]; then
 
     echo "✓ Batch fetch complete"
 else
-    echo "Fetching OSD and ROSA classic clusters from OCM (state='ready')..."
+    # Fetch clusters from OCM based on filter
+    custom_query=""
+    rosa_query=""
+    osd_query=""
 
-    # Fetch ROSA classic clusters (hypershift.enabled='false')
-    rosa_data=$(ocm get clusters --parameter search="hypershift.enabled='false' and managed='true' and state='ready' and product.id='rosa'" 2>/dev/null)
+    case "$CLUSTER_FILTER" in
+        all)
+            echo "Fetching all ready ROSA/OSD clusters from OCM..."
+            # Fetch all ROSA clusters (classic + HCP)
+            rosa_query="managed='true' and state='ready' and product.id='rosa'"
+            # Fetch all OSD clusters
+            osd_query="managed='true' and state='ready' and product.id='osd'"
+            ;;
+        no-hcp)
+            echo "Fetching ready ROSA/OSD clusters from OCM (excluding HyperShift MC/SC)..."
+            # Fetch only ROSA classic (exclude HCP)
+            rosa_query="hypershift.enabled='false' and managed='true' and state='ready' and product.id='rosa'"
+            # Fetch all OSD clusters
+            osd_query="managed='true' and state='ready' and product.id='osd'"
+            ;;
+        custom:*)
+            # Extract custom query after "custom:"
+            custom_query="${CLUSTER_FILTER#custom:}"
+            echo "Fetching clusters from OCM with custom query: $custom_query"
+            ;;
+        *)
+            echo "Error: Unknown cluster filter: $CLUSTER_FILTER" >&2
+            echo "Supported filters: all, no-hcp, custom:QUERY" >&2
+            exit 1
+            ;;
+    esac
 
-    # Fetch OSD clusters
-    osd_data=$(ocm get clusters --parameter search="managed='true' and state='ready' and product.id='osd'" 2>/dev/null)
-
-    # Parse ROSA classic clusters
-    if [ -n "$rosa_data" ]; then
-        while IFS=$'\t' read -r id name version created; do
-            if [ -n "$id" ] && [ "$id" != "null" ]; then
-                clusters+=("$id")
-                cluster_names["$id"]="$name"
-                cluster_versions["$id"]="$version"
-                cluster_creation_dates["$id"]="$created"
+    # Execute OCM queries
+    if [ -n "$custom_query" ]; then
+        # Use custom query
+        cluster_data=$(ocm get clusters --parameter search="$custom_query" 2>/dev/null)
+        if [ -n "$cluster_data" ]; then
+            while IFS=$'\t' read -r id name version created; do
+                if [ -n "$id" ] && [ "$id" != "null" ]; then
+                    clusters+=("$id")
+                    cluster_names["$id"]="$name"
+                    cluster_versions["$id"]="$version"
+                    cluster_creation_dates["$id"]="$created"
+                fi
+            done < <(echo "$cluster_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
+        fi
+    else
+        # Fetch ROSA clusters
+        if [ -n "$rosa_query" ]; then
+            rosa_data=$(ocm get clusters --parameter search="$rosa_query" 2>/dev/null)
+            if [ -n "$rosa_data" ]; then
+                while IFS=$'\t' read -r id name version created; do
+                    if [ -n "$id" ] && [ "$id" != "null" ]; then
+                        clusters+=("$id")
+                        cluster_names["$id"]="$name"
+                        cluster_versions["$id"]="$version"
+                        cluster_creation_dates["$id"]="$created"
+                    fi
+                done < <(echo "$rosa_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
             fi
-        done < <(echo "$rosa_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
+        fi
+
+        # Fetch OSD clusters
+        if [ -n "$osd_query" ]; then
+            osd_data=$(ocm get clusters --parameter search="$osd_query" 2>/dev/null)
+            if [ -n "$osd_data" ]; then
+                while IFS=$'\t' read -r id name version created; do
+                    if [ -n "$id" ] && [ "$id" != "null" ]; then
+                        clusters+=("$id")
+                        cluster_names["$id"]="$name"
+                        cluster_versions["$id"]="$version"
+                        cluster_creation_dates["$id"]="$created"
+                    fi
+                done < <(echo "$osd_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
+            fi
+        fi
     fi
 
-    # Parse OSD clusters
-    if [ -n "$osd_data" ]; then
-        while IFS=$'\t' read -r id name version created; do
-            if [ -n "$id" ] && [ "$id" != "null" ]; then
-                clusters+=("$id")
-                cluster_names["$id"]="$name"
-                cluster_versions["$id"]="$version"
-                cluster_creation_dates["$id"]="$created"
-            fi
-        done < <(echo "$osd_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
+    # Display cluster table
+    echo ""
+    echo "Fetched clusters from OCM:"
+    echo ""
+    printf "%-32s  %-25s  %-8s  %-7s  %-26s\n" "ID" "NAME" "VERSION" "STATUS" "CREATED"
+    printf "%-32s  %-25s  %-8s  %-7s  %-26s\n" "--------------------------------" "-------------------------" "--------" "-------" "--------------------------"
+    for cluster_id in "${clusters[@]}"; do
+        cluster_name="${cluster_names[$cluster_id]:-unknown}"
+        cluster_version="${cluster_versions[$cluster_id]:-unknown}"
+        cluster_created="${cluster_creation_dates[$cluster_id]:-unknown}"
+        printf "%-32s  %-25s  %-8s  %-7s  %-26s\n" "$cluster_id" "$cluster_name" "$cluster_version" "ready" "$cluster_created"
+    done
+    echo ""
+
+    # Ask for user approval (only in interactive mode)
+    if [ -t 0 ]; then
+        read -p "Proceed with these ${#clusters[@]} clusters? [Y/n] " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ -n $REPLY ]]; then
+            echo "Aborted by user."
+            exit 0
+        fi
     fi
 fi
 
@@ -625,9 +747,16 @@ EOF
         echo "  Version: $cluster_version"
         echo "  Created: $cluster_created"
     else
-        # Fetch metadata individually (when using --cluster-list)
+        # Fetch metadata individually (when batch fetch failed)
         echo "Fetching cluster metadata..."
+        # Try fetching by ID first
         cluster_data=$(ocm get cluster "$cluster_id" 2>/dev/null)
+
+        # If not found, try searching by name (for SC/MC clusters)
+        if [ -z "$cluster_data" ] || echo "$cluster_data" | jq -e '.kind == "Error"' &>/dev/null; then
+            cluster_data=$(ocm get clusters --parameter search="name = '$cluster_id'" 2>/dev/null | jq -r '.items[0] // empty')
+        fi
+
         cluster_name=$(echo "$cluster_data" | jq -r '.name // "unknown"')
         cluster_version=$(echo "$cluster_data" | jq -r '.openshift_version // "unknown"')
         cluster_created=$(echo "$cluster_data" | jq -r '.creation_timestamp // "unknown"')
@@ -764,6 +893,25 @@ if [ "$COMPREHENSIVE_HEALTH" = true ] && [ "$successful" -gt 0 ]; then
     jq -s '.' "$OUTPUT_FILE" > "$temp_file" && mv "$temp_file" "$OUTPUT_FILE"
     echo "✓ Converted to JSON array format"
     echo ""
+
+    # Generate HTML report (unless --no-html was specified)
+    if [ "$GENERATE_HTML" = true ]; then
+        echo "Generating HTML report..."
+        HTML_FILE="${OUTPUT_FILE%.json}.html"
+
+        if [ -x "./generate_html_report.sh" ]; then
+            if ./generate_html_report.sh "$OUTPUT_FILE" "$HTML_FILE"; then
+                echo "✓ HTML report generated: $HTML_FILE"
+                echo ""
+            else
+                echo "⚠ Warning: HTML report generation failed (JSON data still available)"
+                echo ""
+            fi
+        else
+            echo "⚠ Warning: generate_html_report.sh not found or not executable"
+            echo ""
+        fi
+    fi
 fi
 
 echo "================================================================================"
@@ -793,6 +941,12 @@ if [ "$successful" -gt 0 ]; then
     if [ "$HEALTH_CHECK" = true ]; then
         echo "  Review the health check results in: $OUTPUT_FILE"
         echo "  You can also use: ./analyze_health_data.sh $OUTPUT_FILE (if available)"
+    elif [ "$COMPREHENSIVE_HEALTH" = true ]; then
+        echo "  JSON data: $OUTPUT_FILE"
+        if [ "$GENERATE_HTML" = true ] && [ -f "${OUTPUT_FILE%.json}.html" ]; then
+            echo "  HTML report: ${OUTPUT_FILE%.json}.html"
+            echo "  Open with: open ${OUTPUT_FILE%.json}.html"
+        fi
     else
         echo "  ./analyze_resource_data.sh $OUTPUT_FILE"
     fi

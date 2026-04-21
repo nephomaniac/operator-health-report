@@ -17,6 +17,24 @@
 
 set -uo pipefail
 
+# Detect OCM environment
+detect_ocm_environment() {
+    local ocm_url=$(ocm config get url 2>/dev/null || echo "")
+
+    if [[ "$ocm_url" == *"integration"* ]]; then
+        echo "integration"
+    elif [[ "$ocm_url" == *"stage"* ]] || [[ "$ocm_url" == *"staging"* ]]; then
+        echo "stage"
+    elif [[ "$ocm_url" == *"production"* ]] || [[ "$ocm_url" == "https://api.openshift.com" ]]; then
+        echo "production"
+    else
+        echo "unknown"
+    fi
+}
+
+# Get OCM environment
+OCM_ENV=$(detect_ocm_environment)
+
 # Default values
 NAMESPACE="openshift-monitoring"
 DEPLOYMENT="configure-alertmanager-operator"
@@ -26,14 +44,40 @@ CLUSTER_NAME=""
 CLUSTER_VERSION=""
 REASON=""
 OPERATOR_NAME=""
-SAAS_FILE="saas-configure-alertmanager-operator.yaml"
-# Staging clusters for version verification - configure via environment or edit this array
-# Example: STAGING_CLUSTERS=("staging-1" "staging-2" "staging-3")
+
+# Environment-aware SAAS file and target mapping for CAMO
+# Integration uses PKO (OLM is deprecated with delete:true)
+# Stage/Production may use OLM or PKO depending on migration status
+case "$OCM_ENV" in
+    integration)
+        DEFAULT_SAAS_FILE="saas-configure-alertmanager-operator-pko.yaml"
+        DEFAULT_TARGET_NAME="camo-pko-integration"
+        ;;
+    stage)
+        DEFAULT_SAAS_FILE="saas-configure-alertmanager-operator.yaml"
+        DEFAULT_TARGET_NAME="camo-hive-stage-01"
+        ;;
+    production)
+        DEFAULT_SAAS_FILE="saas-configure-alertmanager-operator.yaml"
+        DEFAULT_TARGET_NAME="production"
+        ;;
+    *)
+        # Unknown environment - use legacy defaults
+        DEFAULT_SAAS_FILE="saas-configure-alertmanager-operator.yaml"
+        DEFAULT_TARGET_NAME="staging"
+        ;;
+esac
+
+SAAS_FILE="${SAAS_FILE:-$DEFAULT_SAAS_FILE}"
+TARGET_NAME="${TARGET_NAME:-$DEFAULT_TARGET_NAME}"
+
+# Legacy STAGING_CLUSTERS array - now replaced by TARGET_NAME but kept for compatibility
 STAGING_CLUSTERS=("${STAGING_CLUSTERS[@]}")
 if [ ${#STAGING_CLUSTERS[@]} -eq 0 ]; then
-    # Default staging clusters - update these for your environment
-    STAGING_CLUSTERS=("staging-cluster-1" "staging-cluster-2" "staging-cluster-3")
+    # Use target name as the single "cluster" to check
+    STAGING_CLUSTERS=("$TARGET_NAME")
 fi
+
 MEMORY_LEAK_THRESHOLD_PERCENT=20  # Flag if memory increases >20% over time
 ERROR_LOG_THRESHOLD=0  # Number of error log lines to trigger warning (any errors = warning)
 DEBUG="${DEBUG:-false}"  # Enable debug output with DEBUG=true environment variable
@@ -357,7 +401,7 @@ warning_count=0
 # 1. VERSION VERIFICATION
 #=============================================================================
 echo "================================================================================"
-echo "CHECK 1: Version Verification Against Staging Clusters"
+echo "CHECK 1: Version Verification Against ${OCM_ENV^} Environment Target"
 echo "================================================================================"
 
 version_check_status="UNKNOWN"
@@ -365,122 +409,94 @@ version_message=""
 expected_versions=()
 canonical_version=""
 
-# Get expected versions from staging clusters
+# Get expected versions from app-interface target
 # Initialize variables
 canonical_image_tag=""
 
+echo "OCM Environment: $OCM_ENV"
+echo "Target Name: $TARGET_NAME"
+echo "SAAS File: $SAAS_FILE"
+echo ""
+
 # Check if we have a cached version from the multi-cluster script
 if [ -n "${CACHED_STAGING_VERSION_camo:-}" ] && [[ "$SAAS_FILE" == *"configure-alertmanager"* ]]; then
-    echo "Using cached staging version from multi-cluster run..."
+    echo "Using cached version from multi-cluster run..."
     canonical_version="$CACHED_STAGING_VERSION_camo"
     canonical_image_tag="${CACHED_STAGING_IMAGE_TAG_camo:-}"
     expected_versions=("$canonical_version")
     echo "  Cached version: $canonical_version (tag: $canonical_image_tag)"
 elif [ -n "${CACHED_STAGING_VERSION_rmo:-}" ] && [[ "$SAAS_FILE" == *"route-monitor"* ]]; then
-    echo "Using cached staging version from multi-cluster run..."
+    echo "Using cached version from multi-cluster run..."
     canonical_version="$CACHED_STAGING_VERSION_rmo"
     canonical_image_tag="${CACHED_STAGING_IMAGE_TAG_rmo:-}"
     expected_versions=("$canonical_version")
     echo "  Cached version: $canonical_version (tag: $canonical_image_tag)"
 elif [ -f "$HOME/.get_app_interface_saas_refs.sh" ]; then
-    echo "Fetching expected staging versions from app-interface..."
+    echo "Fetching expected version from app-interface..."
     echo "  Note: This uses an optional external script for version lookup"
     echo "  Alternative: Set EXPECTED_VERSION environment variable"
 
     # Run the script and capture output
-    staging_refs=$(bash "$HOME/.get_app_interface_saas_refs.sh" "$SAAS_FILE" 2>/dev/null)
+    saas_refs=$(bash "$HOME/.get_app_interface_saas_refs.sh" "$SAAS_FILE" 2>/dev/null)
 
-    if [ -n "$staging_refs" ]; then
-        # Collect versions and image tags from each staging cluster
-        declare -A staging_versions
-        declare -A staging_image_tags
-        for staging_cluster in "${STAGING_CLUSTERS[@]}"; do
-            # Extract the REF and IMAGE_TAG columns for this cluster
-            ref=$(echo "$staging_refs" | grep "^$staging_cluster" | awk '{print $2}')
-            image_tag=$(echo "$staging_refs" | grep "^$staging_cluster" | awk '{print $4}')
+    if [ -n "$saas_refs" ]; then
+        # Look for the target name in the output
+        target_line=$(echo "$saas_refs" | grep "^$TARGET_NAME")
+
+        if [ -n "$target_line" ]; then
+            # Extract the REF and IMAGE_TAG columns for this target
+            ref=$(echo "$target_line" | awk '{print $2}')
+            image_tag=$(echo "$target_line" | awk '{print $4}')
+
             if [ -n "$ref" ]; then
-                staging_versions["$staging_cluster"]="$ref"
-                staging_image_tags["$staging_cluster"]="$image_tag"
-                expected_versions+=("$ref")
-                echo "  $staging_cluster: $ref (tag: $image_tag)"
-            fi
-        done
+                canonical_version="$ref"
+                canonical_image_tag="$image_tag"
+                expected_versions=("$ref")
+                echo "  Target: $TARGET_NAME"
+                echo "  Expected Git Ref: $ref"
+                echo "  Expected Image Tag: $image_tag"
+                echo ""
 
-        # Check if all staging clusters have the same version
-        if [ ${#expected_versions[@]} -gt 0 ]; then
-            unique_versions=($(printf '%s\n' "${expected_versions[@]}" | sort -u))
+                # Check if this is a branch ref (like "master") vs commit hash
+                if [[ ! "$ref" =~ ^[0-9a-f]{7,40}$ ]]; then
+                    echo "  ℹ Note: Target uses branch '$ref' (not a specific commit)"
+                    echo "  Fetching current HEAD commit of branch '$ref' from GitHub..."
 
-            if [ ${#unique_versions[@]} -eq 1 ]; then
-                # All staging clusters agree on the version
-                canonical_version="${unique_versions[0]}"
-                # Get the image tag for the canonical version
-                for staging_cluster in "${STAGING_CLUSTERS[@]}"; do
-                    if [ "${staging_versions[$staging_cluster]}" = "$canonical_version" ]; then
-                        canonical_image_tag="${staging_image_tags[$staging_cluster]}"
-                        break
+                    # Get GitHub repo URL from saas file
+                    github_repo_url=$(curl -s "https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data/services/osd-operators/cicd/saas/${SAAS_FILE}?ref_type=heads" 2>/dev/null | yq -r '.resourceTemplates[] | select(.name | test("configure-alertmanager-operator")) | .url' 2>/dev/null)
+
+                    if [ -n "$github_repo_url" ]; then
+                        # Extract owner/repo from GitHub URL
+                        github_repo=$(echo "$github_repo_url" | sed -E 's|https://github.com/||' | sed 's|\.git$||')
+
+                        # Query GitHub API for current HEAD of the branch
+                        branch_head=$(curl -s "https://api.github.com/repos/${github_repo}/commits/${ref}" 2>/dev/null | jq -r '.sha' 2>/dev/null)
+
+                        if [ -n "$branch_head" ] && [ "$branch_head" != "null" ]; then
+                            # Replace canonical_version with the actual branch HEAD commit
+                            canonical_version="$branch_head"
+                            echo "  ✓ Current HEAD of '$ref': ${branch_head:0:12}"
+                            echo "  Will verify deployed commit matches current branch HEAD"
+                        else
+                            echo "  ⚠ Warning: Could not fetch branch HEAD from GitHub API"
+                            echo "  Continuing with branch name verification"
+                        fi
+                    else
+                        echo "  ⚠ Warning: Could not fetch GitHub repo URL from saas file"
                     fi
-                done
-                echo ""
-                echo "  ✓ All staging clusters running same version: $canonical_version (tag: $canonical_image_tag)"
-            else
-                # Version mismatch between staging clusters - ALERT USER
-                echo ""
-                echo "  ✗✗✗ CRITICAL: Staging clusters have version MISMATCH! ✗✗✗"
-                echo ""
-                echo "  Staging cluster versions:"
-                for staging_cluster in "${STAGING_CLUSTERS[@]}"; do
-                    if [ -n "${staging_versions[$staging_cluster]}" ]; then
-                        echo "    $staging_cluster: ${staging_versions[$staging_cluster]}"
-                    fi
-                done
-                echo ""
-                echo "  This indicates an inconsistent deployment state in staging."
-                echo "  Please verify which version is correct before proceeding."
-                echo ""
-
-                # Restore stdout temporarily to prompt user
-                exec 1>&3
-
-                # Prompt user to select correct version
-                echo "================================================================================"
-                echo "STAGING VERSION MISMATCH DETECTED"
-                echo "================================================================================"
-                echo ""
-                echo "The following staging clusters are running DIFFERENT versions:"
-                for i in "${!STAGING_CLUSTERS[@]}"; do
-                    cluster="${STAGING_CLUSTERS[$i]}"
-                    version="${staging_versions[$cluster]}"
-                    echo "  $((i+1)). $cluster: $version"
-                done
-                echo ""
-                read -p "Enter the number of the CORRECT version to use for validation (1-${#STAGING_CLUSTERS[@]}), or 'q' to skip version check: " user_choice
-
-                if [[ "$user_choice" =~ ^[0-9]+$ ]] && [ "$user_choice" -ge 1 ] && [ "$user_choice" -le "${#STAGING_CLUSTERS[@]}" ]; then
-                    selected_cluster="${STAGING_CLUSTERS[$((user_choice-1))]}"
-                    canonical_version="${staging_versions[$selected_cluster]}"
-                    echo ""
-                    echo "Using version from $selected_cluster: $canonical_version"
-                    echo ""
-                elif [ "$user_choice" = "q" ] || [ "$user_choice" = "Q" ]; then
-                    canonical_version=""
-                    echo ""
-                    echo "Skipping version verification check."
-                    echo ""
-                else
-                    canonical_version=""
-                    echo ""
-                    echo "Invalid selection. Skipping version verification check."
                     echo ""
                 fi
-
-                # Redirect stdout back to stderr for logging
-                exec 1>&2
             fi
+        else
+            echo "  ⚠ Warning: Target '$TARGET_NAME' not found in saas file $SAAS_FILE"
+            echo "  Available targets:"
+            echo "$saas_refs" | grep -v "^TARGET" | grep -v "^------" | awk '{print "    - " $1}'
+            echo ""
         fi
     else
-        echo "  ⚠ Warning: Could not fetch staging versions from app-interface"
+        echo "  ⚠ Warning: Could not fetch version references from app-interface"
         version_check_status="UNKNOWN"
-        version_message="Unable to fetch staging version references"
+        version_message="Unable to fetch version references from saas file"
     fi
 else
     # app-interface script not found - check for alternative version source
@@ -570,27 +586,27 @@ if [ -n "$canonical_version" ]; then
     if [ "$version_match" = true ]; then
         version_check_status="PASS"
         if [ "$match_method" = "image_sha" ]; then
-            version_message="Image SHA matches staging deployment (verified via SHA comparison)"
+            version_message="Image SHA matches $OCM_ENV target deployment (verified via SHA comparison)"
             echo "  ✓ Version verified via image SHA match"
         else
-            version_message="Version matches staging deployment ($canonical_version)"
-            echo "  ✓ Version matches expected staging version"
+            version_message="Version matches $OCM_ENV target deployment ($canonical_version)"
+            echo "  ✓ Version matches expected $OCM_ENV target version"
         fi
     else
         version_check_status="FAIL"
         version_message="Version mismatch - may indicate installation error (expected: $canonical_version, got: $operator_version)"
         warning_count=$((warning_count + 1))
-        echo "  ✗ Version does NOT match expected staging version"
+        echo "  ✗ Version does NOT match expected $OCM_ENV target version"
         echo "    Current: $operator_version"
-        echo "    Expected: $canonical_version"
+        echo "    Expected: $canonical_version (target: $TARGET_NAME)"
     fi
 elif [ ${#expected_versions[@]} -eq 0 ]; then
     version_check_status="UNKNOWN"
-    version_message="No staging version references available"
-    echo "  ⚠ Unable to verify version - no staging references found"
+    version_message="No $OCM_ENV version references available"
+    echo "  ⚠ Unable to verify version - no $OCM_ENV target references found"
 else
     version_check_status="UNKNOWN"
-    version_message="Version check skipped by user"
+    version_message="Version check skipped"
     echo "  ⚠ Version check skipped"
 fi
 
@@ -607,10 +623,13 @@ health_checks+=("$(cat <<EOF
   "severity": "warning",
   "message": "$version_message",
   "details": {
+    "ocm_environment": "$OCM_ENV",
+    "target_name": "$TARGET_NAME",
+    "saas_file": "$SAAS_FILE",
     "current_version": "$operator_version",
     "current_image_sha": "${current_image_sha_short:-unknown}",
     "expected_version": "$canonical_version",
-    "staging_versions": $expected_versions_json,
+    "expected_image_tag": "${canonical_image_tag:-unknown}",
     "match_method": "${match_method:-none}"
   }
 }
@@ -1847,6 +1866,210 @@ EOF
   "details": {
     "warning_event_count": $camo_warning_events,
     "events": $camo_events_json
+  }
+}
+EOF
+)")
+
+    # Check 11: OLM Subscription and CSV Orphan Detection
+    # Only run if version doesn't match expected version (potential OLM issue)
+    echo "  Checking for OLM subscription issues..."
+
+    olm_subscription_status="SKIP"
+    olm_subscription_message="Version matches expected - no OLM check needed"
+    resolution_failed="false"
+    resolution_failed_message=""
+    orphaned_csvs=0
+    orphaned_csv_names="[]"
+    subscription_exists="false"
+
+    if [ "$version_check_status" != "PASS" ]; then
+        # Check if subscription exists (indicates OLM installation vs PKO)
+        subscription_check=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" 2>/dev/null)
+
+        if [ $? -eq 0 ] && [ -n "$subscription_check" ]; then
+            subscription_exists="true"
+            echo "  ✓ Subscription exists (OLM installation detected)"
+
+            # Check for ResolutionFailed status
+            resolution_failed_status=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].status}' 2>/dev/null)
+
+            if [ "$resolution_failed_status" = "True" ]; then
+                resolution_failed="true"
+                resolution_failed_message=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].message}' 2>/dev/null | head -c 500)
+
+                echo "  ✗ CRITICAL: Subscription has ResolutionFailed=True"
+                echo "    Error: ${resolution_failed_message:0:100}..."
+
+                # Check for orphaned CSVs (CSVs without ownerReferences)
+                csvs=$(oc get csv.operators.coreos.com -n "$NAMESPACE" -o json 2>/dev/null | jq -r ".items[] | select(.metadata.name | contains(\"$DEPLOYMENT\"))")
+
+                if [ -n "$csvs" ]; then
+                    orphaned_csv_list=$(echo "$csvs" | jq -r '. | select(.metadata.ownerReferences == null or (.metadata.ownerReferences | length) == 0) | .metadata.name' 2>/dev/null)
+
+                    if [ -n "$orphaned_csv_list" ]; then
+                        orphaned_csvs=$(echo "$orphaned_csv_list" | wc -l | tr -d ' ')
+                        orphaned_csv_names=$(echo "$orphaned_csv_list" | jq -R . | jq -s . 2>/dev/null || echo "[]")
+
+                        olm_subscription_status="FAIL"
+                        olm_subscription_message="OLM subscription has ResolutionFailed; Found $orphaned_csvs orphaned CSV(s) blocking upgrade"
+                        critical_count=$((critical_count + 1))
+
+                        echo "  ✗ CRITICAL: Found $orphaned_csvs orphaned CSV(s): $orphaned_csv_list"
+                    else
+                        olm_subscription_status="FAIL"
+                        olm_subscription_message="OLM subscription has ResolutionFailed but no orphaned CSVs detected"
+                        critical_count=$((critical_count + 1))
+                    fi
+                else
+                    olm_subscription_status="FAIL"
+                    olm_subscription_message="OLM subscription has ResolutionFailed; No CSVs found"
+                    critical_count=$((critical_count + 1))
+                fi
+            else
+                olm_subscription_status="PASS"
+                olm_subscription_message="OLM subscription healthy (no ResolutionFailed)"
+                echo "  ✓ OLM subscription healthy"
+            fi
+        else
+            # No OLM subscription found - defer judgment until PKO check
+            subscription_exists="false"
+            olm_subscription_status="PENDING_PKO_CHECK"
+            olm_subscription_message="No OLM subscription found"
+            echo "  ℹ No OLM subscription found (checking PKO...)"
+        fi
+    else
+        echo "  ℹ Version matches expected - skipping OLM check"
+    fi
+
+    # Check 12: PKO (Package Operator) ClusterPackage Health
+    echo "  Checking for PKO ClusterPackage..."
+
+    pko_package_status="SKIP"
+    pko_package_message="Version matches expected - no PKO check needed"
+    cluster_package_exists="false"
+    cluster_package_ready="unknown"
+    cluster_package_phase="unknown"
+    cluster_package_conditions="[]"
+    dual_installation="false"
+    dual_installation_message=""
+
+    if [ "$version_check_status" != "PASS" ]; then
+        # Check if ClusterPackage exists (indicates PKO installation)
+        cluster_package_check=$(oc get clusterpackage "$DEPLOYMENT" 2>/dev/null)
+
+        if [ $? -eq 0 ] && [ -n "$cluster_package_check" ]; then
+            cluster_package_exists="true"
+            echo "  ✓ ClusterPackage exists (PKO installation detected)"
+
+            # Get ClusterPackage status
+            cluster_package_phase=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
+            cluster_package_ready=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "unknown")
+
+            # Get all conditions
+            cluster_package_conditions=$(oc get clusterpackage "$DEPLOYMENT" -o json 2>/dev/null | jq -c '.status.conditions // []' 2>/dev/null || echo "[]")
+
+            # Check for dual installation (CRITICAL ERROR)
+            if [ "$subscription_exists" = "true" ]; then
+                dual_installation="true"
+                dual_installation_message="CRITICAL: Both OLM Subscription and PKO ClusterPackage detected - conflicting deployment methods"
+                pko_package_status="FAIL"
+                pko_package_message="$dual_installation_message"
+                critical_count=$((critical_count + 1))
+                echo "  ✗ CRITICAL: Dual installation detected (OLM + PKO)"
+            else
+                # Check ClusterPackage health
+                if [ "$cluster_package_ready" = "True" ] && [ "$cluster_package_phase" = "Available" ]; then
+                    pko_package_status="PASS"
+                    pko_package_message="PKO ClusterPackage healthy (Ready=True, Phase=$cluster_package_phase)"
+                    echo "  ✓ PKO ClusterPackage healthy (Phase: $cluster_package_phase)"
+                elif [ "$cluster_package_ready" = "False" ]; then
+                    # Get failure reason from conditions
+                    failure_reason=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null | head -c 200)
+                    pko_package_status="FAIL"
+                    pko_package_message="PKO ClusterPackage not ready (Phase: $cluster_package_phase): $failure_reason"
+                    critical_count=$((critical_count + 1))
+                    echo "  ✗ CRITICAL: PKO ClusterPackage not ready"
+                    echo "    Phase: $cluster_package_phase"
+                    echo "    Reason: ${failure_reason:0:100}..."
+                else
+                    pko_package_status="WARN"
+                    pko_package_message="PKO ClusterPackage in unexpected state (Ready=$cluster_package_ready, Phase=$cluster_package_phase)"
+                    warning_count=$((warning_count + 1))
+                    echo "  ⚠ WARNING: PKO ClusterPackage state unclear"
+                    echo "    Ready: $cluster_package_ready"
+                    echo "    Phase: $cluster_package_phase"
+                fi
+            fi
+        else
+            cluster_package_exists="false"
+
+            # Check for dual installation scenario (neither or OLM only)
+            if [ "$subscription_exists" = "true" ]; then
+                pko_package_status="SKIP"
+                pko_package_message="No PKO ClusterPackage found (OLM-only installation)"
+                echo "  ℹ No PKO ClusterPackage found (OLM-only installation)"
+            else
+                # CRITICAL: Neither OLM nor PKO found - operator not deployed
+                pko_package_status="FAIL"
+                pko_package_message="CRITICAL: No OLM Subscription or PKO ClusterPackage found - operator not deployed"
+                critical_count=$((critical_count + 1))
+                echo "  ✗ CRITICAL: No OLM or PKO artifacts found - operator not deployed"
+
+                # Update OLM check status as well (since neither exists)
+                olm_subscription_status="FAIL"
+                olm_subscription_message="CRITICAL: No OLM Subscription or PKO ClusterPackage found - operator not deployed"
+            fi
+        fi
+    else
+        echo "  ℹ Version matches expected - skipping PKO check"
+    fi
+
+    # Finalize OLM check status if it was pending PKO check
+    if [ "$olm_subscription_status" = "PENDING_PKO_CHECK" ]; then
+        if [ "$cluster_package_exists" = "true" ]; then
+            # PKO found, OLM not found = PKO-only installation (normal)
+            olm_subscription_status="SKIP"
+            olm_subscription_message="No OLM subscription found (PKO installation detected)"
+        else
+            # Neither found - already set to FAIL above
+            : # no-op, status already set
+        fi
+    fi
+
+    # Escape resolution failed message for JSON
+    resolution_failed_message_escaped=$(echo "$resolution_failed_message" | jq -Rs . 2>/dev/null || echo '""')
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "olm_subscription_health",
+  "status": "$olm_subscription_status",
+  "severity": "critical",
+  "message": "$olm_subscription_message",
+  "details": {
+    "subscription_exists": $subscription_exists,
+    "resolution_failed": $resolution_failed,
+    "resolution_failed_message": $resolution_failed_message_escaped,
+    "orphaned_csv_count": $orphaned_csvs,
+    "orphaned_csv_names": $orphaned_csv_names
+  }
+}
+EOF
+)")
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "pko_clusterpackage_health",
+  "status": "$pko_package_status",
+  "severity": "critical",
+  "message": "$pko_package_message",
+  "details": {
+    "cluster_package_exists": $cluster_package_exists,
+    "cluster_package_phase": "$cluster_package_phase",
+    "cluster_package_ready": "$cluster_package_ready",
+    "cluster_package_conditions": $cluster_package_conditions,
+    "dual_installation": $dual_installation,
+    "dual_installation_message": "$dual_installation_message"
   }
 }
 EOF
