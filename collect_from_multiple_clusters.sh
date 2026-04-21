@@ -180,6 +180,52 @@ EOF
     exit 0
 }
 
+# Function to discover Hive cluster managing a service cluster via OCM
+# Returns the SAAS target name (e.g., "camo-<hive-cluster-name>")
+discover_hive_target() {
+    local cluster_id="$1"
+    local ocm_env="$2"
+
+    # For integration environment, use PKO naming convention
+    if [ "$ocm_env" = "integration" ]; then
+        echo "camo-pko-integration"
+        return 0
+    fi
+
+    # Query OCM for provision_shard to get Hive cluster info
+    local provision_shard
+    provision_shard=$(ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/provision_shard" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$provision_shard" ]; then
+        # Fallback to environment-based defaults if OCM query fails
+        case "$ocm_env" in
+            stage) echo "staging" ;;
+            production) echo "production" ;;
+            *) echo "unknown" ;;
+        esac
+        return 1
+    fi
+
+    # Extract Hive cluster name from server URL
+    # Example: https://api.hive-stage-01.n1u3.p1.openshiftapps.com:6443 -> hive-stage-01
+    local hive_cluster
+    hive_cluster=$(echo "$provision_shard" | jq -r '.hive_config.server // empty' | sed -n 's|https://api\.\([^.]*\)\..*|\1|p')
+
+    if [ -z "$hive_cluster" ]; then
+        # Fallback if extraction fails
+        case "$ocm_env" in
+            stage) echo "staging" ;;
+            production) echo "production" ;;
+            *) echo "unknown" ;;
+        esac
+        return 1
+    fi
+
+    # Derive SAAS target name: camo-<hive-cluster>
+    echo "camo-${hive_cluster}"
+    return 0
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -326,27 +372,22 @@ if [ "$COMPREHENSIVE_HEALTH" = true ]; then
                 case "$OCM_ENV_CACHE" in
                     integration)
                         saas_file="saas-configure-alertmanager-operator-pko.yaml"
-                        target_name="camo-pko-integration"
                         ;;
-                    stage)
+                    stage|production)
                         saas_file="saas-configure-alertmanager-operator.yaml"
-                        target_name="camo-hive-stage-01"
-                        ;;
-                    production)
-                        saas_file="saas-configure-alertmanager-operator.yaml"
-                        target_name="production"
                         ;;
                     *)
                         saas_file="saas-configure-alertmanager-operator.yaml"
-                        target_name="staging"
                         ;;
                 esac
             elif [ "$op" = "rmo" ]; then
                 saas_file="saas-route-monitor-operator.yaml"
-                target_name="staging"
             fi
 
             # TODO: Implement version caching functions
+            # NOTE: target_name discovery is now per-cluster (see discover_hive_target function)
+            # because different Hive clusters in the same environment may run different versions
+            # during progressive rollouts. Pre-caching a single version is not appropriate.
             # if [ -n "${saas_file:-}" ]; then
             #     echo "Pre-caching staging versions for $op..."
             #     canonical_version=$(get_canonical_staging_version "$saas_file" "$staging_clusters" 2>/dev/null || echo "")
@@ -368,6 +409,10 @@ clusters=()
 declare -A cluster_names
 declare -A cluster_versions
 declare -A cluster_creation_dates
+
+# Cache for Hive targets to avoid repeated OCM queries
+# Key: cluster_id, Value: discovered target name (e.g., "camo-<hive-name>")
+declare -A hive_target_cache
 
 if [ -n "$CLUSTER_LIST" ]; then
     if [ ! -f "$CLUSTER_LIST" ]; then
@@ -766,6 +811,28 @@ EOF
     fi
     echo ""
 
+    # Discover and cache Hive target for this cluster
+    # This avoids repeated OCM queries when multiple operators are collected
+    if [ -z "${hive_target_cache[$cluster_id]:-}" ]; then
+        # Detect OCM environment
+        ocm_env=$(ocm config get url 2>/dev/null | grep -oE '(integration|stage|production)' | head -1)
+        if [ -z "$ocm_env" ]; then
+            if [[ "$(ocm config get url 2>/dev/null)" == "https://api.openshift.com" ]]; then
+                ocm_env="production"
+            else
+                ocm_env="unknown"
+            fi
+        fi
+
+        # Discover Hive target and cache it
+        discovered_target=$(discover_hive_target "$cluster_id" "$ocm_env")
+        hive_target_cache[$cluster_id]="$discovered_target"
+        echo "Discovered Hive target for this cluster: $discovered_target (cached for reuse)"
+    else
+        echo "Using cached Hive target: ${hive_target_cache[$cluster_id]}"
+    fi
+    echo ""
+
     # Collect data from this cluster
     # Note: Script outputs CSV to stdout (captured to file) and messages to stderr (shown to user)
     set +e  # Temporarily disable exit on error
@@ -804,6 +871,11 @@ EOF
                 --reason \"$REASON\" \
                 --format json \
                 --operator-name \"$op_name\""
+
+            # Pass cached Hive target to avoid re-discovery
+            if [ -n "${hive_target_cache[$cluster_id]:-}" ]; then
+                health_cmd="$health_cmd --target-name \"${hive_target_cache[$cluster_id]}\""
+            fi
 
             # Add --secrets flag if enabled
             if [ "$CHECK_SECRETS" = true ]; then

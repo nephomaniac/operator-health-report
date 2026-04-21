@@ -45,31 +45,73 @@ CLUSTER_VERSION=""
 REASON=""
 OPERATOR_NAME=""
 
-# Environment-aware SAAS file and target mapping for CAMO
+# Function to discover Hive cluster managing this service cluster via OCM
+# Returns the SAAS target name (e.g., "camo-<hive-cluster-name>")
+discover_hive_target() {
+    local cluster_id="$1"
+    local ocm_env="$2"
+
+    # For integration environment, use PKO naming convention
+    if [ "$ocm_env" = "integration" ]; then
+        echo "camo-pko-integration"
+        return 0
+    fi
+
+    # Query OCM for provision_shard to get Hive cluster info
+    local provision_shard
+    provision_shard=$(ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/provision_shard" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$provision_shard" ]; then
+        # Fallback to environment-based defaults if OCM query fails
+        case "$ocm_env" in
+            stage) echo "staging" ;;
+            production) echo "production" ;;
+            *) echo "unknown" ;;
+        esac
+        return 1
+    fi
+
+    # Extract Hive cluster name from server URL
+    # Example: https://api.hive-stage-01.n1u3.p1.openshiftapps.com:6443 -> hive-stage-01
+    local hive_cluster
+    hive_cluster=$(echo "$provision_shard" | jq -r '.hive_config.server // empty' | sed -n 's|https://api\.\([^.]*\)\..*|\1|p')
+
+    if [ -z "$hive_cluster" ]; then
+        # Fallback if extraction fails
+        case "$ocm_env" in
+            stage) echo "staging" ;;
+            production) echo "production" ;;
+            *) echo "unknown" ;;
+        esac
+        return 1
+    fi
+
+    # Derive SAAS target name: camo-<hive-cluster>
+    echo "camo-${hive_cluster}"
+    return 0
+}
+
+# Environment-aware SAAS file mapping for CAMO
 # Integration uses PKO (OLM is deprecated with delete:true)
 # Stage/Production may use OLM or PKO depending on migration status
 case "$OCM_ENV" in
     integration)
         DEFAULT_SAAS_FILE="saas-configure-alertmanager-operator-pko.yaml"
-        DEFAULT_TARGET_NAME="camo-pko-integration"
         ;;
-    stage)
+    stage|production)
         DEFAULT_SAAS_FILE="saas-configure-alertmanager-operator.yaml"
-        DEFAULT_TARGET_NAME="camo-hive-stage-01"
-        ;;
-    production)
-        DEFAULT_SAAS_FILE="saas-configure-alertmanager-operator.yaml"
-        DEFAULT_TARGET_NAME="production"
         ;;
     *)
         # Unknown environment - use legacy defaults
         DEFAULT_SAAS_FILE="saas-configure-alertmanager-operator.yaml"
-        DEFAULT_TARGET_NAME="staging"
         ;;
 esac
 
+# Default target will be discovered dynamically after we have cluster ID
+DEFAULT_TARGET_NAME="unknown"
+
 SAAS_FILE="${SAAS_FILE:-$DEFAULT_SAAS_FILE}"
-TARGET_NAME="${TARGET_NAME:-$DEFAULT_TARGET_NAME}"
+# TARGET_NAME will be set after cluster ID discovery (see below)
 
 # Legacy STAGING_CLUSTERS array - now replaced by TARGET_NAME but kept for compatibility
 STAGING_CLUSTERS=("${STAGING_CLUSTERS[@]}")
@@ -100,6 +142,8 @@ OPTIONS:
                                 If not provided, will prompt interactively (default: "Checking CAMO operator health")
     --operator-name NAME        Operator name for tracking (defaults to deployment name)
     --saas-file FILE           SAAS file for version checking (default: saas-configure-alertmanager-operator.yaml)
+    --target-name NAME         SAAS target name for version checking (auto-discovered from OCM if not provided)
+                                Examples: camo-<hive-name>, camo-pko-integration, production
     --secrets                   Enable secret-based health checks (requires elevation, OFF by default)
     --help, -h                  Show this help message
 
@@ -133,6 +177,7 @@ while [[ $# -gt 0 ]]; do
         --reason|-r) REASON="$2"; shift 2 ;;
         --operator-name) OPERATOR_NAME="$2"; shift 2 ;;
         --saas-file) SAAS_FILE="$2"; shift 2 ;;
+        --target-name) TARGET_NAME="$2"; shift 2 ;;
         --secrets) CHECK_SECRETS=true; shift ;;
         --help|-h) usage ;;
         *) echo "Error: Unknown option: $1" >&2; usage ;;
@@ -232,6 +277,16 @@ if [ -z "$CLUSTER_NAME" ]; then
         CLUSTER_NAME=$(ocm get cluster "$CLUSTER_ID" 2>/dev/null | jq -r '.name // "unknown"' || echo "unknown")
     fi
 fi
+
+# Dynamically discover Hive cluster and SAAS target if not already set
+if [ "$DEFAULT_TARGET_NAME" = "unknown" ] && [ "$CLUSTER_ID" != "unknown" ]; then
+    DEFAULT_TARGET_NAME=$(discover_hive_target "$CLUSTER_ID" "$OCM_ENV")
+    debug_log "Dynamically discovered target: $DEFAULT_TARGET_NAME"
+fi
+
+# Apply discovered target name if TARGET_NAME not explicitly set
+TARGET_NAME="${TARGET_NAME:-$DEFAULT_TARGET_NAME}"
+debug_var TARGET_NAME
 
 # Suppress normal output, only show errors on stderr and data on stdout
 exec 3>&1  # Save stdout

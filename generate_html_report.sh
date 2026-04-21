@@ -930,6 +930,10 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         <div class="meta-value">${cluster.operator_version || 'unknown'}</div>
                     </div>
                     <div class="meta-item">
+                        <div class="meta-label">Hive Cluster</div>
+                        <div class="meta-value">${cluster.version_verification?.details?.target_name || 'N/A'}</div>
+                    </div>
+                    <div class="meta-item">
                         <div class="meta-label">Timestamp</div>
                         <div class="meta-value">${cluster.timestamp || 'N/A'}</div>
                     </div>

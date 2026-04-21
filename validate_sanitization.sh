@@ -64,10 +64,12 @@ echo ""
 
 # 4. Check for hard-coded staging cluster names
 echo "4. Checking for hard-coded cluster names..."
-if git diff --cached | grep -qE "camo-hive-stage|camo-hives\d+"; then
+# Only check additions (lines starting with +), not deletions (lines starting with -)
+# Exclude validate_sanitization.sh itself (which contains these patterns in grep commands)
+if git diff --cached -- ':!validate_sanitization.sh' | grep "^+" | grep -qE "camo-hive-stage|camo-hives\d+"; then
     echo "  ❌ FAIL: Found hard-coded staging cluster names"
     echo "  Lines:"
-    git diff --cached | grep -nE "camo-hive-stage|camo-hives\d+" | head -10
+    git diff --cached -- ':!validate_sanitization.sh' | grep "^+" | grep -nE "camo-hive-stage|camo-hives\d+" | head -10
     errors=$((errors + 1))
 else
     echo "  ✓ PASS: No hard-coded cluster names found"
