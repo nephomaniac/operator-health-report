@@ -112,11 +112,13 @@ DEFAULT_TARGET_NAME="unknown"
 
 SAAS_FILE="${SAAS_FILE:-$DEFAULT_SAAS_FILE}"
 # TARGET_NAME will be set after cluster ID discovery (see below)
+# Initialize with empty value for now to avoid unbound variable error
+TARGET_NAME="${TARGET_NAME:-}"
 
 # Legacy STAGING_CLUSTERS array - now replaced by TARGET_NAME but kept for compatibility
 STAGING_CLUSTERS=("${STAGING_CLUSTERS[@]}")
-if [ ${#STAGING_CLUSTERS[@]} -eq 0 ]; then
-    # Use target name as the single "cluster" to check
+if [ ${#STAGING_CLUSTERS[@]} -eq 0 ] && [ -n "$TARGET_NAME" ]; then
+    # Use target name as the single "cluster" to check (only if TARGET_NAME is set)
     STAGING_CLUSTERS=("$TARGET_NAME")
 fi
 
