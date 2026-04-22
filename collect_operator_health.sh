@@ -1929,81 +1929,78 @@ EOF
 )")
 
     # Check 11: OLM Subscription and CSV Orphan Detection
-    # Only run if version doesn't match expected version (potential OLM issue)
+    # Always check deployment method health regardless of version match
     echo "  Checking for OLM subscription issues..."
 
     olm_subscription_status="SKIP"
-    olm_subscription_message="Version matches expected - no OLM check needed"
+    olm_subscription_message="No OLM subscription found"
     resolution_failed="false"
     resolution_failed_message=""
     orphaned_csvs=0
     orphaned_csv_names="[]"
     subscription_exists="false"
 
-    if [ "$version_check_status" != "PASS" ]; then
-        # Check if subscription exists (indicates OLM installation vs PKO)
-        subscription_check=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" 2>/dev/null)
+    # Check if subscription exists (indicates OLM installation vs PKO)
+    subscription_check=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" 2>/dev/null)
 
-        if [ $? -eq 0 ] && [ -n "$subscription_check" ]; then
-            subscription_exists="true"
-            echo "  ✓ Subscription exists (OLM installation detected)"
+    if [ $? -eq 0 ] && [ -n "$subscription_check" ]; then
+        subscription_exists="true"
+        echo "  ✓ Subscription exists (OLM installation detected)"
 
-            # Check for ResolutionFailed status
-            resolution_failed_status=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].status}' 2>/dev/null)
+        # Check for ResolutionFailed status
+        resolution_failed_status=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].status}' 2>/dev/null)
 
-            if [ "$resolution_failed_status" = "True" ]; then
-                resolution_failed="true"
-                resolution_failed_message=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].message}' 2>/dev/null | head -c 500)
+        if [ "$resolution_failed_status" = "True" ]; then
+            resolution_failed="true"
+            resolution_failed_message=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].message}' 2>/dev/null | head -c 500)
 
-                echo "  ✗ CRITICAL: Subscription has ResolutionFailed=True"
-                echo "    Error: ${resolution_failed_message:0:100}..."
+            echo "  ✗ CRITICAL: Subscription has ResolutionFailed=True"
+            echo "    Error: ${resolution_failed_message:0:100}..."
 
-                # Check for orphaned CSVs (CSVs without ownerReferences)
-                csvs=$(oc get csv.operators.coreos.com -n "$NAMESPACE" -o json 2>/dev/null | jq -r ".items[] | select(.metadata.name | contains(\"$DEPLOYMENT\"))")
+            # Check for orphaned CSVs (CSVs without ownerReferences)
+            csvs=$(oc get csv.operators.coreos.com -n "$NAMESPACE" -o json 2>/dev/null | jq -r ".items[] | select(.metadata.name | contains(\"$DEPLOYMENT\"))")
 
-                if [ -n "$csvs" ]; then
-                    orphaned_csv_list=$(echo "$csvs" | jq -r '. | select(.metadata.ownerReferences == null or (.metadata.ownerReferences | length) == 0) | .metadata.name' 2>/dev/null)
+            if [ -n "$csvs" ]; then
+                orphaned_csv_list=$(echo "$csvs" | jq -r '. | select(.metadata.ownerReferences == null or (.metadata.ownerReferences | length) == 0) | .metadata.name' 2>/dev/null)
 
-                    if [ -n "$orphaned_csv_list" ]; then
-                        orphaned_csvs=$(echo "$orphaned_csv_list" | wc -l | tr -d ' ')
-                        orphaned_csv_names=$(echo "$orphaned_csv_list" | jq -R . | jq -s . 2>/dev/null || echo "[]")
+                if [ -n "$orphaned_csv_list" ]; then
+                    orphaned_csvs=$(echo "$orphaned_csv_list" | wc -l | tr -d ' ')
+                    orphaned_csv_names=$(echo "$orphaned_csv_list" | jq -R . | jq -s . 2>/dev/null || echo "[]")
 
-                        olm_subscription_status="FAIL"
-                        olm_subscription_message="OLM subscription has ResolutionFailed; Found $orphaned_csvs orphaned CSV(s) blocking upgrade"
-                        critical_count=$((critical_count + 1))
+                    olm_subscription_status="FAIL"
+                    olm_subscription_message="OLM subscription has ResolutionFailed; Found $orphaned_csvs orphaned CSV(s) blocking upgrade"
+                    critical_count=$((critical_count + 1))
 
-                        echo "  ✗ CRITICAL: Found $orphaned_csvs orphaned CSV(s): $orphaned_csv_list"
-                    else
-                        olm_subscription_status="FAIL"
-                        olm_subscription_message="OLM subscription has ResolutionFailed but no orphaned CSVs detected"
-                        critical_count=$((critical_count + 1))
-                    fi
+                    echo "  ✗ CRITICAL: Found $orphaned_csvs orphaned CSV(s): $orphaned_csv_list"
                 else
                     olm_subscription_status="FAIL"
-                    olm_subscription_message="OLM subscription has ResolutionFailed; No CSVs found"
+                    olm_subscription_message="OLM subscription has ResolutionFailed but no orphaned CSVs detected"
                     critical_count=$((critical_count + 1))
                 fi
             else
-                olm_subscription_status="PASS"
-                olm_subscription_message="OLM subscription healthy (no ResolutionFailed)"
-                echo "  ✓ OLM subscription healthy"
+                olm_subscription_status="FAIL"
+                olm_subscription_message="OLM subscription has ResolutionFailed; No CSVs found"
+                critical_count=$((critical_count + 1))
             fi
         else
-            # No OLM subscription found - defer judgment until PKO check
-            subscription_exists="false"
-            olm_subscription_status="PENDING_PKO_CHECK"
-            olm_subscription_message="No OLM subscription found"
-            echo "  ℹ No OLM subscription found (checking PKO...)"
+            olm_subscription_status="PASS"
+            olm_subscription_message="OLM subscription healthy (no ResolutionFailed)"
+            echo "  ✓ OLM subscription healthy"
         fi
     else
-        echo "  ℹ Version matches expected - skipping OLM check"
+        # No OLM subscription found - defer judgment until PKO check
+        subscription_exists="false"
+        olm_subscription_status="PENDING_PKO_CHECK"
+        olm_subscription_message="No OLM subscription found"
+        echo "  ℹ No OLM subscription found (checking PKO...)"
     fi
 
     # Check 12: PKO (Package Operator) ClusterPackage Health
+    # Always check deployment method health regardless of version match
     echo "  Checking for PKO ClusterPackage..."
 
     pko_package_status="SKIP"
-    pko_package_message="Version matches expected - no PKO check needed"
+    pko_package_message="No PKO ClusterPackage found"
     cluster_package_exists="false"
     cluster_package_ready="unknown"
     cluster_package_phase="unknown"
@@ -2011,75 +2008,71 @@ EOF
     dual_installation="false"
     dual_installation_message=""
 
-    if [ "$version_check_status" != "PASS" ]; then
-        # Check if ClusterPackage exists (indicates PKO installation)
-        cluster_package_check=$(oc get clusterpackage "$DEPLOYMENT" 2>/dev/null)
+    # Check if ClusterPackage exists (indicates PKO installation)
+    cluster_package_check=$(oc get clusterpackage "$DEPLOYMENT" 2>/dev/null)
 
-        if [ $? -eq 0 ] && [ -n "$cluster_package_check" ]; then
-            cluster_package_exists="true"
-            echo "  ✓ ClusterPackage exists (PKO installation detected)"
+    if [ $? -eq 0 ] && [ -n "$cluster_package_check" ]; then
+        cluster_package_exists="true"
+        echo "  ✓ ClusterPackage exists (PKO installation detected)"
 
-            # Get ClusterPackage status
-            cluster_package_phase=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
-            cluster_package_ready=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "unknown")
+        # Get ClusterPackage status
+        cluster_package_phase=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
+        cluster_package_ready=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "unknown")
 
-            # Get all conditions
-            cluster_package_conditions=$(oc get clusterpackage "$DEPLOYMENT" -o json 2>/dev/null | jq -c '.status.conditions // []' 2>/dev/null || echo "[]")
+        # Get all conditions
+        cluster_package_conditions=$(oc get clusterpackage "$DEPLOYMENT" -o json 2>/dev/null | jq -c '.status.conditions // []' 2>/dev/null || echo "[]")
 
-            # Check for dual installation (CRITICAL ERROR)
-            if [ "$subscription_exists" = "true" ]; then
-                dual_installation="true"
-                dual_installation_message="CRITICAL: Both OLM Subscription and PKO ClusterPackage detected - conflicting deployment methods"
-                pko_package_status="FAIL"
-                pko_package_message="$dual_installation_message"
-                critical_count=$((critical_count + 1))
-                echo "  ✗ CRITICAL: Dual installation detected (OLM + PKO)"
-            else
-                # Check ClusterPackage health
-                if [ "$cluster_package_ready" = "True" ] && [ "$cluster_package_phase" = "Available" ]; then
-                    pko_package_status="PASS"
-                    pko_package_message="PKO ClusterPackage healthy (Ready=True, Phase=$cluster_package_phase)"
-                    echo "  ✓ PKO ClusterPackage healthy (Phase: $cluster_package_phase)"
-                elif [ "$cluster_package_ready" = "False" ]; then
-                    # Get failure reason from conditions
-                    failure_reason=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null | head -c 200)
-                    pko_package_status="FAIL"
-                    pko_package_message="PKO ClusterPackage not ready (Phase: $cluster_package_phase): $failure_reason"
-                    critical_count=$((critical_count + 1))
-                    echo "  ✗ CRITICAL: PKO ClusterPackage not ready"
-                    echo "    Phase: $cluster_package_phase"
-                    echo "    Reason: ${failure_reason:0:100}..."
-                else
-                    pko_package_status="WARN"
-                    pko_package_message="PKO ClusterPackage in unexpected state (Ready=$cluster_package_ready, Phase=$cluster_package_phase)"
-                    warning_count=$((warning_count + 1))
-                    echo "  ⚠ WARNING: PKO ClusterPackage state unclear"
-                    echo "    Ready: $cluster_package_ready"
-                    echo "    Phase: $cluster_package_phase"
-                fi
-            fi
+        # Check for dual installation (CRITICAL ERROR)
+        if [ "$subscription_exists" = "true" ]; then
+            dual_installation="true"
+            dual_installation_message="CRITICAL: Both OLM Subscription and PKO ClusterPackage detected - conflicting deployment methods"
+            pko_package_status="FAIL"
+            pko_package_message="$dual_installation_message"
+            critical_count=$((critical_count + 1))
+            echo "  ✗ CRITICAL: Dual installation detected (OLM + PKO)"
         else
-            cluster_package_exists="false"
-
-            # Check for dual installation scenario (neither or OLM only)
-            if [ "$subscription_exists" = "true" ]; then
-                pko_package_status="SKIP"
-                pko_package_message="No PKO ClusterPackage found (OLM-only installation)"
-                echo "  ℹ No PKO ClusterPackage found (OLM-only installation)"
-            else
-                # CRITICAL: Neither OLM nor PKO found - operator not deployed
+            # Check ClusterPackage health
+            if [ "$cluster_package_ready" = "True" ] && [ "$cluster_package_phase" = "Available" ]; then
+                pko_package_status="PASS"
+                pko_package_message="PKO ClusterPackage healthy (Ready=True, Phase=$cluster_package_phase)"
+                echo "  ✓ PKO ClusterPackage healthy (Phase: $cluster_package_phase)"
+            elif [ "$cluster_package_ready" = "False" ]; then
+                # Get failure reason from conditions
+                failure_reason=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null | head -c 200)
                 pko_package_status="FAIL"
-                pko_package_message="CRITICAL: No OLM Subscription or PKO ClusterPackage found - operator not deployed"
+                pko_package_message="PKO ClusterPackage not ready (Phase: $cluster_package_phase): $failure_reason"
                 critical_count=$((critical_count + 1))
-                echo "  ✗ CRITICAL: No OLM or PKO artifacts found - operator not deployed"
-
-                # Update OLM check status as well (since neither exists)
-                olm_subscription_status="FAIL"
-                olm_subscription_message="CRITICAL: No OLM Subscription or PKO ClusterPackage found - operator not deployed"
+                echo "  ✗ CRITICAL: PKO ClusterPackage not ready"
+                echo "    Phase: $cluster_package_phase"
+                echo "    Reason: ${failure_reason:0:100}..."
+            else
+                pko_package_status="WARN"
+                pko_package_message="PKO ClusterPackage in unexpected state (Ready=$cluster_package_ready, Phase=$cluster_package_phase)"
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ WARNING: PKO ClusterPackage state unclear"
+                echo "    Ready: $cluster_package_ready"
+                echo "    Phase: $cluster_package_phase"
             fi
         fi
     else
-        echo "  ℹ Version matches expected - skipping PKO check"
+        cluster_package_exists="false"
+
+        # Check for dual installation scenario (neither or OLM only)
+        if [ "$subscription_exists" = "true" ]; then
+            pko_package_status="SKIP"
+            pko_package_message="No PKO ClusterPackage found (OLM-only installation)"
+            echo "  ℹ No PKO ClusterPackage found (OLM-only installation)"
+        else
+            # CRITICAL: Neither OLM nor PKO found - operator not deployed
+            pko_package_status="FAIL"
+            pko_package_message="CRITICAL: No OLM Subscription or PKO ClusterPackage found - operator not deployed"
+            critical_count=$((critical_count + 1))
+            echo "  ✗ CRITICAL: No OLM or PKO artifacts found - operator not deployed"
+
+            # Update OLM check status as well (since neither exists)
+            olm_subscription_status="FAIL"
+            olm_subscription_message="CRITICAL: No OLM Subscription or PKO ClusterPackage found - operator not deployed"
+        fi
     fi
 
     # Finalize OLM check status if it was pending PKO check
