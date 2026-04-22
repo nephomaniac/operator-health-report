@@ -1728,11 +1728,12 @@ EOF
 EOF
 )")
 
-    # Check 8: AlertManager Log Analysis
+    # Check 8: AlertManager Log Analysis (with smart DNS warning filtering)
     echo "  Analyzing AlertManager logs..."
 
     alertmanager_log_errors=0
     alertmanager_log_warnings=0
+    alertmanager_dns_warnings_filtered=0
     alertmanager_log_status="PASS"
     alertmanager_log_message="No errors or warnings in AlertManager logs"
     am_error_samples=()
@@ -1742,16 +1743,62 @@ EOF
     alertmanager_pod_names=$(echo "$alertmanager_pods" | jq -r '.items[].metadata.name' 2>/dev/null)
 
     if [ -n "$alertmanager_pod_names" ]; then
+        # Determine if ANY AlertManager pod is in startup/restart grace period
+        # DNS warnings occur on ALL pods when ANY peer pod is starting/restarting
+        # because they're trying to form a cluster and DNS entries aren't ready yet
+        cluster_in_grace_period="false"
+        youngest_pod_age=999999
+
+        for am_pod in $alertmanager_pod_names; do
+            pod_created=$(echo "$alertmanager_pods" | jq -r ".items[] | select(.metadata.name==\"$am_pod\") | .metadata.creationTimestamp" 2>/dev/null)
+
+            if [ -n "$pod_created" ]; then
+                created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "${pod_created%.*}Z" "+%s" 2>/dev/null || echo 0)
+                current_epoch=$(date -u +%s)
+                if [ "$created_epoch" -gt 0 ]; then
+                    pod_age_seconds=$((current_epoch - created_epoch))
+                    if [ "$pod_age_seconds" -lt "$youngest_pod_age" ]; then
+                        youngest_pod_age=$pod_age_seconds
+                    fi
+
+                    # If ANY pod is younger than 5 minutes, the whole cluster is in grace period
+                    if [ "$pod_age_seconds" -lt 300 ]; then
+                        cluster_in_grace_period="true"
+                        debug_log "Cluster in grace period: $am_pod is ${pod_age_seconds}s old"
+                    fi
+                fi
+            fi
+        done
+
+        debug_log "AlertManager cluster grace period: $cluster_in_grace_period (youngest pod: ${youngest_pod_age}s)"
+
         # Count errors and warnings in AlertManager logs (last 1000 lines per pod)
-        # Also collect sample log lines
+        # Filter out expected DNS warnings during cluster formation
         for am_pod in $alertmanager_pod_names; do
             pod_logs=$(oc logs -n "$NAMESPACE" "$am_pod" --tail=1000 2>/dev/null)
 
+            # Count all errors (no filtering)
             pod_errors=$(echo "$pod_logs" | grep -i "level=error" | wc -l | tr -d ' ')
-            pod_warnings=$(echo "$pod_logs" | grep -i "level=warn" | wc -l | tr -d ' ')
-
             alertmanager_log_errors=$((alertmanager_log_errors + pod_errors))
-            alertmanager_log_warnings=$((alertmanager_log_warnings + pod_warnings))
+
+            # Count warnings, filtering out DNS lookup failures during cluster formation
+            # DNS warnings like "Failed to resolve alertmanager-main-X:9094: no such host"
+            # are expected when ANY pod in the cluster is starting/restarting
+            pod_all_warnings=$(echo "$pod_logs" | grep -i "level=warn" | wc -l | tr -d ' ')
+            pod_dns_warnings=$(echo "$pod_logs" | grep -i "level=warn.*\(no such host\|Failed to resolve.*alertmanager.*:9094\)" | wc -l | tr -d ' ')
+
+            # Filter DNS warnings if ANY pod in cluster is in grace period
+            if [ "$cluster_in_grace_period" = "true" ] && [ "$pod_dns_warnings" -gt 0 ]; then
+                # Cluster is forming - DNS warnings are expected on all pods
+                pod_actionable_warnings=$((pod_all_warnings - pod_dns_warnings))
+                alertmanager_dns_warnings_filtered=$((alertmanager_dns_warnings_filtered + pod_dns_warnings))
+                debug_log "Filtered $pod_dns_warnings DNS warnings from $am_pod (cluster forming)"
+            else
+                # Cluster is stable - all warnings are actionable
+                pod_actionable_warnings=$pod_all_warnings
+            fi
+
+            alertmanager_log_warnings=$((alertmanager_log_warnings + pod_actionable_warnings))
 
             # Collect sample error messages (first 5 total across all pods)
             if [ "$pod_errors" -gt 0 ] && [ ${#am_error_samples[@]} -lt 5 ]; then
@@ -1762,26 +1809,50 @@ EOF
                 done < <(echo "$pod_logs" | grep -i "level=error" | head -5)
             fi
 
-            # Collect sample warning messages (first 5 total across all pods)
-            if [ "$pod_warnings" -gt 0 ] && [ ${#am_warning_samples[@]} -lt 5 ]; then
+            # Collect sample warning messages (first 5 total across all pods, excluding filtered DNS warnings)
+            if [ "$pod_actionable_warnings" -gt 0 ] && [ ${#am_warning_samples[@]} -lt 5 ]; then
+                # Get warnings excluding DNS lookup failures
+                warnings_to_sample=$(echo "$pod_logs" | grep -i "level=warn" | grep -v -i "no such host\|Failed to resolve.*alertmanager.*:9094" | head -5)
+                if [ -z "$warnings_to_sample" ]; then
+                    # If all warnings were DNS-related, sample those if not in grace period
+                    if [ "$in_grace_period" != "true" ]; then
+                        warnings_to_sample=$(echo "$pod_logs" | grep -i "level=warn" | head -5)
+                    fi
+                fi
+
                 while IFS= read -r line; do
-                    if [ ${#am_warning_samples[@]} -lt 5 ]; then
+                    if [ ${#am_warning_samples[@]} -lt 5 ] && [ -n "$line" ]; then
                         am_warning_samples+=("[$am_pod] $line")
                     fi
-                done < <(echo "$pod_logs" | grep -i "level=warn" | head -5)
+                done <<< "$warnings_to_sample"
             fi
         done
 
+        # Build status message
         if [ "$alertmanager_log_errors" -gt 0 ]; then
             alertmanager_log_status="WARN"
-            alertmanager_log_message="Found $alertmanager_log_errors errors and $alertmanager_log_warnings warnings in AlertManager logs"
+            if [ "$alertmanager_dns_warnings_filtered" -gt 0 ]; then
+                alertmanager_log_message="Found $alertmanager_log_errors errors and $alertmanager_log_warnings warnings in AlertManager logs ($alertmanager_dns_warnings_filtered DNS warnings filtered)"
+                echo "  ⚠ WARNING: AlertManager has $alertmanager_log_errors errors and $alertmanager_log_warnings warnings in logs (filtered $alertmanager_dns_warnings_filtered DNS warnings)"
+            else
+                alertmanager_log_message="Found $alertmanager_log_errors errors and $alertmanager_log_warnings warnings in AlertManager logs"
+                echo "  ⚠ WARNING: AlertManager has $alertmanager_log_errors errors and $alertmanager_log_warnings warnings in logs"
+            fi
             warning_count=$((warning_count + 1))
-            echo "  ⚠ WARNING: AlertManager has $alertmanager_log_errors errors and $alertmanager_log_warnings warnings in logs"
         elif [ "$alertmanager_log_warnings" -gt 0 ]; then
             alertmanager_log_status="WARN"
-            alertmanager_log_message="Found $alertmanager_log_warnings warnings in AlertManager logs (0 errors)"
+            if [ "$alertmanager_dns_warnings_filtered" -gt 0 ]; then
+                alertmanager_log_message="Found $alertmanager_log_warnings warnings in AlertManager logs ($alertmanager_dns_warnings_filtered DNS warnings filtered, 0 errors)"
+            else
+                alertmanager_log_message="Found $alertmanager_log_warnings warnings in AlertManager logs (0 errors)"
+            fi
             warning_count=$((warning_count + 1))
             echo "  ⚠ WARNING: AlertManager has $alertmanager_log_warnings warnings in logs (0 errors)"
+        elif [ "$alertmanager_dns_warnings_filtered" -gt 0 ]; then
+            # All warnings were filtered DNS warnings
+            alertmanager_log_status="PASS"
+            alertmanager_log_message="AlertManager logs clean (filtered $alertmanager_dns_warnings_filtered expected DNS warnings during startup/restart)"
+            echo "  ✓ AlertManager logs clean (filtered $alertmanager_dns_warnings_filtered expected DNS warnings)"
         else
             echo "  ✓ AlertManager logs clean (no errors or warnings)"
         fi
@@ -1811,6 +1882,7 @@ EOF
   "details": {
     "error_count": $alertmanager_log_errors,
     "warning_count": $alertmanager_log_warnings,
+    "dns_warnings_filtered": $alertmanager_dns_warnings_filtered,
     "log_lines_checked": 1000,
     "error_samples": $am_error_samples_json,
     "warning_samples": $am_warning_samples_json
