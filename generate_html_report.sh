@@ -270,10 +270,14 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .cluster-header h2 { color: #667eea; margin-bottom: 15px; }
         .cluster-meta {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 15px;
         }
-        .meta-item { display: flex; flex-direction: column; }
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+            min-width: 0; /* Allow flex items to shrink below content size */
+        }
         .meta-label {
             font-size: 0.85em;
             color: #666;
@@ -281,7 +285,13 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             letter-spacing: 0.5px;
             margin-bottom: 3px;
         }
-        .meta-value { font-size: 1.05em; font-weight: 600; color: #333; }
+        .meta-value {
+            font-size: 1.05em;
+            font-weight: 600;
+            color: #333;
+            word-break: break-word; /* Break long strings like cluster IDs */
+            overflow-wrap: break-word;
+        }
         .health-summary {
             display: flex;
             gap: 20px;
