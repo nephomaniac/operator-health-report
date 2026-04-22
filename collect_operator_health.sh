@@ -2015,12 +2015,17 @@ EOF
         cluster_package_exists="true"
         echo "  ✓ ClusterPackage exists (PKO installation detected)"
 
-        # Get ClusterPackage status
-        cluster_package_phase=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.phase}' 2>/dev/null || echo "unknown")
-        cluster_package_ready=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "unknown")
+        # Get ClusterPackage status conditions (PKO uses Available/Progressing/Unpacked, not Ready/Phase)
+        cluster_package_available=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "unknown")
+        cluster_package_progressing=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null || echo "unknown")
+        cluster_package_unpacked=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].status}' 2>/dev/null || echo "unknown")
 
         # Get all conditions
         cluster_package_conditions=$(oc get clusterpackage "$DEPLOYMENT" -o json 2>/dev/null | jq -c '.status.conditions // []' 2>/dev/null || echo "[]")
+
+        # Store legacy field names for JSON output compatibility
+        cluster_package_ready="$cluster_package_available"  # Map Available to ready for backwards compatibility
+        cluster_package_phase="N/A"  # PKO doesn't use phase field
 
         # Check for dual installation (CRITICAL ERROR)
         if [ "$subscription_exists" = "true" ]; then
@@ -2032,26 +2037,44 @@ EOF
             echo "  ✗ CRITICAL: Dual installation detected (OLM + PKO)"
         else
             # Check ClusterPackage health
-            if [ "$cluster_package_ready" = "True" ] && [ "$cluster_package_phase" = "Available" ]; then
+            # Healthy state: Available=True, Progressing=False (idle), Unpacked=True
+            if [ "$cluster_package_available" = "True" ] && [ "$cluster_package_progressing" = "False" ] && [ "$cluster_package_unpacked" = "True" ]; then
                 pko_package_status="PASS"
-                pko_package_message="PKO ClusterPackage healthy (Ready=True, Phase=$cluster_package_phase)"
-                echo "  ✓ PKO ClusterPackage healthy (Phase: $cluster_package_phase)"
-            elif [ "$cluster_package_ready" = "False" ]; then
-                # Get failure reason from conditions
-                failure_reason=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null | head -c 200)
+                pko_package_message="PKO ClusterPackage healthy (Available=True, Progressing=False, Unpacked=True)"
+                echo "  ✓ PKO ClusterPackage healthy (Available, not progressing, unpacked)"
+            elif [ "$cluster_package_available" = "False" ]; then
+                # Get failure reason from Available condition
+                failure_reason=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}' 2>/dev/null | head -c 200)
                 pko_package_status="FAIL"
-                pko_package_message="PKO ClusterPackage not ready (Phase: $cluster_package_phase): $failure_reason"
+                pko_package_message="PKO ClusterPackage not available: $failure_reason"
                 critical_count=$((critical_count + 1))
-                echo "  ✗ CRITICAL: PKO ClusterPackage not ready"
-                echo "    Phase: $cluster_package_phase"
+                echo "  ✗ CRITICAL: PKO ClusterPackage not available"
+                echo "    Available: $cluster_package_available"
                 echo "    Reason: ${failure_reason:0:100}..."
+            elif [ "$cluster_package_progressing" = "True" ]; then
+                # Package is updating/progressing
+                pko_package_status="WARN"
+                pko_package_message="PKO ClusterPackage is progressing (update in progress)"
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ WARNING: PKO ClusterPackage update in progress"
+                echo "    Progressing: $cluster_package_progressing"
+            elif [ "$cluster_package_unpacked" = "False" ]; then
+                # Package not unpacked
+                unpack_reason=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].message}' 2>/dev/null | head -c 200)
+                pko_package_status="FAIL"
+                pko_package_message="PKO ClusterPackage not unpacked: $unpack_reason"
+                critical_count=$((critical_count + 1))
+                echo "  ✗ CRITICAL: PKO ClusterPackage not unpacked"
+                echo "    Unpacked: $cluster_package_unpacked"
+                echo "    Reason: ${unpack_reason:0:100}..."
             else
                 pko_package_status="WARN"
-                pko_package_message="PKO ClusterPackage in unexpected state (Ready=$cluster_package_ready, Phase=$cluster_package_phase)"
+                pko_package_message="PKO ClusterPackage in unexpected state (Available=$cluster_package_available, Progressing=$cluster_package_progressing, Unpacked=$cluster_package_unpacked)"
                 warning_count=$((warning_count + 1))
                 echo "  ⚠ WARNING: PKO ClusterPackage state unclear"
-                echo "    Ready: $cluster_package_ready"
-                echo "    Phase: $cluster_package_phase"
+                echo "    Available: $cluster_package_available"
+                echo "    Progressing: $cluster_package_progressing"
+                echo "    Unpacked: $cluster_package_unpacked"
             fi
         fi
     else
