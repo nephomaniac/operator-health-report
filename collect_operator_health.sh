@@ -35,6 +35,11 @@ detect_ocm_environment() {
 # Get OCM environment
 OCM_ENV=$(detect_ocm_environment)
 
+# Capture script version (git commit SHA of operator-health-report repo)
+# This allows regenerating HTML from JSON by checking out the matching commit
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_VERSION=$(cd "$SCRIPT_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
 # Default values
 NAMESPACE="openshift-monitoring"
 DEPLOYMENT="configure-alertmanager-operator"
@@ -44,6 +49,16 @@ CLUSTER_NAME=""
 CLUSTER_VERSION=""
 REASON=""
 OPERATOR_NAME=""
+
+# Cache for image tag to SHA resolution (to avoid repeated registry queries)
+declare -A image_sha_cache
+
+# Check if skopeo is available for image SHA resolution
+SKOPEO_AVAILABLE=false
+SKOPEO_WARNING_SHOWN=false
+if command -v skopeo &>/dev/null; then
+    SKOPEO_AVAILABLE=true
+fi
 
 # Function to discover Hive cluster managing this service cluster via OCM
 # Returns the SAAS target name (e.g., "camo-<hive-cluster-name>")
@@ -577,12 +592,33 @@ if [ -n "$canonical_version" ]; then
     version_match=false
     match_method=""
 
-    # Extract image SHA from current operator image (if using SHA reference)
+    # Extract image SHA from current operator image
     current_image_sha=""
     current_image_sha_short=""
     if [[ "$operator_image" == *"@sha256:"* ]]; then
+        # Image already uses SHA reference - extract it directly
         current_image_sha=$(echo "$operator_image" | grep -oE 'sha256:[a-f0-9]{64}' | head -1)
         current_image_sha_short=$(echo "$current_image_sha" | cut -c8-19)  # First 12 chars of SHA
+    elif [ -n "$operator_image" ] && [ "$SKOPEO_AVAILABLE" = true ]; then
+        # Image uses tag reference - resolve to SHA via registry (with caching)
+        if [ -n "${image_sha_cache[$operator_image]:-}" ]; then
+            # Use cached SHA
+            current_image_sha="${image_sha_cache[$operator_image]}"
+            current_image_sha_short=$(echo "$current_image_sha" | cut -c8-19)
+        else
+            # Query registry and cache result
+            echo "  Resolving tag to SHA: $operator_image"
+            resolved_sha=$(skopeo inspect --no-tags "docker://${operator_image}" 2>/dev/null | jq -r '.Digest // empty' 2>/dev/null)
+            if [ -n "$resolved_sha" ] && [ "$resolved_sha" != "null" ]; then
+                image_sha_cache[$operator_image]="$resolved_sha"
+                current_image_sha="$resolved_sha"
+                current_image_sha_short=$(echo "$current_image_sha" | cut -c8-19)
+            fi
+        fi
+    elif [ -n "$operator_image" ] && [ "$SKOPEO_AVAILABLE" = false ] && [ "$SKOPEO_WARNING_SHOWN" = false ]; then
+        # Warn once that skopeo is not available for SHA resolution
+        echo "Warning: skopeo not installed - cannot resolve image tags to SHAs" >&2
+        SKOPEO_WARNING_SHOWN=true
     fi
 
     # Handle both full hash and short hash matching
@@ -2481,6 +2517,7 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
 
     cat << EOF
 {
+  "script_version": "$SCRIPT_VERSION",
   "cluster_id": "${health_data[cluster_id]}",
   "cluster_name": "${health_data[cluster_name]}",
   "cluster_version": "${health_data[cluster_version]}",

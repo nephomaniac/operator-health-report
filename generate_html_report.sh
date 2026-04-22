@@ -443,7 +443,7 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
     <div class="container">
         <div class="header">
             <h1>🔍 Operator Health Check Report</h1>
-            <div class="subtitle">Generated on <span id="reportDate"></span></div>
+            <div class="subtitle">Generated on <span id="reportDate"></span> | Script version: <span id="scriptVersion">unknown</span></div>
         </div>
 
         <div class="summary-overview" id="summaryOverview"></div>
@@ -479,6 +479,11 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
         let healthData = healthDataRaw;
         if (Array.isArray(healthDataRaw) && healthDataRaw.length === 1 && Array.isArray(healthDataRaw[0])) {
             healthData = healthDataRaw[0];
+        }
+
+        // Extract and display script version from first cluster's data
+        if (healthData && healthData.length > 0 && healthData[0].script_version) {
+            document.getElementById('scriptVersion').textContent = healthData[0].script_version;
         }
 
         function toggleClusterDetails(clusterIdx) {
