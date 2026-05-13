@@ -22,6 +22,8 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
 fi
 
 set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Note: NOT using set -e (exit on error) to allow graceful error handling per cluster
 
 # Flag to track if script should exit
@@ -79,6 +81,7 @@ VERSION_COMPARE=false
 CHECK_HCP_CONTROLLERS=false
 CHECK_SECRETS=false
 GENERATE_HTML=true
+HIVE_SHARD_FILTER=""
 OPERATORS_TO_COLLECT=()
 
 # Operator configurations
@@ -125,6 +128,9 @@ OPTIONS:
                                 Default: collect all supported operators (camo, rmo)
     --check-hcp-controllers     Include HyperShift infrastructure clusters (hs-mc-*, hs-sc-*)
                                 By default, these clusters are EXCLUDED from health checks
+    --hive-shard SHARD          Only process clusters managed by this Hive shard
+                                Accepts a Hive cluster name (e.g., hive-stage-01) or provision shard ID
+                                Clusters not matching the shard are skipped
     --help, -h                  Show this help message
 
 EXAMPLES:
@@ -186,9 +192,9 @@ discover_hive_target() {
     local cluster_id="$1"
     local ocm_env="$2"
 
-    # For integration environment, use PKO naming convention
+    # For integration environment, return raw name
     if [ "$ocm_env" = "integration" ]; then
-        echo "camo-pko-integration"
+        echo "pko-integration"
         return 0
     fi
 
@@ -221,8 +227,8 @@ discover_hive_target() {
         return 1
     fi
 
-    # Derive SAAS target name: camo-<hive-cluster>
-    echo "camo-${hive_cluster}"
+    # Return raw hive cluster name — target resolution happens in collect_operator_health.sh
+    echo "${hive_cluster}"
     return 0
 }
 
@@ -244,6 +250,7 @@ while [[ $# -gt 0 ]]; do
         --metrics) METRICS_CHECK=true; shift ;;
         --version-compare) VERSION_COMPARE=true; shift ;;
         --check-hcp-controllers) CHECK_HCP_CONTROLLERS=true; shift ;;
+        --hive-shard) HIVE_SHARD_FILTER="$2"; shift 2 ;;
         --oper)
             # Validate operator name
             if [[ ! " ${!OPERATOR_CONFIGS[@]} " =~ " $2 " ]]; then
@@ -344,6 +351,9 @@ elif [ "$METRICS_CHECK" = true ]; then
 elif [ "$VERSION_COMPARE" = true ]; then
     echo "Mode:        Version comparison (previous vs current)"
 fi
+if [ -n "$HIVE_SHARD_FILTER" ]; then
+    echo "Hive Shard:  $HIVE_SHARD_FILTER (clusters not matching will be skipped)"
+fi
 echo "================================================================================"
 echo ""
 
@@ -409,6 +419,7 @@ clusters=()
 declare -A cluster_names
 declare -A cluster_versions
 declare -A cluster_creation_dates
+declare -A cluster_hypershift
 
 # Cache for Hive targets to avoid repeated OCM queries
 # Key: cluster_id, Value: discovered target name (e.g., "camo-<hive-name>")
@@ -454,18 +465,20 @@ if [ -n "$CLUSTER_LIST" ]; then
 
         if [ -n "$batch_data" ]; then
             # Parse batch results
-            while IFS=$'\t' read -r id name version created; do
+            while IFS=$'\t' read -r id name version created hypershift; do
                 if [ -n "$id" ] && [ "$id" != "null" ]; then
                     # Store by ID (for ID-based lookups)
                     cluster_names["$id"]="$name"
                     cluster_versions["$id"]="$version"
                     cluster_creation_dates["$id"]="$created"
+                    cluster_hypershift["$id"]="${hypershift:-false}"
                     # Also store by name (for name-based lookups)
                     cluster_names["$name"]="$name"
                     cluster_versions["$name"]="$version"
                     cluster_creation_dates["$name"]="$created"
+                    cluster_hypershift["$name"]="${hypershift:-false}"
                 fi
-            done < <(echo "$batch_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
+            done < <(echo "$batch_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp, (.hypershift.enabled // false)] | @tsv')
         fi
     done
 
@@ -515,7 +528,7 @@ else
                     cluster_versions["$id"]="$version"
                     cluster_creation_dates["$id"]="$created"
                 fi
-            done < <(echo "$cluster_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
+            done < <(echo "$cluster_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp, (.hypershift.enabled // false)] | @tsv')
         fi
     else
         # Fetch ROSA clusters
@@ -529,7 +542,7 @@ else
                         cluster_versions["$id"]="$version"
                         cluster_creation_dates["$id"]="$created"
                     fi
-                done < <(echo "$rosa_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
+                done < <(echo "$rosa_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp, (.hypershift.enabled // false)] | @tsv')
             fi
         fi
 
@@ -544,7 +557,7 @@ else
                         cluster_versions["$id"]="$version"
                         cluster_creation_dates["$id"]="$created"
                     fi
-                done < <(echo "$osd_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp] | @tsv')
+                done < <(echo "$osd_data" | jq -r '.items[]? | [.id, .name, .openshift_version, .creation_timestamp, (.hypershift.enabled // false)] | @tsv')
             fi
         fi
     fi
@@ -586,83 +599,33 @@ fi
 
 echo ""
 
-# Identify HCP infrastructure clusters (unless --check-hcp-controllers is set)
+# Warn about HCP infrastructure clusters when --check-hcp-controllers is not set
 if [ "$CHECK_HCP_CONTROLLERS" = false ]; then
-    echo "Identifying HyperShift infrastructure clusters..."
-
     declare -a hcp_clusters=()
-    declare -a workload_clusters=()
+    hcp_count=0
 
     for cluster_id in "${clusters[@]}"; do
-        # Get cluster name from batch-fetched metadata
         cluster_name="${cluster_names[$cluster_id]:-unknown}"
-
-        # Check if HCP infrastructure cluster (management or service cluster)
         if [[ "$cluster_name" == hs-mc-* ]] || [[ "$cluster_name" == hs-sc-* ]]; then
-            hcp_clusters+=("$cluster_id:$cluster_name")
-        else
-            workload_clusters+=("$cluster_id")
+            hcp_clusters+=("$cluster_name")
+            ((hcp_count++)) || true
         fi
     done
 
-    # Display summary
-    echo ""
-    echo "================================================================================"
-    echo "CLUSTER FILTERING SUMMARY"
-    echo "================================================================================"
-    echo "Total clusters in list:           $total_clusters"
-    echo "HCP infrastructure clusters:      ${#hcp_clusters[@]} (will be EXCLUDED)"
-    echo "ROSA Classic/OSD clusters:        ${#workload_clusters[@]} (will be checked)"
-    echo "================================================================================"
-    echo ""
-
-    # Show which clusters will be excluded
-    if [ ${#hcp_clusters[@]} -gt 0 ]; then
+    if [ $hcp_count -gt 0 ]; then
         echo ""
-        echo "The following HyperShift infrastructure clusters will be EXCLUDED:"
-        for hcp_entry in "${hcp_clusters[@]}"; do
-            cluster_name="${hcp_entry#*:}"
-            echo "  - $cluster_name"
-        done
-        echo ""
-        echo "These clusters may run different CAMO versions for HCP control plane management."
-        echo "Use --check-hcp-controllers flag to include them in health checks."
-    fi
-
-    # Check if any clusters remain
-    if [ ${#workload_clusters[@]} -eq 0 ]; then
-        echo "ERROR: No workload clusters to check after filtering HCP infrastructure clusters."
-        echo "Use --check-hcp-controllers to include HCP infrastructure clusters."
-        exit 1
-    fi
-
-    # Prompt user to continue ONLY if HCP clusters were excluded (only in interactive mode)
-    if [ ${#hcp_clusters[@]} -gt 0 ]; then
         echo "================================================================================"
-        if [ -t 0 ]; then
-            # Interactive mode - prompt for confirmation
-            read -p "Continue with health checks on ${#workload_clusters[@]} cluster(s)? (y/n): " user_confirm
-            echo "================================================================================"
-
-            if [ "$user_confirm" != "y" ] && [ "$user_confirm" != "Y" ]; then
-                echo ""
-                echo "Health check cancelled by user."
-                exit 0
-            fi
-        else
-            # Non-interactive mode - auto-continue
-            echo "Non-interactive mode: Proceeding with health checks on ${#workload_clusters[@]} cluster(s)..."
-            echo "================================================================================"
-        fi
+        echo "WARNING: $hcp_count HCP infrastructure cluster(s) detected in the cluster list"
+        echo "================================================================================"
+        echo "These clusters (hs-mc-*/hs-sc-*) may run different CAMO versions for HCP"
+        echo "control plane management. Use --check-hcp-controllers to suppress this warning."
+        echo ""
+        for name in "${hcp_clusters[@]}"; do
+            echo "  - $name"
+        done
+        echo "================================================================================"
+        echo ""
     fi
-
-    # Update clusters array to only include workload clusters
-    clusters=("${workload_clusters[@]}")
-    total_clusters=${#clusters[@]}
-
-    echo ""
-    echo "Proceeding with health checks on $total_clusters cluster(s)..."
-    echo ""
 fi
 
 # Initialize output file with header
@@ -708,6 +671,38 @@ for i in "${!clusters[@]}"; do
     cluster_version="${cluster_versions[$cluster_id]:-unknown}"
     cluster_created="${cluster_creation_dates[$cluster_id]:-unknown}"
 
+    # Filter by Hive shard if --hive-shard was specified
+    if [ -n "$HIVE_SHARD_FILTER" ]; then
+        echo "Checking provision shard for cluster $cluster_id..."
+        shard_data=$(ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/provision_shard" 2>/dev/null)
+        shard_server=$(echo "$shard_data" | jq -r '.hive_config.server // ""' 2>/dev/null)
+        shard_id=$(echo "$shard_data" | jq -r '.id // ""' 2>/dev/null)
+
+        # Cache the hive shard name from this early lookup
+        if [ -n "$shard_server" ]; then
+            hive_name=$(echo "$shard_server" | sed -n 's|https://api\.\([^.]*\)\..*|\1|p')
+            hive_target_cache[$cluster_id]="${hive_name}"
+        fi
+
+        if [[ "$shard_server" == *"$HIVE_SHARD_FILTER"* ]] || [[ "$shard_id" == "$HIVE_SHARD_FILTER" ]]; then
+            echo "  ✓ Matches hive shard: $HIVE_SHARD_FILTER (server: $shard_server)"
+        else
+            echo "  ✗ Shard mismatch (got: $shard_server), skipping..."
+            ((skipped++)) || true
+            echo ""
+            continue
+        fi
+    fi
+
+    # Skip HCP guest clusters (MC and SC clusters are still checked)
+    is_hypershift="${cluster_hypershift[$cluster_id]:-false}"
+    if [ "$is_hypershift" = "true" ] && [[ "$cluster_name" != hs-mc-* ]] && [[ "$cluster_name" != hs-sc-* ]]; then
+        echo "  ✗ Skipping HCP guest cluster (operators managed at MC/SC level)"
+        ((skipped++)) || true
+        echo ""
+        continue
+    fi
+
     # Logout from any previous session to ensure clean state
     echo "Logging out from any previous session..."
     ocm backplane logout &> /dev/null || true
@@ -738,6 +733,8 @@ for i in "${!clusters[@]}"; do
 {
   "cluster_id": "$cluster_id",
   "cluster_name": "$cluster_name",
+  "cluster_type": "$(case "$cluster_name" in hs-mc-*) echo "management_cluster" ;; hs-sc-*) echo "service_cluster" ;; *) echo "standard" ;; esac)",
+  "hive_shard": "${hive_target_cache[$cluster_id]:-unknown}",
   "cluster_version": "$cluster_version",
   "operator_name": "unknown",
   "operator_version": "unknown",
@@ -767,8 +764,10 @@ EOF
         continue
     fi
 
-    # Additional check for error messages in output even if exit code is 0
-    if echo "$login_output" | grep -iq -E "error|failed|unable|denied"; then
+    # Additional check for error-level log messages even if exit code is 0
+    # Backplane CLI uses logrus: level=error for actual failures, level=warning for non-fatal issues
+    # Warnings like "Could not fetch latest version from GitHub" are safe to ignore
+    if echo "$login_output" | grep -q 'level=error'; then
         echo ""
         echo "✗ Login to cluster $cluster_id appears to have failed (error detected in output), skipping..."
         ((skipped++)) || true
@@ -851,7 +850,7 @@ EOF
 
         if [ "$HEALTH_CHECK" = true ]; then
             # Perform health check
-            ./collect_pod_health.sh \
+            "$SCRIPT_DIR/collect_pod_health.sh" \
                 --namespace "$op_namespace" \
                 --deployment "$op_deployment" \
                 --cluster-id "$cluster_id" \
@@ -862,7 +861,7 @@ EOF
                 --operator-name "$op_name" >> "$OUTPUT_FILE"
         elif [ "$COMPREHENSIVE_HEALTH" = true ]; then
             # Perform comprehensive health check
-            health_cmd="./collect_operator_health.sh \
+            health_cmd="\"$SCRIPT_DIR/collect_operator_health.sh\" \
                 --namespace \"$op_namespace\" \
                 --deployment \"$op_deployment\" \
                 --cluster-id \"$cluster_id\" \
@@ -886,7 +885,7 @@ EOF
         elif [ "$METRICS_CHECK" = true ]; then
             # Collect Prometheus metrics (CAMO only)
             if [ "$op" = "camo" ]; then
-                ./collect_camo_metrics.sh \
+                "$SCRIPT_DIR/collect_camo_metrics.sh" \
                     --namespace "$op_namespace" \
                     --deployment "$op_deployment" \
                     --cluster-id "$cluster_id" \
@@ -899,7 +898,7 @@ EOF
             fi
         elif [ "$VERSION_COMPARE" = true ]; then
             # Collect version comparison metrics with debug logging
-            ./collect_versioned_metrics.sh \
+            "$SCRIPT_DIR/collect_versioned_metrics.sh" \
                 --namespace "$op_namespace" \
                 --deployment "$op_deployment" \
                 --cluster-id "$cluster_id" \
@@ -910,7 +909,7 @@ EOF
                 --format csv \
                 --debug >> "$OUTPUT_FILE"
         elif [ "$OP_VER_ONLY" = true ]; then
-            ./collect_pod_resource_usage.sh \
+            "$SCRIPT_DIR/collect_pod_resource_usage.sh" \
                 --namespace "$op_namespace" \
                 --deployment "$op_deployment" \
                 --cluster-id "$cluster_id" \
@@ -921,7 +920,7 @@ EOF
                 --operator-name "$op_name" \
                 --op-ver-only >> "$OUTPUT_FILE"
         else
-            ./collect_pod_resource_usage.sh \
+            "$SCRIPT_DIR/collect_pod_resource_usage.sh" \
                 --namespace "$op_namespace" \
                 --deployment "$op_deployment" \
                 --cluster-id "$cluster_id" \
@@ -962,8 +961,16 @@ done
 if [ "$COMPREHENSIVE_HEALTH" = true ] && [ "$successful" -gt 0 ]; then
     echo "Converting output to JSON array format..."
     temp_file="${OUTPUT_FILE}.tmp"
-    jq -s '.' "$OUTPUT_FILE" > "$temp_file" && mv "$temp_file" "$OUTPUT_FILE"
-    echo "✓ Converted to JSON array format"
+    # The output file contains concatenated JSON objects (multi-line, not JSONL)
+    # jq --slurp reads all top-level values and wraps them in an array
+    if jq -s '[.[] | select(type == "object" and .cluster_id != null)]' "$OUTPUT_FILE" > "$temp_file" 2>/dev/null && [ -s "$temp_file" ]; then
+        mv "$temp_file" "$OUTPUT_FILE"
+        entry_count=$(jq 'length' "$OUTPUT_FILE")
+        echo "✓ Converted to JSON array format ($entry_count entries)"
+    else
+        echo "✗ JSON conversion failed — output may need manual cleanup"
+        rm -f "$temp_file"
+    fi
     echo ""
 
     # Generate HTML report (unless --no-html was specified)
@@ -971,8 +978,8 @@ if [ "$COMPREHENSIVE_HEALTH" = true ] && [ "$successful" -gt 0 ]; then
         echo "Generating HTML report..."
         HTML_FILE="${OUTPUT_FILE%.json}.html"
 
-        if [ -x "./generate_html_report.sh" ]; then
-            if ./generate_html_report.sh "$OUTPUT_FILE" "$HTML_FILE"; then
+        if [ -x "$SCRIPT_DIR/generate_html_report.sh" ]; then
+            if "$SCRIPT_DIR/generate_html_report.sh" "$OUTPUT_FILE" "$HTML_FILE"; then
                 echo "✓ HTML report generated: $HTML_FILE"
                 echo ""
             else
