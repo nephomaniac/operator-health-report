@@ -3781,9 +3781,17 @@ version_events="[]"
 echo "Collecting operator version change history..."
 
 # Query ReplicaSet history to find version changes
+# Use deployment's own label selector to find ReplicaSets
 replicasets=$(oc get replicasets -n "$NAMESPACE" \
-    -l "app.kubernetes.io/name=$DEPLOYMENT" \
+    -l "${pod_selector:-name=$DEPLOYMENT}" \
     -o json 2>/dev/null || echo '{"items":[]}')
+
+# Fallback: try owner-based lookup if label selector found nothing
+rs_count=$(echo "$replicasets" | jq '.items | length' 2>/dev/null || echo "0")
+if [ "$rs_count" -eq 0 ]; then
+    replicasets=$(oc get replicasets -n "$NAMESPACE" -o json 2>/dev/null | \
+        jq "{items: [.items[] | select(.metadata.ownerReferences[]? | select(.name == \"$DEPLOYMENT\"))]}" 2>/dev/null || echo '{"items":[]}')
+fi
 
 # Extract version changes from ReplicaSet annotations and creation times
 version_events=$(echo "$replicasets" | jq -c '
@@ -3796,7 +3804,7 @@ version_events=$(echo "$replicasets" | jq -c '
                  split(":")[0] |
                  .[0:12]),
        revision: .metadata.annotations."deployment.kubernetes.io/revision",
-       replicas: .status.replicas
+       replicas: (.status.replicas // 0)
      }
     ] | sort_by(.timestamp)
 ' 2>/dev/null || echo "[]")
