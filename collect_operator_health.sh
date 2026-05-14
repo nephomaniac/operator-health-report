@@ -1406,14 +1406,14 @@ if [ "$pod_count" -gt 0 ]; then
         memory_query_encoded=$(printf '%s' "$memory_query" | jq -sRr @uri)
 
         memory_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
 
         # CPU query (rate over 5m)
         cpu_query="rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[5m])"
         cpu_query_encoded=$(printf '%s' "$cpu_query" | jq -sRr @uri)
 
         cpu_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query_range?query=${cpu_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${cpu_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
 
         # Compute peaks client-side from timeseries data (avoids 2 extra Thanos queries)
         peak_memory_bytes=0
@@ -1427,7 +1427,7 @@ if [ "$pod_count" -gt 0 ]; then
             probe_query="avg(probe_success{namespace=~\"openshift-route-monitor-operator|ocm-.*\"})"
             probe_query_encoded=$(printf '%s' "$probe_query" | jq -sRr @uri)
             probe_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-                wget -q -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
+                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
             if [ -n "$probe_ts_data" ] && echo "$probe_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
                 probe_timeseries=$(echo "$probe_ts_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
                 probe_ts_count=$(echo "$probe_timeseries" | jq 'length' 2>/dev/null || echo "0")
@@ -2215,7 +2215,7 @@ EOF
         local query_encoded=$(printf '%s' "$query" | jq -sRr @uri)
 
         local data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>/dev/null)
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>/dev/null)
 
         if [ -n "$data" ] && echo "$data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
             echo "$data" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null
@@ -3336,7 +3336,7 @@ EOF
     if [ "$total_crd_count" -gt 0 ]; then
         echo "  Querying probe_success metrics from Thanos..."
         probe_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query?query=$(printf 'probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}' | jq -sRr @uri)" 2>/dev/null)
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}' | jq -sRr @uri)" 2>/dev/null)
 
         if [ -n "$probe_data" ] && echo "$probe_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
             rmo_probe_total=$(echo "$probe_data" | jq '.data.result | length' 2>/dev/null || echo "0")
@@ -3546,7 +3546,7 @@ EOF
         local query="${metric_name}{namespace=\"$NAMESPACE\"}"
         local query_encoded=$(printf '%s' "$query" | jq -sRr @uri)
         ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>/dev/null
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>/dev/null
     }
 
     echo "  Querying RMO Prometheus metrics..."
