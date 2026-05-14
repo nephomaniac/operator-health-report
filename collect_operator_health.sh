@@ -1359,20 +1359,20 @@ if [ "$pod_count" -gt 0 ]; then
             pod_start_epoch=$(parse_timestamp "$pod_start_time")
             [ "$pod_start_epoch" -eq 0 ] && pod_start_epoch=$((current_time - 21600))
             pod_age_seconds=$((current_time - pod_start_epoch))
-
-            # Query up to 7 days of history (Thanos retention)
-            # Use pod-specific query for current pod, but allow longer lookback
-            # since Prometheus retains data across pod restarts via deployment labels
-            if [ $pod_age_seconds -lt 604800 ]; then
-                lookback_seconds=$pod_age_seconds
-                # Minimum 1 hour lookback for meaningful trend analysis
-                [ $lookback_seconds -lt 3600 ] && lookback_seconds=3600
-            else
-                lookback_seconds=604800  # 7 days max
-            fi
-        else
-            lookback_seconds=86400  # Default to 24 hours if we can't get pod start time
         fi
+
+        # Always look back 7 days (Thanos retention) since pod regex captures
+        # data across all pod incarnations, not just the current pod
+        lookback_seconds=604800
+        # Check if deployment is younger than 7 days — use deployment age if shorter
+        if [ -n "${deploy_created:-}" ]; then
+            deploy_age_seconds=$((current_time - $(parse_timestamp "$deploy_created")))
+            if [ "$deploy_age_seconds" -gt 0 ] && [ "$deploy_age_seconds" -lt 604800 ]; then
+                lookback_seconds=$deploy_age_seconds
+            fi
+        fi
+        # Minimum 1 hour lookback
+        [ $lookback_seconds -lt 3600 ] && lookback_seconds=3600
 
         lookback_hours=$(awk "BEGIN {printf \"%.1f\", $lookback_seconds / 3600}")
         echo "  Pod age: $(awk "BEGIN {printf \"%.1f\", $pod_age_seconds / 3600}")h, lookback: ${lookback_hours}h"
