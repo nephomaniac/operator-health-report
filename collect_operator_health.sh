@@ -288,6 +288,9 @@ if [ -z "$OPERATOR_NAME" ]; then
     OPERATOR_NAME="$DEPLOYMENT"
 fi
 
+# Package name for ClusterPackage/Subscription queries (operator name, not deployment name)
+PACKAGE_NAME="$OPERATOR_NAME"
+
 # Check if reason is provided for OCM (prompt if running interactively)
 if [ -z "$REASON" ]; then
     DEFAULT_REASON="Checking CAMO operator health"
@@ -489,7 +492,7 @@ deployment_fetch_exit_code=$?
 if [ $deployment_fetch_exit_code -ne 0 ] || [ -z "$operator_image" ]; then
     echo "  ⚠ Deployment fetch failed (backplane creds may not have synced)"
     # Try ClusterPackage as fallback (cluster-scoped, doesn't require namespace RBAC)
-    operator_image=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.spec.config.image}' 2>/dev/null)
+    operator_image=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.image}' 2>/dev/null)
     if [ -n "$operator_image" ]; then
         echo "  ✓ Recovered image from ClusterPackage: $operator_image"
     else
@@ -562,8 +565,8 @@ fi
 
 # Try ClusterPackage spec.config.version (authoritative for PKO-deployed operators)
 if [ "$operator_version" = "unknown" ]; then
-    pkg_version=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.spec.config.version}' 2>/dev/null)
-    pkg_image=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.spec.config.image}' 2>/dev/null)
+    pkg_version=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.version}' 2>/dev/null)
+    pkg_image=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.image}' 2>/dev/null)
     if [ -n "$pkg_version" ] && [ "$pkg_version" != "null" ]; then
         operator_version="$pkg_version"
         git_commit="${pkg_version:0:12}"
@@ -649,7 +652,7 @@ if [ "$operator_version" = "unknown" ]; then
 
     # Retry: try extracting version from ClusterPackage image if available
     if [ "$operator_version" = "unknown" ]; then
-        pkg_image=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}' 2>/dev/null | grep -oE '[a-f0-9]{7,12}' | head -1)
+        pkg_image=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}' 2>/dev/null | grep -oE '[a-f0-9]{7,12}' | head -1)
         if [ -z "$pkg_image" ]; then
             # Try getting image directly from the running pod
             pod_image=$(oc get pods -n "$NAMESPACE" -l "${pod_selector:-name=$DEPLOYMENT}" -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null)
@@ -2717,6 +2720,7 @@ EOF
 fi
 
 # General deployment method checks (OLM/PKO) — applies to all operators
+
     # Check 11: OLM Subscription and CSV Orphan Detection
     # Always check deployment method health regardless of version match
     echo "  Checking for OLM subscription issues..."
@@ -2730,18 +2734,18 @@ fi
     subscription_exists="false"
 
     # Check if subscription exists (indicates OLM installation vs PKO)
-    subscription_check=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" 2>/dev/null)
+    subscription_check=$(oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" 2>/dev/null)
 
     if [ $? -eq 0 ] && [ -n "$subscription_check" ]; then
         subscription_exists="true"
         echo "  ✓ Subscription exists (OLM installation detected)"
 
         # Check for ResolutionFailed status
-        resolution_failed_status=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].status}' 2>/dev/null)
+        resolution_failed_status=$(oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].status}' 2>/dev/null)
 
         if [ "$resolution_failed_status" = "True" ]; then
             resolution_failed="true"
-            resolution_failed_message=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].message}' 2>/dev/null | head -c 500)
+            resolution_failed_message=$(oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].message}' 2>/dev/null | head -c 500)
 
             echo "  ✗ CRITICAL: Subscription has ResolutionFailed=True"
             echo "    Error: ${resolution_failed_message:0:100}..."
@@ -2798,19 +2802,19 @@ fi
     dual_installation_message=""
 
     # Check if ClusterPackage exists (indicates PKO installation)
-    cluster_package_check=$(oc get clusterpackage "$DEPLOYMENT" 2>/dev/null)
+    cluster_package_check=$(oc get clusterpackage "$PACKAGE_NAME" 2>/dev/null)
 
     if [ $? -eq 0 ] && [ -n "$cluster_package_check" ]; then
         cluster_package_exists="true"
         echo "  ✓ ClusterPackage exists (PKO installation detected)"
 
         # Get ClusterPackage status conditions (PKO uses Available/Progressing/Unpacked, not Ready/Phase)
-        cluster_package_available=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "unknown")
-        cluster_package_progressing=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null || echo "unknown")
-        cluster_package_unpacked=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].status}' 2>/dev/null || echo "unknown")
+        cluster_package_available=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "unknown")
+        cluster_package_progressing=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null || echo "unknown")
+        cluster_package_unpacked=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].status}' 2>/dev/null || echo "unknown")
 
         # Get all conditions
-        cluster_package_conditions=$(oc get clusterpackage "$DEPLOYMENT" -o json 2>/dev/null | jq -c '.status.conditions // []' 2>/dev/null || echo "[]")
+        cluster_package_conditions=$(oc get clusterpackage "$PACKAGE_NAME" -o json 2>/dev/null | jq -c '.status.conditions // []' 2>/dev/null || echo "[]")
 
         # Store legacy field names for JSON output compatibility
         cluster_package_ready="$cluster_package_available"  # Map Available to ready for backwards compatibility
@@ -2833,7 +2837,7 @@ fi
                 echo "  ✓ PKO ClusterPackage healthy (Available, not progressing, unpacked)"
             elif [ "$cluster_package_available" = "False" ]; then
                 # Get failure reason from Available condition
-                failure_reason=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}' 2>/dev/null | head -c 200)
+                failure_reason=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}' 2>/dev/null | head -c 200)
                 pko_package_status="FAIL"
                 pko_package_message="PKO ClusterPackage not available: $failure_reason"
                 critical_count=$((critical_count + 1))
@@ -2841,7 +2845,7 @@ fi
                 echo "    Available: $cluster_package_available"
                 echo "    Reason: ${failure_reason:0:100}..."
             elif [ "$cluster_package_progressing" = "True" ]; then
-                progressing_msg=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].message}' 2>/dev/null)
+                progressing_msg=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].message}' 2>/dev/null)
                 if echo "$progressing_msg" | grep -q "immutable" 2>/dev/null; then
                     pko_package_status="FAIL"
                     pko_package_message="PKO ClusterPackage stuck: spec.template field is immutable"
@@ -2857,7 +2861,7 @@ fi
                 echo "    Progressing: $cluster_package_progressing"
             elif [ "$cluster_package_unpacked" = "False" ]; then
                 # Package not unpacked
-                unpack_reason=$(oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].message}' 2>/dev/null | head -c 200)
+                unpack_reason=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].message}' 2>/dev/null | head -c 200)
                 pko_package_status="FAIL"
                 pko_package_message="PKO ClusterPackage not unpacked: $unpack_reason"
                 critical_count=$((critical_count + 1))
@@ -2952,7 +2956,7 @@ EOF
     "cluster_package_phase": "$cluster_package_phase",
     "cluster_package_ready": "$cluster_package_ready",
     "cluster_package_conditions": $cluster_package_conditions,
-    "revision": $([ "$cluster_package_exists" = "true" ] && oc get clusterpackage "$DEPLOYMENT" -o jsonpath='{.status.revision}' 2>/dev/null || echo "0"),
+    "revision": $([ "$cluster_package_exists" = "true" ] && oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.revision}' 2>/dev/null || echo "0"),
     "dual_installation": $dual_installation,
     "dual_installation_message": "$dual_installation_message"
   }
@@ -3102,7 +3106,7 @@ EOF
         # Check for Subscriptions owned by this operator (should not exist on PKO-only)
         op_subs=$(oc get subscription.operators.coreos.com -n "$NAMESPACE" -l "$olm_label" --no-headers 2>/dev/null)
         if [ -z "$op_subs" ]; then
-            op_subs=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" --no-headers 2>/dev/null || true)
+            op_subs=$(oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" --no-headers 2>/dev/null || true)
         fi
         op_olm_subs=$(echo "$op_subs" | grep -c . 2>/dev/null || echo "0")
         op_olm_subs=$(echo "$op_olm_subs" | tr -d '[:space:]')
