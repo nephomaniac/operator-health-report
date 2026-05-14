@@ -607,6 +607,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'rmo_prometheusrule_health',
                 'rmo_operator_metrics',
                 'rmo_config',
+                'rmo_hcp_coverage',
                 'rmo_rhobs_integration'
             ];
 
@@ -737,6 +738,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'rmo_prometheusrule_health': 'PromRules',
                 'rmo_operator_metrics': 'RMO Metrics',
                 'rmo_config': 'RMO Config',
+                'rmo_hcp_coverage': 'HCP Coverage',
                 'rmo_rhobs_integration': 'RHOBS',
                 'log_error_analysis': 'Log Analysis'
             };
@@ -1140,6 +1142,11 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 const restartEvents = cluster.events && cluster.events.pod_restarts ? cluster.events.pod_restarts : [];
                 const versionEvents = cluster.events && cluster.events.version_changes ? cluster.events.version_changes : [];
 
+                const ns = cluster.namespace || 'unknown';
+                const deploy = cluster.deployment || 'unknown';
+                const containerName = details.container_name || deploy;
+                const podName = details.pod_name || deploy + '-*';
+
                 if (details.memory_timeseries && details.memory_timeseries.length > 0) {
                     const memoryChartDiv = document.createElement('div');
                     memoryChartDiv.className = 'chart-wrapper';
@@ -1151,6 +1158,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             <div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 60 MB</div>
                             <div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 60 - 100 MB</div>
                             <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 100 MB</div>
+                        </div>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
+                            <strong>Query:</strong> container_memory_working_set_bytes{namespace="${ns}", pod="${podName}", container="${containerName}"}
                         </div>
                     `;
                     chartsDiv.appendChild(memoryChartDiv);
@@ -1168,6 +1178,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             <div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 1.0m</div>
                             <div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 1.0m - 5.0m</div>
                             <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 5.0m</div>
+                        </div>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
+                            <strong>Query:</strong> rate(container_cpu_usage_seconds_total{namespace="${ns}", pod="${podName}", container="${containerName}"}[5m])
                         </div>
                     `;
                     chartsDiv.appendChild(cpuChartDiv);

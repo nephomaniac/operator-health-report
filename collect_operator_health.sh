@@ -1357,18 +1357,22 @@ if [ "$pod_count" -gt 0 ]; then
             [ "$pod_start_epoch" -eq 0 ] && pod_start_epoch=$((current_time - 21600))
             pod_age_seconds=$((current_time - pod_start_epoch))
 
-            # Use pod age or 24 hours, whichever is shorter
-            if [ $pod_age_seconds -lt 86400 ]; then
+            # Query up to 7 days of history (Thanos retention)
+            # Use pod-specific query for current pod, but allow longer lookback
+            # since Prometheus retains data across pod restarts via deployment labels
+            if [ $pod_age_seconds -lt 604800 ]; then
                 lookback_seconds=$pod_age_seconds
+                # Minimum 1 hour lookback for meaningful trend analysis
+                [ $lookback_seconds -lt 3600 ] && lookback_seconds=3600
             else
-                lookback_seconds=86400  # 24 hours max
+                lookback_seconds=604800  # 7 days max
             fi
         else
-            lookback_seconds=21600  # Default to 6 hours if we can't get pod start time
+            lookback_seconds=86400  # Default to 24 hours if we can't get pod start time
         fi
 
         lookback_hours=$(awk "BEGIN {printf \"%.1f\", $lookback_seconds / 3600}")
-        echo "  Pod age: ${lookback_hours}h (analyzing trends since pod started)"
+        echo "  Pod age: $(awk "BEGIN {printf \"%.1f\", $pod_age_seconds / 3600}")h, lookback: ${lookback_hours}h"
 
         start_time=$((current_time - lookback_seconds))
         end_time=$current_time
@@ -1379,15 +1383,18 @@ if [ "$pod_count" -gt 0 ]; then
 
         echo "  Querying Prometheus/Thanos for metrics..."
 
+        # Use pod regex to capture data across pod restarts/redeployments
+        pod_query_selector="pod=~\"${DEPLOYMENT}-.*\""
+
         # Memory query
-        memory_query="container_memory_working_set_bytes{namespace=\"$NAMESPACE\",pod=\"$pod_name\",container=\"$container_name\"}"
+        memory_query="container_memory_working_set_bytes{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}"
         memory_query_encoded=$(printf '%s' "$memory_query" | jq -sRr @uri)
 
         memory_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
             wget -q -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=300" 2>/dev/null)
 
         # CPU query (rate over 5m)
-        cpu_query="rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",pod=\"$pod_name\",container=\"$container_name\"}[5m])"
+        cpu_query="rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[5m])"
         cpu_query_encoded=$(printf '%s' "$cpu_query" | jq -sRr @uri)
 
         cpu_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
@@ -1398,7 +1405,7 @@ if [ "$pod_count" -gt 0 ]; then
         peak_memory_mb="0.00"
         peak_cpu_cores=0
         peak_cpu_millicores="0"
-        peak_memory_query="max_over_time(container_memory_working_set_bytes{namespace=\"$NAMESPACE\",pod=\"$pod_name\",container=\"$container_name\"}[${lookback_seconds}s])"
+        peak_memory_query="max_over_time(container_memory_working_set_bytes{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[${lookback_seconds}s])"
         peak_memory_query_encoded=$(printf '%s' "$peak_memory_query" | jq -sRr @uri)
         peak_memory_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
             wget -q -O- "http://localhost:9090/api/v1/query?query=${peak_memory_query_encoded}" 2>/dev/null)
@@ -1408,7 +1415,7 @@ if [ "$pod_count" -gt 0 ]; then
         fi
 
         # Peak CPU query (instant, max of rate over lookback window)
-        peak_cpu_query="max_over_time(rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",pod=\"$pod_name\",container=\"$container_name\"}[5m])[${lookback_seconds}s:5m])"
+        peak_cpu_query="max_over_time(rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[5m])[${lookback_seconds}s:5m])"
         peak_cpu_query_encoded=$(printf '%s' "$peak_cpu_query" | jq -sRr @uri)
         peak_cpu_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
             wget -q -O- "http://localhost:9090/api/v1/query?query=${peak_cpu_query_encoded}" 2>/dev/null)
@@ -1536,7 +1543,9 @@ health_checks+=("$(cat <<EOF
     "peak_cpu_millicores": $peak_cpu_millicores,
     "memory_timeseries": $memory_timeseries,
     "cpu_timeseries": $cpu_timeseries,
-    "lookback_hours": $lookback_hours
+    "lookback_hours": $lookback_hours,
+    "container_name": "$container_name",
+    "pod_name": "${pod_name:-unknown}"
   }
 }
 EOF
@@ -3551,7 +3560,98 @@ EOF
 EOF
 )")
 
-    # RMO Check 8: RHOBS synthetics integration
+    # RMO Check 8: HCP RouteMonitor coverage (MC clusters only)
+    if [ "$cluster_type" = "management_cluster" ]; then
+        rmo_hcp_status="PASS"
+        rmo_hcp_message=""
+        hcp_count=0
+        hcp_monitored=0
+        hcp_unmonitored=0
+        hcp_stale=0
+        hcp_unmonitored_names=""
+
+        hcp_list=$(oc get hostedcontrolplane -A -o json 2>/dev/null)
+        if [ -n "$hcp_list" ] && echo "$hcp_list" | jq -e '.items[0]' >/dev/null 2>&1; then
+            hcp_count=$(echo "$hcp_list" | jq '.items | length' 2>/dev/null || echo "0")
+            hcp_count=$(echo "$hcp_count" | tr -d '[:space:]')
+
+            if [ "$hcp_count" -gt 0 ]; then
+                echo "  Checking RouteMonitor coverage for $hcp_count HostedControlPlane(s)..."
+
+                # Get namespaces that have RouteMonitors
+                rm_namespaces=$(echo "${routemonitors:-{}}" | jq -r '[.items[]? | .metadata.namespace] | unique | .[]' 2>/dev/null)
+
+                while IFS=$'\t' read -r hcp_name hcp_ns hcp_available; do
+                    [ -z "$hcp_name" ] && continue
+                    if echo "$rm_namespaces" | grep -q "^${hcp_ns}$"; then
+                        hcp_monitored=$((hcp_monitored + 1))
+                    else
+                        hcp_unmonitored=$((hcp_unmonitored + 1))
+                        hcp_unmonitored_names="${hcp_unmonitored_names}${hcp_unmonitored_names:+, }${hcp_ns}/${hcp_name}"
+                        if [ "$hcp_available" != "True" ]; then
+                            echo "  ℹ HCP ${hcp_name} not available yet (Available=$hcp_available) — monitor may be pending"
+                        else
+                            echo "  ⚠ HCP ${hcp_name} (Available) has no RouteMonitor in ${hcp_ns}"
+                        fi
+                    fi
+                done < <(echo "$hcp_list" | jq -r '.items[] | [.metadata.name, .metadata.namespace, (.status.conditions[]? | select(.type == "Available") | .status) // "Unknown"] | @tsv' 2>/dev/null)
+
+                # Check for stale RouteMonitors (in HCP namespaces that no longer have an HCP)
+                hcp_namespaces=$(echo "$hcp_list" | jq -r '[.items[] | .metadata.namespace] | unique | .[]' 2>/dev/null)
+                if [ -n "$rm_namespaces" ]; then
+                    while IFS= read -r rm_ns; do
+                        [ -z "$rm_ns" ] && continue
+                        [[ "$rm_ns" == "openshift-route-monitor-operator" ]] && continue
+                        if ! echo "$hcp_namespaces" | grep -q "^${rm_ns}$"; then
+                            hcp_stale=$((hcp_stale + 1))
+                            echo "  ⚠ Stale RouteMonitor in ${rm_ns} (no HCP found)"
+                        fi
+                    done <<< "$rm_namespaces"
+                fi
+
+                echo "  HCP coverage: $hcp_monitored/$hcp_count monitored, $hcp_unmonitored unmonitored, $hcp_stale stale"
+
+                if [ "$hcp_unmonitored" -gt 0 ]; then
+                    rmo_hcp_status="WARNING"
+                    rmo_hcp_message="$hcp_unmonitored/$hcp_count HCP cluster(s) missing RouteMonitor coverage"
+                    warning_count=$((warning_count + 1))
+                elif [ "$hcp_stale" -gt 0 ]; then
+                    rmo_hcp_status="WARNING"
+                    rmo_hcp_message="$hcp_stale stale RouteMonitor(s) for removed HCP clusters"
+                    warning_count=$((warning_count + 1))
+                else
+                    rmo_hcp_message="All $hcp_count HCP cluster(s) have RouteMonitor coverage"
+                fi
+            else
+                rmo_hcp_status="INFO"
+                rmo_hcp_message="No HostedControlPlane resources on this MC"
+                echo "  ℹ No HCPs on this MC"
+            fi
+        else
+            rmo_hcp_status="INFO"
+            rmo_hcp_message="HostedControlPlane CRD not available"
+            echo "  ℹ HCP CRD not found"
+        fi
+
+        health_checks+=("$(cat <<EOF
+{
+  "check": "rmo_hcp_coverage",
+  "status": "$rmo_hcp_status",
+  "severity": "warning",
+  "message": "$rmo_hcp_message",
+  "details": {
+    "hcp_count": $hcp_count,
+    "monitored": $hcp_monitored,
+    "unmonitored": $hcp_unmonitored,
+    "stale_monitors": $hcp_stale,
+    "unmonitored_hcps": "$(echo "${hcp_unmonitored_names:-none}" | sed 's/"/\\"/g')"
+  }
+}
+EOF
+)")
+    fi
+
+    # RMO Check 9: RHOBS synthetics integration
     # RHOBS is enabled when HCP CRD exists or probe-api-url is configured (not limited to MC/SC)
     {
         rmo_rhobs_status="PASS"
