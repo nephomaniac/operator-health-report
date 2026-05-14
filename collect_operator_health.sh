@@ -3313,6 +3313,62 @@ EOF
 EOF
 )")
 
+    # RMO Check 3b: Probe health — verify blackbox probes are succeeding
+    rmo_probe_status="PASS"
+    rmo_probe_message=""
+    rmo_probe_total=0
+    rmo_probe_failing=0
+    rmo_probe_failing_targets=""
+
+    if [ "$total_crd_count" -gt 0 ]; then
+        echo "  Querying probe_success metrics from Thanos..."
+        probe_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+            wget -q -O- "http://localhost:9090/api/v1/query?query=$(printf 'probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}' | jq -sRr @uri)" 2>/dev/null)
+
+        if [ -n "$probe_data" ] && echo "$probe_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+            rmo_probe_total=$(echo "$probe_data" | jq '.data.result | length' 2>/dev/null || echo "0")
+            rmo_probe_total=$(echo "$rmo_probe_total" | tr -d '[:space:]')
+
+            # Find probes with success=0 (currently failing)
+            rmo_probe_failing=$(echo "$probe_data" | jq '[.data.result[] | select(.value[1] == "0")] | length' 2>/dev/null || echo "0")
+            rmo_probe_failing=$(echo "$rmo_probe_failing" | tr -d '[:space:]')
+
+            if [ "${rmo_probe_failing:-0}" -gt 0 ]; then
+                rmo_probe_failing_targets=$(echo "$probe_data" | jq -r '.data.result[] | select(.value[1] == "0") | .metric.instance // .metric.target // .metric.namespace | .[0:60]' 2>/dev/null | head -5 | tr '\n' ', ' | sed 's/,$//')
+                rmo_probe_status="WARNING"
+                rmo_probe_message="$rmo_probe_failing/$rmo_probe_total probe(s) currently failing"
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ $rmo_probe_failing/$rmo_probe_total probes failing"
+            else
+                rmo_probe_message="All $rmo_probe_total probe(s) succeeding"
+                echo "  ✓ All $rmo_probe_total probes succeeding"
+            fi
+        else
+            rmo_probe_status="INFO"
+            rmo_probe_message="No probe_success metrics found (probes may not be scraped yet)"
+            echo "  ℹ No probe_success metrics available"
+        fi
+    else
+        rmo_probe_status="SKIP"
+        rmo_probe_message="No monitors configured — no probes to check"
+        echo "  ℹ Probe check skipped (no monitors)"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "rmo_probe_health",
+  "status": "$rmo_probe_status",
+  "severity": "warning",
+  "message": "$rmo_probe_message",
+  "details": {
+    "total_probes": $rmo_probe_total,
+    "failing_probes": $rmo_probe_failing,
+    "failing_targets": "$(echo "${rmo_probe_failing_targets:-none}" | sed 's/"/\\"/g')"
+  }
+}
+EOF
+)")
+
     # RMO Check 4: ServiceMonitor validation
     # Use status.serviceMonitorRef from each monitor to verify existence directly
     # (ownerReferences are not always set, especially on coreos.com ServiceMonitors)
