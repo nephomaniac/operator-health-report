@@ -541,6 +541,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         setTimeout(() => {
                             if (chartType === 'memory') createMemoryChart(el.id, chartData, restarts, versions);
                             if (chartType === 'cpu') createCPUChart(el.id, chartData, restarts, versions);
+                            if (chartType === 'probe') createProbeChart(el.id, chartData, restarts, versions);
                         }, 50);
                     });
                 }
@@ -998,6 +999,60 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             });
         }
 
+        function createProbeChart(canvasId, data, restartEvents, versionEvents) {
+            const ctx = document.getElementById(canvasId);
+            if (!ctx) return;
+            const probeData = data.probe_timeseries || [];
+            if (probeData.length === 0) return;
+
+            const timestamps = probeData.map(point => point[0] * 1000);
+            const values = probeData.map(point => parseFloat(point[1]) * 100);
+            const annotations = {};
+
+            if (versionEvents && versionEvents.length > 0) {
+                versionEvents.forEach((event, idx) => {
+                    annotations[`version${idx}`] = {
+                        type: 'line',
+                        xMin: event.timestamp * 1000, xMax: event.timestamp * 1000,
+                        borderColor: '#ff6384', borderWidth: 2, borderDash: [5, 5],
+                        label: { content: `v${event.version}`, enabled: true, position: 'top' }
+                    };
+                });
+            }
+
+            const chartData = timestamps.map((time, idx) => ({ x: time, y: values[idx] }));
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'Probe Success Rate (%)',
+                        data: chartData,
+                        borderColor: '#28a745',
+                        backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                        tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true,
+                    plugins: {
+                        legend: { display: true, position: 'top' },
+                        tooltip: {
+                            mode: 'index', intersect: false,
+                            callbacks: {
+                                title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
+                                label: ctx => `Success: ${ctx.parsed.y.toFixed(1)}%`
+                            }
+                        },
+                        annotation: { annotations }
+                    },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
+                        y: { min: 0, max: 100, title: { display: true, text: 'Success Rate (%)' } }
+                    }
+                }
+            });
+        }
+
         function generateClusterDetails(cluster, clusterIdx) {
             const detailsDiv = document.createElement('div');
             detailsDiv.className = 'cluster-section';
@@ -1211,6 +1266,24 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         </div>
                     `;
                     chartsDiv.appendChild(cpuChartDiv);
+                }
+
+                if (details.probe_timeseries && details.probe_timeseries.length > 0) {
+                    const probeChartDiv = document.createElement('div');
+                    probeChartDiv.className = 'chart-wrapper';
+                    probeChartDiv.innerHTML = `
+                        <h3>Probe Success Rate Over Time</h3>
+                        <canvas id="probe-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="probe"
+                            data-chart-data='${JSON.stringify(details).replace(/'/g, "&#39;")}'
+                            data-restart-events='${JSON.stringify(restartEvents).replace(/'/g, "&#39;")}'
+                            data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
+                            <strong>Query:</strong> avg(probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"})
+                        </div>
+                    `;
+                    chartsDiv.appendChild(probeChartDiv);
                 }
 
                 if ((details.memory_timeseries && details.memory_timeseries.length > 0) ||

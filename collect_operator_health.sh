@@ -1427,6 +1427,20 @@ if [ "$pod_count" -gt 0 ]; then
             peak_cpu_millicores=$(awk "BEGIN {printf \"%.0f\", $peak_cpu_cores * 1000}")
         fi
 
+        # Query probe_success timeseries for RMO (blackbox exporter probes)
+        probe_timeseries="[]"
+        if [[ "$OPERATOR_NAME" == *"route-monitor"* ]]; then
+            probe_query="avg(probe_success{namespace=~\"openshift-route-monitor-operator|ocm-.*\"})"
+            probe_query_encoded=$(printf '%s' "$probe_query" | jq -sRr @uri)
+            probe_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+                wget -q -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=300" 2>/dev/null)
+            if [ -n "$probe_ts_data" ] && echo "$probe_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+                probe_timeseries=$(echo "$probe_ts_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
+                probe_ts_count=$(echo "$probe_timeseries" | jq 'length' 2>/dev/null || echo "0")
+                echo "  Probe success timeseries: $probe_ts_count data points"
+            fi
+        fi
+
         # Process memory data
         memory_timeseries="[]"
         if [ -n "$memory_data" ] && echo "$memory_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
@@ -1549,7 +1563,8 @@ health_checks+=("$(cat <<EOF
     "cpu_timeseries": $cpu_timeseries,
     "lookback_hours": $lookback_hours,
     "container_name": "$container_name",
-    "pod_name": "${pod_name:-unknown}"
+    "pod_name": "${pod_name:-unknown}",
+    "probe_timeseries": $probe_timeseries
   }
 }
 EOF
