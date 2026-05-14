@@ -1633,6 +1633,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             const operatorGroups = {};
             healthData.forEach(cluster => {
                 const op = cluster.operator_name || 'unknown';
+                if (op === 'unknown') return;
                 if (!operatorGroups[op]) operatorGroups[op] = [];
                 operatorGroups[op].push(cluster);
             });
