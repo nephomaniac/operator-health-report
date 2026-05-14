@@ -1400,20 +1400,35 @@ if [ "$pod_count" -gt 0 ]; then
 
         # Use pod regex to capture data across pod restarts/redeployments
         pod_query_selector="pod=~\"${DEPLOYMENT}-.*\""
+        query_errors=""
 
         # Memory query
         memory_query="container_memory_working_set_bytes{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}"
         memory_query_encoded=$(printf '%s' "$memory_query" | jq -sRr @uri)
 
+        memory_err=$(mktemp)
         memory_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>"$memory_err")
+        if [ $? -ne 0 ]; then
+            mem_err_msg=$(cat "$memory_err" 2>/dev/null | head -1)
+            query_errors="${query_errors}memory query failed${mem_err_msg:+ ($mem_err_msg)}, "
+            echo "  ⚠ Memory query failed: ${mem_err_msg:-timeout or connection error}"
+        fi
+        rm -f "$memory_err"
 
         # CPU query (rate over 5m)
         cpu_query="rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[5m])"
         cpu_query_encoded=$(printf '%s' "$cpu_query" | jq -sRr @uri)
 
+        cpu_err=$(mktemp)
         cpu_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${cpu_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${cpu_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>"$cpu_err")
+        if [ $? -ne 0 ]; then
+            cpu_err_msg=$(cat "$cpu_err" 2>/dev/null | head -1)
+            query_errors="${query_errors}CPU query failed${cpu_err_msg:+ ($cpu_err_msg)}, "
+            echo "  ⚠ CPU query failed: ${cpu_err_msg:-timeout or connection error}"
+        fi
+        rm -f "$cpu_err"
 
         # Compute peaks client-side from timeseries data (avoids 2 extra Thanos queries)
         peak_memory_bytes=0
@@ -1529,7 +1544,7 @@ if [ "$pod_count" -gt 0 ]; then
             warning_count=$((warning_count + 1))
         elif [ -z "$memory_data" ] && [ -z "$cpu_data" ]; then
             memory_check_status="UNKNOWN"
-            memory_message="Unable to query resource metrics from Prometheus"
+            memory_message="Unable to query resource metrics from Prometheus${query_errors:+ (${query_errors%, })}"
         else
             memory_check_status="PASS"
             memory_message="$NAMESPACE/$DEPLOYMENT (container: $container_name): CPU and memory usage stable"
@@ -1562,6 +1577,7 @@ health_checks+=("$(cat <<EOF
     "lookback_hours": $lookback_hours,
     "container_name": "$container_name",
     "pod_name": "${pod_name:-unknown}",
+    "query_errors": "$(echo "${query_errors%, }" | sed 's/"/\\"/g')",
     "probe_timeseries": $probe_timeseries
   }
 }
