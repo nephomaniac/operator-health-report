@@ -3019,6 +3019,88 @@ EOF
 EOF
 )")
 
+    # Check for ImagePullBackOff — indicates SAAS deployed before Konflux build completed
+    image_pull_status="PASS"
+    image_pull_message=""
+    waiting_pods=$(echo "${pods_json:-{}}" | jq -r '[.items[]? | select(.status.containerStatuses[]? | select(.state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")) | .metadata.name] | length' 2>/dev/null || echo "0")
+    waiting_pods=$(echo "$waiting_pods" | tr -d '[:space:]')
+
+    if [ "${waiting_pods:-0}" -gt 0 ]; then
+        image_pull_status="FAIL"
+        image_pull_message="$waiting_pods pod(s) in ImagePullBackOff — image may not exist in registry yet (Konflux build pending?)"
+        critical_count=$((critical_count + 1))
+        echo "  ✗ CRITICAL: $waiting_pods pod(s) in ImagePullBackOff"
+    else
+        image_pull_message="No ImagePullBackOff issues"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "image_pull_status",
+  "status": "$image_pull_status",
+  "severity": "critical",
+  "message": "$image_pull_message",
+  "details": {
+    "pods_waiting": ${waiting_pods:-0}
+  }
+}
+EOF
+)")
+
+    # Check for orphaned operator resources (resources exist without parent CRs)
+    # This catches incomplete PKO/OLM migration cleanup
+    orphan_check_status="PASS"
+    orphan_check_message=""
+    ns_servicemonitors=$(oc get servicemonitor -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    ns_prometheusrules=$(oc get prometheusrule -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    ns_olm_csvs=$(oc get csv -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    ns_olm_subs=$(oc get subscription.operators.coreos.com -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    ns_olm_catsrc=$(oc get catalogsource -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+
+    # On PKO-only clusters, OLM artifacts should not exist
+    pko_only=false
+    if [ "${cluster_package_exists:-false}" = "true" ] && [ "${subscription_exists:-false}" = "false" ]; then
+        pko_only=true
+    fi
+
+    orphan_details=""
+    if [ "$pko_only" = true ]; then
+        if [ "${ns_olm_csvs:-0}" -gt 0 ]; then
+            orphan_details="${orphan_details}${ns_olm_csvs} orphaned CSV(s), "
+        fi
+        if [ "${ns_olm_catsrc:-0}" -gt 0 ]; then
+            orphan_details="${orphan_details}${ns_olm_catsrc} orphaned CatalogSource(s), "
+        fi
+    fi
+
+    if [ -n "$orphan_details" ]; then
+        orphan_check_status="WARNING"
+        orphan_details="${orphan_details%, }"
+        orphan_check_message="PKO-only cluster has orphaned OLM resources: $orphan_details"
+        warning_count=$((warning_count + 1))
+        echo "  ⚠ Orphaned OLM resources on PKO cluster: $orphan_details"
+    else
+        orphan_check_message="No orphaned resources detected"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "orphaned_resources",
+  "status": "$orphan_check_status",
+  "severity": "warning",
+  "message": "$orphan_check_message",
+  "details": {
+    "pko_only": $pko_only,
+    "namespace_servicemonitors": ${ns_servicemonitors:-0},
+    "namespace_prometheusrules": ${ns_prometheusrules:-0},
+    "namespace_csvs": ${ns_olm_csvs:-0},
+    "namespace_subscriptions": ${ns_olm_subs:-0},
+    "namespace_catalogsources": ${ns_olm_catsrc:-0}
+  }
+}
+EOF
+)")
+
     # Secret-based checks (require --secrets flag)
     if [ "$CHECK_SECRETS" = true ]; then
         echo "  Running extended checks (secrets enabled)..."

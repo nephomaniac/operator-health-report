@@ -616,6 +616,8 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'camo_configmap',
                 'pagerduty_secret',
                 'pko_job_health',
+                'image_pull_status',
+                'orphaned_resources',
                 // RMO-specific checks
                 'rmo_controller_manager',
                 'rmo_blackbox_exporter',
@@ -749,6 +751,8 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'leader_election': 'Leader',
                 'namespace_status': 'Namespace',
                 'pko_job_health': 'PKO Jobs',
+                'image_pull_status': 'Image Pull',
+                'orphaned_resources': 'Orphans',
                 'rmo_controller_manager': 'RMO Controller',
                 'rmo_blackbox_exporter': 'Blackbox',
                 'rmo_routemonitor_status': 'RouteMonitors',
