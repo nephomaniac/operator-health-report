@@ -3047,40 +3047,80 @@ EOF
 EOF
 )")
 
-    # Check for orphaned operator resources (resources exist without parent CRs)
-    # This catches incomplete PKO/OLM migration cleanup
+    # Check for orphaned operator-specific OLM resources on PKO-only clusters
+    # Filter to only this operator's resources using the OLM label pattern:
+    #   operators.coreos.com/<operator-name>.<namespace>
     orphan_check_status="PASS"
     orphan_check_message=""
-    ns_servicemonitors=$(oc get servicemonitor -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    ns_prometheusrules=$(oc get prometheusrule -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    ns_olm_csvs=$(oc get csv -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    ns_olm_subs=$(oc get subscription.operators.coreos.com -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    ns_olm_catsrc=$(oc get catalogsource -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    orphan_csv_names=""
+    orphan_catsrc_names=""
+    orphan_sub_names=""
+    op_olm_csvs=0
+    op_olm_subs=0
+    op_olm_catsrc=0
 
-    # On PKO-only clusters, OLM artifacts should not exist
     pko_only=false
     if [ "${cluster_package_exists:-false}" = "true" ] && [ "${subscription_exists:-false}" = "false" ]; then
         pko_only=true
     fi
 
+    # OLM label for this operator: operators.coreos.com/<deployment>.<namespace>
+    olm_label="operators.coreos.com/${DEPLOYMENT}.${NAMESPACE}"
+    # Also check by operator name pattern in CSV/CatalogSource names
+    op_name_pattern="${OPERATOR_NAME:-$DEPLOYMENT}"
+
     orphan_details=""
     if [ "$pko_only" = true ]; then
-        if [ "${ns_olm_csvs:-0}" -gt 0 ]; then
-            orphan_details="${orphan_details}${ns_olm_csvs} orphaned CSV(s), "
+        # Check for CSVs owned by this operator (by label or name match)
+        op_csvs=$(oc get csv -n "$NAMESPACE" -l "$olm_label" --no-headers 2>/dev/null)
+        if [ -z "$op_csvs" ]; then
+            # Fallback: match by operator name in CSV name
+            op_csvs=$(oc get csv -n "$NAMESPACE" --no-headers 2>/dev/null | grep -i "$op_name_pattern" || true)
         fi
-        if [ "${ns_olm_catsrc:-0}" -gt 0 ]; then
-            orphan_details="${orphan_details}${ns_olm_catsrc} orphaned CatalogSource(s), "
+        op_olm_csvs=$(echo "$op_csvs" | grep -c . 2>/dev/null || echo "0")
+        op_olm_csvs=$(echo "$op_olm_csvs" | tr -d '[:space:]')
+
+        if [ "${op_olm_csvs:-0}" -gt 0 ]; then
+            orphan_csv_names=$(echo "$op_csvs" | awk '{print "'"$NAMESPACE"'/" $1}' | tr '\n' ', ' | sed 's/,$//')
+            orphan_details="${orphan_details}${op_olm_csvs} orphaned CSV(s): ${orphan_csv_names}; "
+        fi
+
+        # Check for CatalogSources owned by this operator
+        op_catsrc=$(oc get catalogsource -n "$NAMESPACE" --no-headers 2>/dev/null | grep -i "$op_name_pattern" || true)
+        op_olm_catsrc=$(echo "$op_catsrc" | grep -c . 2>/dev/null || echo "0")
+        op_olm_catsrc=$(echo "$op_olm_catsrc" | tr -d '[:space:]')
+
+        if [ "${op_olm_catsrc:-0}" -gt 0 ]; then
+            orphan_catsrc_names=$(echo "$op_catsrc" | awk '{print "'"$NAMESPACE"'/" $1}' | tr '\n' ', ' | sed 's/,$//')
+            orphan_details="${orphan_details}${op_olm_catsrc} orphaned CatalogSource(s): ${orphan_catsrc_names}; "
+        fi
+
+        # Check for Subscriptions owned by this operator (should not exist on PKO-only)
+        op_subs=$(oc get subscription.operators.coreos.com -n "$NAMESPACE" -l "$olm_label" --no-headers 2>/dev/null)
+        if [ -z "$op_subs" ]; then
+            op_subs=$(oc get subscription.operators.coreos.com "$DEPLOYMENT" -n "$NAMESPACE" --no-headers 2>/dev/null || true)
+        fi
+        op_olm_subs=$(echo "$op_subs" | grep -c . 2>/dev/null || echo "0")
+        op_olm_subs=$(echo "$op_olm_subs" | tr -d '[:space:]')
+
+        if [ "${op_olm_subs:-0}" -gt 0 ]; then
+            orphan_sub_names=$(echo "$op_subs" | awk '{print "'"$NAMESPACE"'/" $1}' | tr '\n' ', ' | sed 's/,$//')
+            orphan_details="${orphan_details}${op_olm_subs} orphaned Subscription(s): ${orphan_sub_names}; "
         fi
     fi
 
     if [ -n "$orphan_details" ]; then
         orphan_check_status="WARNING"
-        orphan_details="${orphan_details%, }"
-        orphan_check_message="PKO-only cluster has orphaned OLM resources: $orphan_details"
+        orphan_details="${orphan_details%; }"
+        orphan_check_message="PKO-only: orphaned OLM resources for $DEPLOYMENT — $orphan_details"
         warning_count=$((warning_count + 1))
-        echo "  ⚠ Orphaned OLM resources on PKO cluster: $orphan_details"
+        echo "  ⚠ Orphaned OLM resources for $DEPLOYMENT: $orphan_details"
     else
-        orphan_check_message="No orphaned resources detected"
+        if [ "$pko_only" = true ]; then
+            orphan_check_message="PKO-only: no orphaned OLM resources for $DEPLOYMENT"
+        else
+            orphan_check_message="Not PKO-only — orphan check not applicable"
+        fi
     fi
 
     health_checks+=("$(cat <<EOF
@@ -3091,11 +3131,13 @@ EOF
   "message": "$orphan_check_message",
   "details": {
     "pko_only": $pko_only,
-    "namespace_servicemonitors": ${ns_servicemonitors:-0},
-    "namespace_prometheusrules": ${ns_prometheusrules:-0},
-    "namespace_csvs": ${ns_olm_csvs:-0},
-    "namespace_subscriptions": ${ns_olm_subs:-0},
-    "namespace_catalogsources": ${ns_olm_catsrc:-0}
+    "olm_label": "$(echo "$olm_label" | sed 's/"/\\"/g')",
+    "operator_csvs": ${op_olm_csvs:-0},
+    "orphaned_csv_names": "$(echo "${orphan_csv_names:-none}" | sed 's/"/\\"/g')",
+    "operator_subscriptions": ${op_olm_subs:-0},
+    "orphaned_subscription_names": "$(echo "${orphan_sub_names:-none}" | sed 's/"/\\"/g')",
+    "operator_catalogsources": ${op_olm_catsrc:-0},
+    "orphaned_catalogsource_names": "$(echo "${orphan_catsrc_names:-none}" | sed 's/"/\\"/g')"
   }
 }
 EOF
