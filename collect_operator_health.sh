@@ -3316,11 +3316,22 @@ EOF
             warning_count=$((warning_count + 1))
             echo "  ⚠ No monitor CRs on $cluster_type (expected via SyncSet)"
         else
-            # Standard managed clusters — monitors deployed via Hive SyncSet
-            rmo_rm_status="WARNING"
-            rmo_rm_message="No RouteMonitor or ClusterUrlMonitor CRs found (CRDs present) — SyncSet may not have applied console/api monitors"
-            warning_count=$((warning_count + 1))
-            echo "  ⚠ CRDs present but no monitor CRs (SyncSet may be pending or paused)"
+            # Check if monitoring resources exist despite no RouteMonitor CRs
+            # SyncSet may delete CRs but leave ServiceMonitors/PrometheusRules/blackbox functional
+            orphan_sms=$(oc get servicemonitor -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            orphan_prs=$(oc get prometheusrule -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            bb_running=$(oc get deployment blackbox-exporter -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+
+            if [ "${orphan_sms:-0}" -gt 0 ] && [ "${bb_running:-0}" -gt 0 ]; then
+                rmo_rm_status="PASS"
+                rmo_rm_message="No RouteMonitor CRs but monitoring active: $orphan_sms ServiceMonitor(s), $orphan_prs PrometheusRule(s), blackbox running"
+                echo "  ✓ No RouteMonitor CRs but monitoring operational ($orphan_sms SMs, $orphan_prs PRs, blackbox up)"
+            else
+                rmo_rm_status="WARNING"
+                rmo_rm_message="No RouteMonitor CRs and monitoring resources incomplete (SMs: $orphan_sms, PRs: $orphan_prs, blackbox: ${bb_running:-0})"
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ No CRs and monitoring incomplete (SMs: $orphan_sms, PRs: $orphan_prs, blackbox: ${bb_running:-0})"
+            fi
         fi
     elif [ "$rm_errors" -gt 0 ]; then
         rmo_rm_status="WARNING"
