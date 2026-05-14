@@ -1380,6 +1380,18 @@ if [ "$pod_count" -gt 0 ]; then
         start_time=$((current_time - lookback_seconds))
         end_time=$current_time
 
+        # Scale query step to keep ~200-300 data points regardless of lookback
+        # <6h: 60s (360 pts), <24h: 300s (288 pts), <72h: 900s (288 pts), 7d: 1800s (336 pts)
+        if [ $lookback_seconds -lt 21600 ]; then
+            query_step=60
+        elif [ $lookback_seconds -lt 86400 ]; then
+            query_step=${query_step}
+        elif [ $lookback_seconds -lt 259200 ]; then
+            query_step=900
+        else
+            query_step=1800
+        fi
+
         # Query Thanos via port-forward or service
         # Try to use thanos-querier service
         thanos_url="http://thanos-querier.openshift-monitoring.svc:9091"
@@ -1394,38 +1406,20 @@ if [ "$pod_count" -gt 0 ]; then
         memory_query_encoded=$(printf '%s' "$memory_query" | jq -sRr @uri)
 
         memory_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=300" 2>/dev/null)
+            wget -q -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
 
         # CPU query (rate over 5m)
         cpu_query="rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[5m])"
         cpu_query_encoded=$(printf '%s' "$cpu_query" | jq -sRr @uri)
 
         cpu_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query_range?query=${cpu_query_encoded}&start=${start_time}&end=${end_time}&step=300" 2>/dev/null)
+            wget -q -O- "http://localhost:9090/api/v1/query_range?query=${cpu_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
 
-        # Peak memory query (instant, max over lookback window)
+        # Compute peaks client-side from timeseries data (avoids 2 extra Thanos queries)
         peak_memory_bytes=0
         peak_memory_mb="0.00"
         peak_cpu_cores=0
         peak_cpu_millicores="0"
-        peak_memory_query="max_over_time(container_memory_working_set_bytes{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[${lookback_seconds}s])"
-        peak_memory_query_encoded=$(printf '%s' "$peak_memory_query" | jq -sRr @uri)
-        peak_memory_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query?query=${peak_memory_query_encoded}" 2>/dev/null)
-        if [ -n "$peak_memory_data" ] && echo "$peak_memory_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-            peak_memory_bytes=$(echo "$peak_memory_data" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)
-            peak_memory_mb=$(awk "BEGIN {printf \"%.2f\", $peak_memory_bytes / 1048576}")
-        fi
-
-        # Peak CPU query (instant, max of rate over lookback window)
-        peak_cpu_query="max_over_time(rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[5m])[${lookback_seconds}s:5m])"
-        peak_cpu_query_encoded=$(printf '%s' "$peak_cpu_query" | jq -sRr @uri)
-        peak_cpu_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -O- "http://localhost:9090/api/v1/query?query=${peak_cpu_query_encoded}" 2>/dev/null)
-        if [ -n "$peak_cpu_data" ] && echo "$peak_cpu_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-            peak_cpu_cores=$(echo "$peak_cpu_data" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)
-            peak_cpu_millicores=$(awk "BEGIN {printf \"%.0f\", $peak_cpu_cores * 1000}")
-        fi
 
         # Query probe_success timeseries for RMO (blackbox exporter probes)
         probe_timeseries="[]"
@@ -1433,7 +1427,7 @@ if [ "$pod_count" -gt 0 ]; then
             probe_query="avg(probe_success{namespace=~\"openshift-route-monitor-operator|ocm-.*\"})"
             probe_query_encoded=$(printf '%s' "$probe_query" | jq -sRr @uri)
             probe_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-                wget -q -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=300" 2>/dev/null)
+                wget -q -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
             if [ -n "$probe_ts_data" ] && echo "$probe_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
                 probe_timeseries=$(echo "$probe_ts_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
                 probe_ts_count=$(echo "$probe_timeseries" | jq 'length' 2>/dev/null || echo "0")
@@ -1450,6 +1444,8 @@ if [ "$pod_count" -gt 0 ]; then
 
             first_memory=$(echo "$memory_timeseries" | jq -r '.[0][1] // "0"' 2>/dev/null)
             last_memory=$(echo "$memory_timeseries" | jq -r '.[-1][1] // "0"' 2>/dev/null)
+            peak_memory_bytes=$(echo "$memory_timeseries" | jq -r '[.[][1] | tonumber] | max // 0' 2>/dev/null || echo "${last_memory:-0}")
+            peak_memory_mb=$(awk "BEGIN {printf \"%.2f\", ${peak_memory_bytes:-0} / 1048576}")
 
             if [ "$first_memory" != "0" ] && [ "$last_memory" != "0" ] && [ "$first_memory" != "null" ] && [ "$last_memory" != "null" ]; then
                 # Calculate percentage increase
@@ -1487,6 +1483,8 @@ if [ "$pod_count" -gt 0 ]; then
 
             first_cpu=$(echo "$cpu_timeseries" | jq -r '.[0][1] // "0"' 2>/dev/null)
             last_cpu=$(echo "$cpu_timeseries" | jq -r '.[-1][1] // "0"' 2>/dev/null)
+            peak_cpu_cores=$(echo "$cpu_timeseries" | jq -r '[.[][1] | tonumber] | max // 0' 2>/dev/null || echo "${last_cpu:-0}")
+            peak_cpu_millicores=$(awk "BEGIN {printf \"%.0f\", ${peak_cpu_cores:-0} * 1000}")
 
             if [ "$first_cpu" != "0" ] && [ "$last_cpu" != "0" ] && [ "$first_cpu" != "null" ] && [ "$last_cpu" != "null" ]; then
                 # Calculate percentage increase
