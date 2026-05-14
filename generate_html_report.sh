@@ -1424,16 +1424,27 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             const summaryEl = document.getElementById('summaryOverview');
             if (!summaryEl || !healthData || healthData.length === 0) return;
 
+            // Count unique clusters, aggregate worst status per cluster across operators
+            const clusterStatuses = {};
+            healthData.forEach(entry => {
+                if (entry.operator_name === 'unknown') return;
+                const cid = entry.cluster_id || entry.cluster_name;
+                const status = entry.health_summary?.overall_status || 'UNKNOWN';
+                const priority = { 'CRITICAL': 4, 'NO_ACCESS': 3, 'WARNING': 2, 'HEALTHY': 1, 'UNKNOWN': 0 };
+                if (!clusterStatuses[cid] || (priority[status] || 0) > (priority[clusterStatuses[cid]] || 0)) {
+                    clusterStatuses[cid] = status;
+                }
+            });
+
             let criticalCount = 0, warningCount = 0, healthyCount = 0, noAccessCount = 0;
-            healthData.forEach(cluster => {
-                const status = cluster.health_summary?.overall_status || 'UNKNOWN';
+            Object.values(clusterStatuses).forEach(status => {
                 if (status === 'CRITICAL') criticalCount++;
                 else if (status === 'WARNING') warningCount++;
                 else if (status === 'HEALTHY') healthyCount++;
                 else if (status === 'NO_ACCESS') noAccessCount++;
             });
 
-            const totalClusters = healthData.length;
+            const totalClusters = Object.keys(clusterStatuses).length;
 
             // CVE data for the operator image (optional)
             // To enable CVE reporting, populate this object with scan results
