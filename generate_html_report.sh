@@ -1144,10 +1144,10 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     const memoryChartDiv = document.createElement('div');
                     memoryChartDiv.className = 'chart-wrapper';
                     memoryChartDiv.innerHTML = `
-                        <h3>CAMO Pod Memory Usage Over Time</h3>
+                        <h3>${cluster.operator_name || 'Operator'} Memory Usage Over Time</h3>
                         <canvas id="memory-chart-${clusterIdx}" class="chart-canvas"></canvas>
                         <div style="margin-top: 15px; padding: 12px; background: #f0f8ff; border-left: 4px solid #667eea; border-radius: 4px; font-size: 0.85em;">
-                            <strong style="color: #667eea; display: block; margin-bottom: 8px;">CAMO Pod Memory Thresholds:</strong>
+                            <strong style="color: #667eea; display: block; margin-bottom: 8px;">Memory Thresholds:</strong>
                             <div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 60 MB</div>
                             <div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 60 - 100 MB</div>
                             <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 100 MB</div>
@@ -1161,10 +1161,10 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     const cpuChartDiv = document.createElement('div');
                     cpuChartDiv.className = 'chart-wrapper';
                     cpuChartDiv.innerHTML = `
-                        <h3>CAMO Pod CPU Usage Over Time</h3>
+                        <h3>${cluster.operator_name || 'Operator'} CPU Usage Over Time</h3>
                         <canvas id="cpu-chart-${clusterIdx}" class="chart-canvas"></canvas>
                         <div style="margin-top: 15px; padding: 12px; background: #f0f8ff; border-left: 4px solid #667eea; border-radius: 4px; font-size: 0.85em;">
-                            <strong style="color: #667eea; display: block; margin-bottom: 8px;">CAMO Pod CPU Thresholds:</strong>
+                            <strong style="color: #667eea; display: block; margin-bottom: 8px;">CPU Thresholds:</strong>
                             <div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 1.0m</div>
                             <div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 1.0m - 5.0m</div>
                             <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 5.0m</div>

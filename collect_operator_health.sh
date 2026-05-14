@@ -1117,18 +1117,18 @@ fi
 # Evaluate restart status
 if [ "$max_restart_count" -gt 10 ]; then
     restart_check_status="FAIL"
-    restart_message="Excessive pod restarts detected (max: $max_restart_count)"
+    restart_message="$NAMESPACE/$DEPLOYMENT: excessive restarts ($max_restart_count)"
     critical_count=$((critical_count + 1))
-    echo "  ✗ CRITICAL: Pod has $max_restart_count restarts"
+    echo "  ✗ CRITICAL: $NAMESPACE/$DEPLOYMENT has $max_restart_count restarts"
 elif [ "$max_restart_count" -gt 5 ]; then
     restart_check_status="WARNING"
-    restart_message="High pod restart count (max: $max_restart_count)"
+    restart_message="$NAMESPACE/$DEPLOYMENT: elevated restarts ($max_restart_count)"
     warning_count=$((warning_count + 1))
-    echo "  ⚠ WARNING: Pod has $max_restart_count restarts"
+    echo "  ⚠ WARNING: $NAMESPACE/$DEPLOYMENT has $max_restart_count restarts"
 else
     restart_check_status="PASS"
-    restart_message="Pod restart count is within acceptable range"
-    echo "  ✓ Pod restart count acceptable ($max_restart_count)"
+    restart_message="$NAMESPACE/$DEPLOYMENT pod healthy ($max_restart_count restarts)"
+    echo "  ✓ $NAMESPACE/$DEPLOYMENT pod healthy ($max_restart_count restarts)"
 fi
 
 # Check pod availability
@@ -1293,8 +1293,8 @@ if [ -n "$lease_json" ] && echo "$lease_json" | jq -e '.metadata.name' >/dev/nul
     fi
 else
     lease_check_status="INFO"
-    lease_message="No lease found (operator may not use leader election)"
-    echo "  ℹ No lease found for $lease_name"
+    lease_message="No lease found for $lease_name (single-replica, leader election not required)"
+    echo "  ℹ No lease for $lease_name (single-replica deployment)"
 fi
 fi  # end of lease_check_status != SKIP
 
@@ -1509,7 +1509,7 @@ if [ "$pod_count" -gt 0 ]; then
             memory_message="Unable to query resource metrics from Prometheus"
         else
             memory_check_status="PASS"
-            memory_message="CPU and memory usage are stable"
+            memory_message="$NAMESPACE/$DEPLOYMENT (container: $container_name): CPU and memory usage stable"
         fi
     fi
 else
@@ -1638,8 +1638,8 @@ if [ "$pod_count" -gt 0 ]; then
             warning_count=$((warning_count + 1))
             echo "  ⚠ CPU usage above 80% of limit"
         elif [ "$limits_check_status" = "PASS" ]; then
-            limits_message="All resource limits and requests are set, usage within bounds"
-            echo "  ✓ Resource limits healthy"
+            limits_message="$NAMESPACE/$DEPLOYMENT: all resource limits and requests set, usage within bounds"
+            echo "  ✓ $NAMESPACE/$DEPLOYMENT: resource limits healthy"
         fi
     else
         limits_check_status="INFO"
@@ -1739,8 +1739,8 @@ if [ "$pod_count" -gt 0 ]; then
                 echo "  ⚠ WARNING: CAMO has $warning_log_count warnings in logs (0 errors)"
             else
                 log_check_status="PASS"
-                log_message="Error and warning count acceptable (0 errors, 0 warnings)"
-                echo "  ✓ Error and warning count acceptable"
+                log_message="$NAMESPACE/${pod_name:-$DEPLOYMENT}: 0 errors, 0 warnings"
+                echo "  ✓ $NAMESPACE/${pod_name:-$DEPLOYMENT}: 0 errors, 0 warnings"
             fi
         else
             log_check_status="UNKNOWN"
@@ -2036,7 +2036,7 @@ EOF
 
     # Check 4: Recent reconciliation activity with resource change validation
     # Get recent reconciliation log count
-    recent_logs=$(oc logs -n "$NAMESPACE" "deployment/$DEPLOYMENT" --since=5m --tail=10 2>/dev/null | wc -l)
+    recent_logs=$(oc logs -n "$NAMESPACE" "deployment/$DEPLOYMENT" --since=5m --tail=10 2>/dev/null | wc -l | tr -d ' ')
 
     # Get timestamp for 5 minutes ago for resource change detection
     if date --version >/dev/null 2>&1; then
@@ -3253,9 +3253,10 @@ EOF
 
     total_crd_count=$((rm_count + cum_count_detail))
     if [ "$total_crd_count" -eq 0 ]; then
-        rmo_rm_status="INFO"
-        rmo_rm_message="No RouteMonitor or ClusterUrlMonitor CRs found"
-        echo "  ℹ No monitor CRs configured"
+        rmo_rm_status="WARNING"
+        rmo_rm_message="No RouteMonitor or ClusterUrlMonitor CRs found — expected at minimum console and api monitors from SyncSet"
+        warning_count=$((warning_count + 1))
+        echo "  ⚠ No monitor CRs found (console + api expected via SyncSet)"
     elif [ "$rm_errors" -gt 0 ]; then
         rmo_rm_status="WARNING"
         rmo_rm_message="$rm_errors monitor(s) have errorStatus set"
@@ -3609,8 +3610,13 @@ EOF
             fi
         else
             rmo_rhobs_status="INFO"
-            rmo_rhobs_message="RHOBS synthetics not enabled (expected on clusters with HCP CRDs or probe-api-url configured)"
-            echo "  ℹ RHOBS not enabled (expected on HCP-hosting clusters with probe-api-url)"
+            if [ "$cluster_type" = "management_cluster" ] || [ "$cluster_type" = "service_cluster" ]; then
+                rmo_rhobs_message="RHOBS synthetics not configured on this $cluster_type (probe-api-url not set — may need configuration)"
+                echo "  ℹ RHOBS not configured on $cluster_type (probe-api-url not set)"
+            else
+                rmo_rhobs_message="RHOBS synthetics not applicable (standard cluster, no HCP workloads)"
+                echo "  ℹ RHOBS not applicable (standard cluster)"
+            fi
         fi
 
         health_checks+=("$(cat <<EOF
