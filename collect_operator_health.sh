@@ -1385,7 +1385,7 @@ if [ "$pod_count" -gt 0 ]; then
         if [ $lookback_seconds -lt 21600 ]; then
             query_step=60
         elif [ $lookback_seconds -lt 86400 ]; then
-            query_step=${query_step}
+            query_step=300
         elif [ $lookback_seconds -lt 259200 ]; then
             query_step=900
         else
