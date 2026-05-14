@@ -3598,50 +3598,96 @@ EOF
 
             if [ "$hcp_count" -gt 0 ]; then
                 echo "  Checking RouteMonitor coverage for $hcp_count HostedControlPlane(s)..."
+                hcp_expected=0
+                hcp_not_ready=0
+                hcp_deleting=0
 
                 # Get namespaces that have RouteMonitors
                 rm_namespaces=$(echo "${routemonitors:-{}}" | jq -r '[.items[]? | .metadata.namespace] | unique | .[]' 2>/dev/null)
 
-                while IFS=$'\t' read -r hcp_name hcp_ns hcp_available; do
+                # Check only-public-clusters setting to understand private cluster handling
+                rmo_public_only="${rmo_only_public:-false}"
+
+                while IFS=$'\t' read -r hcp_name hcp_ns hcp_available hcp_has_deletion hcp_phase; do
                     [ -z "$hcp_name" ] && continue
+
+                    # Classify HCP state
+                    if [ "$hcp_has_deletion" = "true" ] || [ "$hcp_phase" = "Deleting" ]; then
+                        hcp_deleting=$((hcp_deleting + 1))
+                        echo "  ℹ HCP ${hcp_name}: deleting — RouteMonitor cleanup expected"
+                        continue
+                    fi
+
+                    if [ "$hcp_available" != "True" ]; then
+                        hcp_not_ready=$((hcp_not_ready + 1))
+                        echo "  ℹ HCP ${hcp_name}: not yet Available — monitor pending (gated on 5 consecutive health checks)"
+                        continue
+                    fi
+
+                    # HCP is available and not deleting — should have a RouteMonitor
+                    hcp_expected=$((hcp_expected + 1))
                     if echo "$rm_namespaces" | grep -q "^${hcp_ns}$"; then
                         hcp_monitored=$((hcp_monitored + 1))
                     else
                         hcp_unmonitored=$((hcp_unmonitored + 1))
                         hcp_unmonitored_names="${hcp_unmonitored_names}${hcp_unmonitored_names:+, }${hcp_ns}/${hcp_name}"
-                        if [ "$hcp_available" != "True" ]; then
-                            echo "  ℹ HCP ${hcp_name} not available yet (Available=$hcp_available) — monitor may be pending"
-                        else
-                            echo "  ⚠ HCP ${hcp_name} (Available) has no RouteMonitor in ${hcp_ns}"
-                        fi
+                        echo "  ⚠ HCP ${hcp_name} (Available) has no RouteMonitor in ${hcp_ns}"
                     fi
-                done < <(echo "$hcp_list" | jq -r '.items[] | [.metadata.name, .metadata.namespace, (.status.conditions[]? | select(.type == "Available") | .status) // "Unknown"] | @tsv' 2>/dev/null)
+                done < <(echo "$hcp_list" | jq -r '.items[] | [
+                    .metadata.name,
+                    .metadata.namespace,
+                    ((.status.conditions[]? | select(.type == "Available") | .status) // "Unknown"),
+                    (if .metadata.deletionTimestamp then "true" else "false" end),
+                    ((.status.conditions[]? | select(.type == "Progressing") | .message) // "")
+                ] | @tsv' 2>/dev/null)
 
-                # Check for stale RouteMonitors (in HCP namespaces that no longer have an HCP)
+                # Check for orphaned/stale RouteMonitors
                 hcp_namespaces=$(echo "$hcp_list" | jq -r '[.items[] | .metadata.namespace] | unique | .[]' 2>/dev/null)
+                deleting_namespaces=$(echo "$hcp_list" | jq -r '[.items[] | select(.metadata.deletionTimestamp) | .metadata.namespace] | unique | .[]' 2>/dev/null)
+                hcp_orphaned=0
+
                 if [ -n "$rm_namespaces" ]; then
                     while IFS= read -r rm_ns; do
                         [ -z "$rm_ns" ] && continue
                         [[ "$rm_ns" == "openshift-route-monitor-operator" ]] && continue
                         if ! echo "$hcp_namespaces" | grep -q "^${rm_ns}$"; then
                             hcp_stale=$((hcp_stale + 1))
-                            echo "  ⚠ Stale RouteMonitor in ${rm_ns} (no HCP found)"
+                            echo "  ⚠ Orphaned RouteMonitor in ${rm_ns} (HCP namespace gone)"
+                        elif echo "$deleting_namespaces" | grep -q "^${rm_ns}$"; then
+                            hcp_orphaned=$((hcp_orphaned + 1))
+                            echo "  ℹ RouteMonitor in ${rm_ns} for deleting HCP (cleanup pending)"
                         fi
                     done <<< "$rm_namespaces"
                 fi
 
-                echo "  HCP coverage: $hcp_monitored/$hcp_count monitored, $hcp_unmonitored unmonitored, $hcp_stale stale"
+                # Check for RouteMonitors with errors
+                rm_with_errors=0
+                if [ -n "${routemonitors:-}" ]; then
+                    rm_with_errors=$(echo "$routemonitors" | jq '[.items[] | select(.metadata.namespace != "openshift-route-monitor-operator") | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null || echo "0")
+                    rm_with_errors=$(echo "$rm_with_errors" | tr -d '[:space:]')
+                    if [ "${rm_with_errors:-0}" -gt 0 ]; then
+                        echo "  ⚠ $rm_with_errors HCP RouteMonitor(s) have errors"
+                        # Print error details
+                        echo "$routemonitors" | jq -r '.items[] | select(.metadata.namespace != "openshift-route-monitor-operator") | select(.status.errorStatus != null and .status.errorStatus != "") | "    \(.metadata.namespace)/\(.metadata.name): \(.status.errorStatus[0:80])"' 2>/dev/null
+                    fi
+                fi
+
+                echo "  HCP summary: $hcp_count total, $hcp_expected expected, $hcp_monitored monitored, $hcp_not_ready not ready, $hcp_deleting deleting, $hcp_stale orphaned, $hcp_orphaned cleanup pending"
 
                 if [ "$hcp_unmonitored" -gt 0 ]; then
                     rmo_hcp_status="WARNING"
-                    rmo_hcp_message="$hcp_unmonitored/$hcp_count HCP cluster(s) missing RouteMonitor coverage"
+                    rmo_hcp_message="$hcp_unmonitored/$hcp_expected Available HCP(s) missing RouteMonitor ($hcp_not_ready not ready, $hcp_deleting deleting)"
                     warning_count=$((warning_count + 1))
                 elif [ "$hcp_stale" -gt 0 ]; then
                     rmo_hcp_status="WARNING"
-                    rmo_hcp_message="$hcp_stale stale RouteMonitor(s) for removed HCP clusters"
+                    rmo_hcp_message="$hcp_stale orphaned RouteMonitor(s) — HCP namespace no longer exists"
+                    warning_count=$((warning_count + 1))
+                elif [ "${rm_with_errors:-0}" -gt 0 ]; then
+                    rmo_hcp_status="WARNING"
+                    rmo_hcp_message="$rm_with_errors HCP RouteMonitor(s) have errors"
                     warning_count=$((warning_count + 1))
                 else
-                    rmo_hcp_message="All $hcp_count HCP cluster(s) have RouteMonitor coverage"
+                    rmo_hcp_message="$hcp_monitored/$hcp_expected Available HCP(s) monitored ($hcp_not_ready not ready, $hcp_deleting deleting)"
                 fi
             else
                 rmo_hcp_status="INFO"
@@ -3661,10 +3707,15 @@ EOF
   "severity": "warning",
   "message": "$rmo_hcp_message",
   "details": {
-    "hcp_count": $hcp_count,
-    "monitored": $hcp_monitored,
-    "unmonitored": $hcp_unmonitored,
-    "stale_monitors": $hcp_stale,
+    "hcp_total": $hcp_count,
+    "hcp_expected": $hcp_expected,
+    "hcp_monitored": $hcp_monitored,
+    "hcp_unmonitored": $hcp_unmonitored,
+    "hcp_not_ready": $hcp_not_ready,
+    "hcp_deleting": $hcp_deleting,
+    "orphaned_monitors": $hcp_stale,
+    "cleanup_pending": $hcp_orphaned,
+    "monitors_with_errors": ${rm_with_errors:-0},
     "unmonitored_hcps": "$(echo "${hcp_unmonitored_names:-none}" | sed 's/"/\\"/g')"
   }
 }
