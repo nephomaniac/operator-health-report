@@ -19,6 +19,17 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Parse ISO8601 timestamp to epoch seconds (handles both GNU and BSD date, strips fractional seconds)
+parse_timestamp() {
+    local ts="${1:-}"
+    [ -z "$ts" ] && echo "0" && return
+    local clean="${ts%%.*}"
+    [[ "$ts" == *"."* ]] && clean="${clean}Z"
+    TZ=UTC /bin/date -j -f "%Y-%m-%dT%H:%M:%SZ" "$clean" "+%s" 2>/dev/null || \
+    date -u -d "$clean" "+%s" 2>/dev/null || \
+    echo "0"
+}
+
 # SAAS refs script — prefer repo copy, fall back to home directory
 SAAS_REFS_SCRIPT=""
 if [ -f "$SCRIPT_DIR/get_app_interface_saas_refs_with_images.sh" ]; then
@@ -1154,11 +1165,13 @@ if [ "$pod_count" -gt 0 ]; then
     deploy_created=$(oc get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
 
     if [ -n "$pod_created" ]; then
-        pod_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$pod_created" "+%s" 2>/dev/null || echo "$current_ts")
+        pod_epoch=$(parse_timestamp "$pod_created")
+        [ "$pod_epoch" -eq 0 ] && pod_epoch=$current_ts
         pod_age_seconds=$((current_ts - pod_epoch))
     fi
     if [ -n "$deploy_created" ]; then
-        deploy_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$deploy_created" "+%s" 2>/dev/null || echo "$current_ts")
+        deploy_epoch=$(parse_timestamp "$deploy_created")
+        [ "$deploy_epoch" -eq 0 ] && deploy_epoch=$current_ts
         deployment_age_seconds=$((current_ts - deploy_epoch))
     fi
 
@@ -1244,8 +1257,7 @@ if [ -n "$lease_json" ] && echo "$lease_json" | jq -e '.metadata.name' >/dev/nul
 
         if [ "${pod_exists:-0}" -eq 0 ]; then
             # Check if lease is old (>24h) — likely a remnant from when leader election was enabled
-            renew_check_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "${lease_renew_time%%.*}Z" "+%s" 2>/dev/null || \
-                               date -j -f "%Y-%m-%dT%H:%M:%S" "${lease_renew_time%%.*}" "+%s" 2>/dev/null || echo "0")
+            renew_check_epoch=$(parse_timestamp "$lease_renew_time")
             current_check_ts=$(date +%s)
             lease_age_seconds=$(( current_check_ts - renew_check_epoch ))
             if [ "$renew_check_epoch" -gt 0 ] && [ "$lease_age_seconds" -gt 86400 ]; then
@@ -1260,8 +1272,7 @@ if [ -n "$lease_json" ] && echo "$lease_json" | jq -e '.metadata.name' >/dev/nul
             fi
         elif [ -n "$lease_renew_time" ]; then
             # Check if renew time is recent (within 2x lease duration)
-            renew_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$lease_renew_time" "+%s" 2>/dev/null || \
-                          date -j -f "%Y-%m-%dT%H:%M:%S" "${lease_renew_time%%.*}" "+%s" 2>/dev/null || echo "0")
+            renew_epoch=$(parse_timestamp "$lease_renew_time")
             current_ts_lease=$(date +%s)
             stale_threshold=$((lease_duration * 2))
             time_since_renew=$((current_ts_lease - renew_epoch))
@@ -1342,7 +1353,8 @@ if [ "$pod_count" -gt 0 ]; then
         current_time=$(date +%s)
 
         if [ -n "$pod_start_time" ]; then
-            pod_start_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$pod_start_time" "+%s" 2>/dev/null || echo "$((current_time - 21600))")
+            pod_start_epoch=$(parse_timestamp "$pod_start_time")
+            [ "$pod_start_epoch" -eq 0 ] && pod_start_epoch=$((current_time - 21600))
             pod_age_seconds=$((current_time - pod_start_epoch))
 
             # Use pod age or 24 hours, whichever is shorter
@@ -2400,7 +2412,7 @@ EOF
             pod_created=$(echo "$alertmanager_pods" | jq -r ".items[] | select(.metadata.name==\"$am_pod\") | .metadata.creationTimestamp" 2>/dev/null)
 
             if [ -n "$pod_created" ]; then
-                created_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "${pod_created%.*}Z" "+%s" 2>/dev/null || echo 0)
+                created_epoch=$(parse_timestamp "$pod_created")
                 current_epoch=$(date -u +%s)
                 if [ "$created_epoch" -gt 0 ]; then
                     pod_age_seconds=$((current_epoch - created_epoch))
