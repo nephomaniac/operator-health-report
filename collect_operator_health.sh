@@ -1427,11 +1427,12 @@ if [ "$pod_count" -gt 0 ]; then
         # Process memory data
         memory_timeseries="[]"
         if [ -n "$memory_data" ] && echo "$memory_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-            # Store full time series for charting
-            memory_timeseries=$(echo "$memory_data" | jq -c '.data.result[0].values // []' 2>/dev/null)
+            # Merge all result series into a single timeline (covers pod restarts/redeployments)
+            # Sort by timestamp, deduplicate, keep latest value per timestamp
+            memory_timeseries=$(echo "$memory_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
 
-            first_memory=$(echo "$memory_data" | jq -r '.data.result[0].values[0][1] // "0"' 2>/dev/null)
-            last_memory=$(echo "$memory_data" | jq -r '.data.result[0].values[-1][1] // "0"' 2>/dev/null)
+            first_memory=$(echo "$memory_timeseries" | jq -r '.[0][1] // "0"' 2>/dev/null)
+            last_memory=$(echo "$memory_timeseries" | jq -r '.[-1][1] // "0"' 2>/dev/null)
 
             if [ "$first_memory" != "0" ] && [ "$last_memory" != "0" ] && [ "$first_memory" != "null" ] && [ "$last_memory" != "null" ]; then
                 # Calculate percentage increase
@@ -1464,11 +1465,11 @@ if [ "$pod_count" -gt 0 ]; then
         # Process CPU data
         cpu_timeseries="[]"
         if [ -n "$cpu_data" ] && echo "$cpu_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-            # Store full time series for charting
-            cpu_timeseries=$(echo "$cpu_data" | jq -c '.data.result[0].values // []' 2>/dev/null)
+            # Merge all result series into a single timeline
+            cpu_timeseries=$(echo "$cpu_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
 
-            first_cpu=$(echo "$cpu_data" | jq -r '.data.result[0].values[0][1] // "0"' 2>/dev/null)
-            last_cpu=$(echo "$cpu_data" | jq -r '.data.result[0].values[-1][1] // "0"' 2>/dev/null)
+            first_cpu=$(echo "$cpu_timeseries" | jq -r '.[0][1] // "0"' 2>/dev/null)
+            last_cpu=$(echo "$cpu_timeseries" | jq -r '.[-1][1] // "0"' 2>/dev/null)
 
             if [ "$first_cpu" != "0" ] && [ "$last_cpu" != "0" ] && [ "$first_cpu" != "null" ] && [ "$last_cpu" != "null" ]; then
                 # Calculate percentage increase
