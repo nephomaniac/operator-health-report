@@ -522,12 +522,28 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             document.getElementById('scriptVersion').textContent = healthData[0].script_version;
         }
 
+        const chartsRendered = {};
         function toggleClusterDetails(clusterIdx) {
             const detailsRow = document.getElementById(`cluster-details-${clusterIdx}`);
             const mainRow = document.getElementById(`cluster-row-${clusterIdx}`);
             if (detailsRow && mainRow) {
                 detailsRow.classList.toggle('expanded');
                 mainRow.classList.toggle('expanded');
+                // Render charts on first expand (Chart.js needs visible canvas)
+                if (detailsRow.classList.contains('expanded') && !chartsRendered[clusterIdx]) {
+                    chartsRendered[clusterIdx] = true;
+                    const pendingCharts = detailsRow.querySelectorAll('[data-pending-chart]');
+                    pendingCharts.forEach(el => {
+                        const chartType = el.dataset.pendingChart;
+                        const chartData = JSON.parse(el.dataset.chartData || '{}');
+                        const restarts = JSON.parse(el.dataset.restartEvents || '[]');
+                        const versions = JSON.parse(el.dataset.versionEvents || '[]');
+                        setTimeout(() => {
+                            if (chartType === 'memory') createMemoryChart(el.id, chartData, restarts, versions);
+                            if (chartType === 'cpu') createCPUChart(el.id, chartData, restarts, versions);
+                        }, 50);
+                    });
+                }
             }
         }
 
@@ -1152,7 +1168,12 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     memoryChartDiv.className = 'chart-wrapper';
                     memoryChartDiv.innerHTML = `
                         <h3>${cluster.operator_name || 'Operator'} Memory Usage Over Time</h3>
-                        <canvas id="memory-chart-${clusterIdx}" class="chart-canvas"></canvas>
+                        <canvas id="memory-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="memory"
+                            data-chart-data='${JSON.stringify(details).replace(/'/g, "&#39;")}'
+                            data-restart-events='${JSON.stringify(restartEvents).replace(/'/g, "&#39;")}'
+                            data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
+                        ></canvas>
                         <div style="margin-top: 15px; padding: 12px; background: #f0f8ff; border-left: 4px solid #667eea; border-radius: 4px; font-size: 0.85em;">
                             <strong style="color: #667eea; display: block; margin-bottom: 8px;">Memory Thresholds:</strong>
                             <div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 60 MB</div>
@@ -1160,11 +1181,10 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 100 MB</div>
                         </div>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
-                            <strong>Query:</strong> container_memory_working_set_bytes{namespace="${ns}", pod="${podName}", container="${containerName}"}
+                            <strong>Query:</strong> container_memory_working_set_bytes{namespace="${ns}", pod=~"${deploy}-.*", container="${containerName}"}
                         </div>
                     `;
                     chartsDiv.appendChild(memoryChartDiv);
-                    setTimeout(() => createMemoryChart(`memory-chart-${clusterIdx}`, details, restartEvents, versionEvents), 100);
                 }
 
                 if (details.cpu_timeseries && details.cpu_timeseries.length > 0) {
@@ -1172,7 +1192,12 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     cpuChartDiv.className = 'chart-wrapper';
                     cpuChartDiv.innerHTML = `
                         <h3>${cluster.operator_name || 'Operator'} CPU Usage Over Time</h3>
-                        <canvas id="cpu-chart-${clusterIdx}" class="chart-canvas"></canvas>
+                        <canvas id="cpu-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="cpu"
+                            data-chart-data='${JSON.stringify(details).replace(/'/g, "&#39;")}'
+                            data-restart-events='${JSON.stringify(restartEvents).replace(/'/g, "&#39;")}'
+                            data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
+                        ></canvas>
                         <div style="margin-top: 15px; padding: 12px; background: #f0f8ff; border-left: 4px solid #667eea; border-radius: 4px; font-size: 0.85em;">
                             <strong style="color: #667eea; display: block; margin-bottom: 8px;">CPU Thresholds:</strong>
                             <div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 1.0m</div>
@@ -1180,11 +1205,10 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 5.0m</div>
                         </div>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
-                            <strong>Query:</strong> rate(container_cpu_usage_seconds_total{namespace="${ns}", pod="${podName}", container="${containerName}"}[5m])
+                            <strong>Query:</strong> rate(container_cpu_usage_seconds_total{namespace="${ns}", pod=~"${deploy}-.*", container="${containerName}"}[5m])
                         </div>
                     `;
                     chartsDiv.appendChild(cpuChartDiv);
-                    setTimeout(() => createCPUChart(`cpu-chart-${clusterIdx}`, details, restartEvents, versionEvents), 100);
                 }
 
                 if ((details.memory_timeseries && details.memory_timeseries.length > 0) ||
