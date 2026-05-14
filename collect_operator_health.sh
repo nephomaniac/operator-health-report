@@ -3301,10 +3301,27 @@ EOF
 
     total_crd_count=$((rm_count + cum_count_detail))
     if [ "$total_crd_count" -eq 0 ]; then
-        rmo_rm_status="WARNING"
-        rmo_rm_message="No RouteMonitor or ClusterUrlMonitor CRs found — expected at minimum console and api monitors from SyncSet"
-        warning_count=$((warning_count + 1))
-        echo "  ⚠ No monitor CRs found (console + api expected via SyncSet)"
+        # Check if CRDs exist (different from CRs missing)
+        rm_crd_exists=$(oc get crd routemonitors.monitoring.openshift.io --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        cum_crd_exists=$(oc get crd clusterurlmonitors.monitoring.openshift.io --no-headers 2>/dev/null | wc -l | tr -d ' ')
+
+        if [ "${rm_crd_exists:-0}" -eq 0 ] && [ "${cum_crd_exists:-0}" -eq 0 ]; then
+            rmo_rm_status="FAIL"
+            rmo_rm_message="RouteMonitor and ClusterUrlMonitor CRDs not installed — RMO PKO package may not have deployed correctly"
+            critical_count=$((critical_count + 1))
+            echo "  ✗ CRITICAL: RouteMonitor/ClusterUrlMonitor CRDs missing"
+        elif [ "$cluster_type" = "management_cluster" ] || [ "$cluster_type" = "service_cluster" ]; then
+            rmo_rm_status="WARNING"
+            rmo_rm_message="No RouteMonitor or ClusterUrlMonitor CRs on $cluster_type — console/api monitors expected via SyncSet"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ No monitor CRs on $cluster_type (expected via SyncSet)"
+        else
+            # Standard managed clusters — monitors deployed via Hive SyncSet
+            rmo_rm_status="WARNING"
+            rmo_rm_message="No RouteMonitor or ClusterUrlMonitor CRs found (CRDs present) — SyncSet may not have applied console/api monitors"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ CRDs present but no monitor CRs (SyncSet may be pending or paused)"
+        fi
     elif [ "$rm_errors" -gt 0 ]; then
         rmo_rm_status="WARNING"
         rmo_rm_message="$rm_errors monitor(s) have errorStatus set"
