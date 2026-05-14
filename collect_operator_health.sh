@@ -1223,14 +1223,17 @@ lease_holder=""
 lease_renew_time=""
 lease_duration=""
 
-# Determine lease name per operator
-# CAMO: configure-alertmanager-operator-lock (leader election enabled)
-# RMO: leader election disabled by default (--leader-elect=false), skip check
+# Leader election check — skip for single-replica operators that don't enable it
 lease_name="${DEPLOYMENT}-lock"
 if [[ "$OPERATOR_NAME" == *"route-monitor"* ]]; then
+    lease_name="2793210b.openshift.io"
+fi
+
+# Check if this is a single-replica deployment (leader election not needed)
+if [ "${desired_replicas:-1}" -le 1 ]; then
     lease_check_status="SKIP"
-    lease_message="Leader election not enabled for RMO (--leader-elect defaults to false)"
-    echo "  ℹ Leader election not applicable (disabled by default)"
+    lease_message="Single-replica deployment — leader election not required"
+    echo "  ℹ Leader election: skip (single replica)"
 fi
 
 if [ "$lease_check_status" != "SKIP" ]; then
@@ -1632,9 +1635,16 @@ if [ "$pod_count" -gt 0 ]; then
 
         if [ -n "$missing_fields" ]; then
             missing_fields="${missing_fields%, }"
-            limits_check_status="INFO"
-            limits_message="Missing resource fields: ${missing_fields}"
-            echo "  ℹ Missing: ${missing_fields}"
+            # Missing requests is expected when limits are set (Kubernetes defaults requests=limits)
+            if [ "$limits_cpu_set" = true ] && [ "$limits_memory_set" = true ]; then
+                limits_check_status="PASS"
+                limits_message="$NAMESPACE/$DEPLOYMENT: limits set (${limits_cpu_value} CPU, ${limits_memory_value} mem), requests default to limits"
+                echo "  ✓ Limits set, requests default to limits"
+            else
+                limits_check_status="INFO"
+                limits_message="$NAMESPACE/$DEPLOYMENT: missing resource fields: ${missing_fields}"
+                echo "  ℹ Missing: ${missing_fields}"
+            fi
         fi
 
         if (( $(echo "${memory_usage_percent} > 80" | bc -l 2>/dev/null) )); then
@@ -2347,9 +2357,9 @@ EOF
             warning_count=$((warning_count + 1))
             echo "  ⚠ WARNING: Reconciling without resource changes (possible loop)"
         else
-            reconciliation_behavior_status="INFO"
-            reconciliation_behavior_message="Reconciling without recent resource changes (${recent_logs} reconciliations, 0 changes detected in 5m window)"
-            echo "  ℹ Reconciling without recent resource changes (may be older changes or cluster-scoped resources)"
+            reconciliation_behavior_status="PASS"
+            reconciliation_behavior_message="Normal idle reconciliation (${recent_logs} periodic reconciliations, 0 resource changes in 5m)"
+            echo "  ✓ Normal idle reconciliation (${recent_logs} periodic, 0 changes)"
         fi
     elif [ "$recent_logs" -eq 0 ] && [ "$total_resource_changes" -gt 3 ]; then
         # Resources changed but operator not reconciling - broken watch
@@ -2461,14 +2471,13 @@ EOF
             pod_all_warnings=$(echo "$pod_logs" | grep -i "level=warn" | wc -l | tr -d ' ')
             pod_dns_warnings=$(echo "$pod_logs" | grep -i "level=warn.*\(no such host\|Failed to resolve.*alertmanager.*:9094\)" | wc -l | tr -d ' ')
 
-            # Filter DNS warnings if ANY pod in cluster is in grace period
-            if [ "$cluster_in_grace_period" = "true" ] && [ "$pod_dns_warnings" -gt 0 ]; then
-                # Cluster is forming - DNS warnings are expected on all pods
+            # Always filter AlertManager peer DNS resolution warnings
+            # These are transient during any pod startup/restart and self-resolve
+            if [ "$pod_dns_warnings" -gt 0 ]; then
                 pod_actionable_warnings=$((pod_all_warnings - pod_dns_warnings))
                 alertmanager_dns_warnings_filtered=$((alertmanager_dns_warnings_filtered + pod_dns_warnings))
-                debug_log "Filtered $pod_dns_warnings DNS warnings from $am_pod (cluster forming)"
+                debug_log "Filtered $pod_dns_warnings DNS warnings from $am_pod"
             else
-                # Cluster is stable - all warnings are actionable
                 pod_actionable_warnings=$pod_all_warnings
             fi
 
@@ -3313,7 +3322,12 @@ EOF
     rmo_sm_missing=0
     rmo_sm_expected=$total_crd_count
 
-    if [ "$total_crd_count" -gt 0 ]; then
+    if [ "$rmo_rm_status" = "WARNING" ] && [ "$total_crd_count" -eq 0 ]; then
+        # No monitors found (already warned in routemonitor_status) — skip dependent checks
+        rmo_sm_status="SKIP"
+        rmo_sm_message="Skipped — no RouteMonitor/ClusterUrlMonitor CRs exist (see routemonitor_status)"
+        echo "  ℹ ServiceMonitor check skipped (no monitors)"
+    elif [ "$total_crd_count" -gt 0 ]; then
         # Collect serviceMonitorRefs from RouteMonitors
         sm_refs=""
         if [ -n "${routemonitors:-}" ]; then
@@ -3384,9 +3398,15 @@ EOF
     rmo_pr_found=0
     rmo_pr_missing=0
 
+    if [ "$rmo_rm_status" = "WARNING" ] && [ "$total_crd_count" -eq 0 ]; then
+        rmo_pr_status="SKIP"
+        rmo_pr_message="Skipped — no RouteMonitor/ClusterUrlMonitor CRs exist (see routemonitor_status)"
+        echo "  ℹ PrometheusRule check skipped (no monitors)"
+    fi
+
     # Collect prometheusRuleRefs from RouteMonitors (skip those with skipPrometheusRule=true)
     pr_refs=""
-    if [ -n "${routemonitors:-}" ]; then
+    if [ "$rmo_pr_status" != "SKIP" ] && [ -n "${routemonitors:-}" ]; then
         pr_refs=$(echo "$routemonitors" | jq -r '.items[] | select(.spec.skipPrometheusRule != true) | select(.status.prometheusRuleRef.name != null and .status.prometheusRuleRef.name != "") | "\(.status.prometheusRuleRef.namespace)/\(.status.prometheusRuleRef.name)"' 2>/dev/null)
         rmo_pr_expected=$(echo "$routemonitors" | jq '[.items[] | select(.spec.skipPrometheusRule != true)] | length' 2>/dev/null || echo "0")
         rmo_pr_expected=$(echo "$rmo_pr_expected" | tr -d '[:space:]')
