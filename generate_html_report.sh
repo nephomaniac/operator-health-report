@@ -833,6 +833,32 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             return thresholds[checkType] || '';
         }
 
+        function filterEventsToRange(events, minTs, maxTs) {
+            if (!events) return [];
+            return events.filter(e => (e.timestamp * 1000) >= minTs && (e.timestamp * 1000) <= maxTs);
+        }
+
+        function addEventAnnotations(annotations, versionEvents, restartEvents, minTs, maxTs) {
+            const clippedVersions = filterEventsToRange(versionEvents, minTs, maxTs);
+            const clippedRestarts = filterEventsToRange(restartEvents, minTs, maxTs);
+            clippedVersions.forEach((event, idx) => {
+                annotations[`version${idx}`] = {
+                    type: 'line',
+                    xMin: event.timestamp * 1000, xMax: event.timestamp * 1000,
+                    borderColor: '#ff6384', borderWidth: 2, borderDash: [5, 5],
+                    label: { content: `v${event.version}`, enabled: true, position: 'top' }
+                };
+            });
+            clippedRestarts.forEach((event, idx) => {
+                annotations[`restart${idx}`] = {
+                    type: 'line',
+                    xMin: event.timestamp * 1000, xMax: event.timestamp * 1000,
+                    borderColor: '#ff9f40', borderWidth: 2,
+                    label: { content: 'Restart', enabled: true, position: 'bottom' }
+                };
+            });
+        }
+
         function createMemoryChart(canvasId, data, restartEvents, versionEvents) {
             const ctx = document.getElementById(canvasId);
             if (!ctx) return;
@@ -842,33 +868,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             const timestamps = memoryData.map(point => point[0] * 1000);
             const values = memoryData.map(point => parseFloat(point[1]) / 1048576);
             const annotations = {};
-
-            if (versionEvents && versionEvents.length > 0) {
-                versionEvents.forEach((event, idx) => {
-                    annotations[`version${idx}`] = {
-                        type: 'line',
-                        xMin: event.timestamp * 1000,
-                        xMax: event.timestamp * 1000,
-                        borderColor: '#ff6384',
-                        borderWidth: 2,
-                        borderDash: [5, 5],
-                        label: { content: `v${event.version}`, enabled: true, position: 'top' }
-                    };
-                });
-            }
-
-            if (restartEvents && restartEvents.length > 0) {
-                restartEvents.forEach((event, idx) => {
-                    annotations[`restart${idx}`] = {
-                        type: 'line',
-                        xMin: event.timestamp * 1000,
-                        xMax: event.timestamp * 1000,
-                        borderColor: '#ff9f40',
-                        borderWidth: 2,
-                        label: { content: 'Restart', enabled: true, position: 'bottom' }
-                    };
-                });
-            }
+            const minTs = Math.min(...timestamps);
+            const maxTs = Math.max(...timestamps);
+            addEventAnnotations(annotations, versionEvents, restartEvents, minTs, maxTs);
 
             const chartData = timestamps.map((time, idx) => ({ x: time, y: values[idx] }));
 
@@ -925,33 +927,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             const timestamps = cpuData.map(point => point[0] * 1000);
             const values = cpuData.map(point => parseFloat(point[1]) * 1000);
             const annotations = {};
-
-            if (versionEvents && versionEvents.length > 0) {
-                versionEvents.forEach((event, idx) => {
-                    annotations[`version${idx}`] = {
-                        type: 'line',
-                        xMin: event.timestamp * 1000,
-                        xMax: event.timestamp * 1000,
-                        borderColor: '#ff6384',
-                        borderWidth: 2,
-                        borderDash: [5, 5],
-                        label: { content: `v${event.version}`, enabled: true, position: 'top' }
-                    };
-                });
-            }
-
-            if (restartEvents && restartEvents.length > 0) {
-                restartEvents.forEach((event, idx) => {
-                    annotations[`restart${idx}`] = {
-                        type: 'line',
-                        xMin: event.timestamp * 1000,
-                        xMax: event.timestamp * 1000,
-                        borderColor: '#ff9f40',
-                        borderWidth: 2,
-                        label: { content: 'Restart', enabled: true, position: 'bottom' }
-                    };
-                });
-            }
+            const minTs = Math.min(...timestamps);
+            const maxTs = Math.max(...timestamps);
+            addEventAnnotations(annotations, versionEvents, restartEvents, minTs, maxTs);
 
             const chartData = timestamps.map((time, idx) => ({ x: time, y: values[idx] }));
 
@@ -1008,17 +986,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             const timestamps = probeData.map(point => point[0] * 1000);
             const values = probeData.map(point => parseFloat(point[1]) * 100);
             const annotations = {};
-
-            if (versionEvents && versionEvents.length > 0) {
-                versionEvents.forEach((event, idx) => {
-                    annotations[`version${idx}`] = {
-                        type: 'line',
-                        xMin: event.timestamp * 1000, xMax: event.timestamp * 1000,
-                        borderColor: '#ff6384', borderWidth: 2, borderDash: [5, 5],
-                        label: { content: `v${event.version}`, enabled: true, position: 'top' }
-                    };
-                });
-            }
+            const minTs = Math.min(...timestamps);
+            const maxTs = Math.max(...timestamps);
+            addEventAnnotations(annotations, versionEvents, restartEvents, minTs, maxTs);
 
             const chartData = timestamps.map((time, idx) => ({ x: time, y: values[idx] }));
             new Chart(ctx, {
