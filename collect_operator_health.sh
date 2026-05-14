@@ -2713,6 +2713,10 @@ EOF
 EOF
 )")
 
+    # End of CAMO-specific checks — remaining checks are general (all operators)
+fi
+
+# General deployment method checks (OLM/PKO) — applies to all operators
     # Check 11: OLM Subscription and CSV Orphan Detection
     # Always check deployment method health regardless of version match
     echo "  Checking for OLM subscription issues..."
@@ -3143,9 +3147,9 @@ EOF
 EOF
 )")
 
-    # Secret-based checks (require --secrets flag)
-    if [ "$CHECK_SECRETS" = true ]; then
-        echo "  Running extended checks (secrets enabled)..."
+    # Secret-based checks (CAMO-specific, require --secrets flag)
+    if [ "$CHECK_SECRETS" = true ] && [[ "$OPERATOR_NAME" == *"configure-alertmanager"* ]]; then
+        echo "  Running extended CAMO checks (secrets enabled)..."
 
         # Check 6: Alertmanager main secret exists (managed by CAMO)
         alertmanager_secret=$(ocm backplane elevate "${REASON}" -- get secret alertmanager-main -n "$NAMESPACE" -o json 2>/dev/null)
@@ -3230,7 +3234,6 @@ EOF
     else
         echo "  ℹ Extended secret checks disabled (use --secrets to enable)"
     fi
-fi
 
 # RMO-specific checks
 if [[ "$OPERATOR_NAME" == *"route-monitor"* ]]; then
