@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="ac85db5"
+SCRIPT_VERSION="7771759"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -3537,6 +3537,55 @@ EOF
     "error_count": $rm_errors,
     "missing_url_count": $rm_missing_url,
     "missing_servicemonitor_count": $rm_missing_sm
+  }
+}
+EOF
+)")
+
+    # RMO Check 3a: SRE probe-missing alerts — verify monitoring expectations are met
+    rmo_sre_status="PASS"
+    rmo_sre_message=""
+    sre_probe_missing_api=$(oc get prometheusrule sre-route-monitor-operator-probe-missing-api -n openshift-monitoring --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    sre_probe_missing_console=$(oc get prometheusrule sre-route-monitor-operator-probe-missing-console -n openshift-monitoring --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    sre_expects_probes=false
+
+    if [ "${sre_probe_missing_api:-0}" -gt 0 ] || [ "${sre_probe_missing_console:-0}" -gt 0 ]; then
+        sre_expects_probes=true
+        # SRE expects probes — verify they exist
+        if [ "$total_crd_count" -eq 0 ]; then
+            # No RouteMonitor CRs but SRE expects probes — check if orphaned probes satisfy the requirement
+            if [ "${orphan_sms_filtered:-0}" -gt 0 ]; then
+                rmo_sre_status="WARNING"
+                rmo_sre_message="SRE probe-missing alerts exist — probes present but orphaned (no parent RouteMonitor CRs)"
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ SRE expects probes — orphaned probes satisfy requirement but are unmanaged"
+            else
+                rmo_sre_status="FAIL"
+                rmo_sre_message="SRE probe-missing alerts exist but no probes found — api/console route monitoring is absent"
+                critical_count=$((critical_count + 1))
+                echo "  ✗ CRITICAL: SRE expects probes but none exist — route monitoring gap"
+            fi
+        else
+            rmo_sre_message="SRE probe-missing alerts present, RouteMonitor CRs exist — monitoring expectations met"
+            echo "  ✓ SRE probe expectations met (${total_crd_count} monitors active)"
+        fi
+    else
+        rmo_sre_status="INFO"
+        rmo_sre_message="No SRE probe-missing PrometheusRules found"
+        echo "  ℹ No SRE probe-missing alerts configured"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "rmo_sre_probe_expectations",
+  "status": "$rmo_sre_status",
+  "severity": "$([ "$rmo_sre_status" = "FAIL" ] && echo "critical" || echo "warning")",
+  "message": "$rmo_sre_message",
+  "details": {
+    "sre_probe_missing_api_rule": $([ "${sre_probe_missing_api:-0}" -gt 0 ] && echo "true" || echo "false"),
+    "sre_probe_missing_console_rule": $([ "${sre_probe_missing_console:-0}" -gt 0 ] && echo "true" || echo "false"),
+    "sre_expects_probes": $sre_expects_probes,
+    "routemonitor_crs_present": $([ "$total_crd_count" -gt 0 ] && echo "true" || echo "false")
   }
 }
 EOF
