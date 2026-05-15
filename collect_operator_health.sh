@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="8417798"
+SCRIPT_VERSION="ac85db5"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -3472,20 +3472,37 @@ EOF
             echo "  ⚠ No monitor CRs on $cluster_type (expected via SyncSet)"
         else
             # Check if monitoring resources exist despite no RouteMonitor CRs
-            # SyncSet may delete CRs but leave ServiceMonitors/PrometheusRules/blackbox functional
-            orphan_sms=$(oc get servicemonitor -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
-            orphan_prs=$(oc get prometheusrule -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            # Distinguish: PKO-managed (has package-operator.run labels) vs truly orphaned
+            orphan_sm_names=$(oc get servicemonitor -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}' | tr '\n' ', ' | sed 's/,$//')
+            orphan_sms=$(echo "$orphan_sm_names" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
+            # Exclude the PKO-managed controller-manager-metrics-monitor
+            orphan_sm_names=$(echo "$orphan_sm_names" | sed 's/controller-manager-metrics-monitor,\?//g' | sed 's/^,//;s/,$//')
+            orphan_sms_filtered=$(echo "$orphan_sm_names" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
+            [ -z "$orphan_sm_names" ] && orphan_sms_filtered=0
+
+            orphan_pr_names=$(oc get prometheusrule -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}' | tr '\n' ', ' | sed 's/,$//')
+            orphan_prs=$(echo "$orphan_pr_names" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
+            [ -z "$orphan_pr_names" ] && orphan_prs=0
+
             bb_running=$(oc get deployment blackbox-exporter -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
 
-            if [ "${orphan_sms:-0}" -gt 0 ] || [ "${orphan_prs:-0}" -gt 0 ] || [ "${bb_running:-0}" -gt 0 ]; then
+            # Check if resources have PKO ownership
+            pko_owned_sms=$(oc get servicemonitor -n "$NAMESPACE" -o json 2>/dev/null | jq '[.items[] | select(.metadata.labels["package-operator.run/instance"] != null)] | length' 2>/dev/null || echo "0")
+
+            if [ "${orphan_sms_filtered:-0}" -gt 0 ] || [ "${orphan_prs:-0}" -gt 0 ] || [ "${bb_running:-0}" -gt 0 ]; then
                 rmo_rm_status="WARNING"
-                rmo_rm_message="Orphaned RMO resources: no RouteMonitor CRs but $orphan_sms ServiceMonitor(s), $orphan_prs PrometheusRule(s), blackbox replicas: ${bb_running:-0} — likely PKO/OLM migration cleanup issue"
+                orphan_detail="no RouteMonitor CRs but"
+                [ "${orphan_sms_filtered:-0}" -gt 0 ] && orphan_detail="$orphan_detail ServiceMonitors: $NAMESPACE/{$orphan_sm_names},"
+                [ "${orphan_prs:-0}" -gt 0 ] && orphan_detail="$orphan_detail PrometheusRules: $NAMESPACE/{$orphan_pr_names},"
+                [ "${bb_running:-0}" -gt 0 ] && orphan_detail="$orphan_detail blackbox-exporter running,"
+                orphan_detail="${orphan_detail%,}"
+                rmo_rm_message="Orphaned RMO resources: $orphan_detail — RMO finalizer cleanup may not have completed when RouteMonitor CRs were deleted by SyncSet"
                 warning_count=$((warning_count + 1))
-                echo "  ⚠ Orphaned resources without parent CRs: $orphan_sms SMs, $orphan_prs PRs, blackbox: ${bb_running:-0}"
+                echo "  ⚠ Orphaned: $orphan_detail"
             else
                 rmo_rm_status="INFO"
-                rmo_rm_message="No RouteMonitor CRs and no monitoring resources in $NAMESPACE (CRDs present)"
-                echo "  ℹ No CRs and no monitoring resources in namespace"
+                rmo_rm_message="No RouteMonitor CRs and no orphaned monitoring resources in $NAMESPACE"
+                echo "  ℹ No CRs and no orphaned resources"
             fi
         fi
     elif [ "$rm_errors" -gt 0 ]; then
