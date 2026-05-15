@@ -449,7 +449,10 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             margin-right: 8px;
             display: inline-block;
         }
-        .legend-marker.version { background: #ff6384; }
+        .legend-marker.version {
+            background: repeating-linear-gradient(90deg, #ff6384 0px, #ff6384 4px, transparent 4px, transparent 8px);
+            border: 1px solid #ff6384;
+        }
         .legend-marker.restart { background: #ff9f40; }
         .footer {
             text-align: center;
@@ -1266,8 +1269,8 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     legendDiv.className = 'legend';
                     legendDiv.innerHTML = `
                         <h4>Chart Indicators</h4>
-                        <div class="legend-item"><span class="legend-marker version"></span><span>Version Update (dashed red line)</span></div>
-                        <div class="legend-item"><span class="legend-marker restart"></span><span>Pod Restart (orange line)</span></div>
+                        <div class="legend-item"><span class="legend-marker version"></span><span>Version Update (dashed red line) — pod restart occurs at each version change</span></div>
+                        <div class="legend-item"><span class="legend-marker restart"></span><span>Abnormal Pod Restart (orange line) — CrashLoopBackOff / OOMKilled</span></div>
                     `;
                     chartsDiv.appendChild(legendDiv);
                 }
