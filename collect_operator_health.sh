@@ -4009,6 +4009,20 @@ EOF
 }
 EOF
 )")
+    else
+        # Non-MC cluster — HCP coverage not applicable
+        health_checks+=("$(cat <<EOF
+{
+  "check": "rmo_hcp_coverage",
+  "status": "SKIP",
+  "severity": "info",
+  "message": "HCP coverage check not applicable (${cluster_type} cluster — only runs on management_cluster)",
+  "details": {
+    "cluster_type": "$cluster_type"
+  }
+}
+EOF
+)")
     fi
 
     # RMO Check 9: RHOBS synthetics integration

@@ -539,6 +539,23 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             document.getElementById('scriptVersion').textContent = healthData[0].script_version;
         }
 
+        function expandToCheck(clusterIdx, checkId) {
+            const detailsRow = document.getElementById(`cluster-details-${clusterIdx}`);
+            if (detailsRow && !detailsRow.classList.contains('expanded')) {
+                toggleClusterDetails(clusterIdx);
+            }
+            setTimeout(() => {
+                const checkHeader = document.querySelector(`[onclick*="toggleCheckDetails('${checkId}')"]`);
+                if (checkHeader) {
+                    const checkDetails = document.getElementById(`check-details-${checkId}`);
+                    if (checkDetails && !checkDetails.classList.contains('expanded')) {
+                        toggleCheckDetails(checkId);
+                    }
+                    checkHeader.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }, 150);
+        }
+
         const chartsRendered = {};
         function toggleClusterDetails(clusterIdx) {
             const detailsRow = document.getElementById(`cluster-details-${clusterIdx}`);
@@ -1822,7 +1839,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     const status = getCheckStatus(cluster, checkType);
                     const statusClass = getStatusClass(status);
                     const icon = getStatusIcon(status);
-                    rowHTML += `<td class="check-status-cell"><span class="status-icon ${statusClass}">${icon}</span></td>`;
+                    const checkIndex = (cluster.health_checks || []).findIndex(c => c.check === checkType);
+                    const checkId = `${clusterIdx}-${checkIndex}`;
+                    rowHTML += `<td class="check-status-cell" onclick="event.stopPropagation(); expandToCheck('${clusterIdx}', '${checkId}')"><span class="status-icon ${statusClass}" title="${checkType}: ${status}">${icon}</span></td>`;
                 });
                 rowHTML += `<td class="resource-cell">${restarts}</td>`;
                 rowHTML += `<td class="resource-cell">${errors}</td>`;
