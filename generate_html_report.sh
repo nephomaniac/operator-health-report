@@ -191,7 +191,7 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .stat-number.healthy { color: var(--green); }
         .stat-label {
             font-size: 0.75em;
-            color: var(--text-secondary);
+            color: var(--text-primary);
             text-transform: uppercase;
             letter-spacing: 0.1em;
             font-weight: 600;
@@ -274,9 +274,9 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .status-icon.info { background: var(--info-dim); color: var(--info); }
         .status-icon.na { background: rgba(92,96,120,0.15); color: var(--text-muted); }
         .status-icon.no-access { background: rgba(92,96,120,0.1); color: var(--text-muted); border: 1px dashed var(--text-muted); }
-        .status-icon.status-pass { background: var(--green-dim); color: var(--green); }
-        .status-icon.status-critical { background: var(--red-dim); color: var(--red); box-shadow: 0 0 8px var(--red-dim); }
-        .status-icon.status-unknown { background: rgba(92,96,120,0.1); color: var(--text-muted); }
+        .status-icon.status-pass { background: #28a745; color: white; }
+        .status-icon.status-critical { background: #dc3545; color: white; }
+        .status-icon.status-unknown { background: #6c757d; color: white; }
         .resource-value { font-weight: 600; }
         .resource-value.resource-normal { color: var(--green); }
         .resource-value.resource-warning { color: var(--yellow); font-weight: 700; }
@@ -296,15 +296,17 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             border: 1px solid var(--border);
         }
         .cluster-header {
-            background: var(--bg-card);
+            background: #eef0f4;
             padding: 18px;
             border-radius: var(--radius);
             margin-bottom: 16px;
-            border: 1px solid var(--border);
+            border: 1px solid #d0d3dc;
+            color: #222;
         }
-        .cluster-header h2 { color: var(--accent); margin-bottom: 12px; font-size: 1.1em; font-weight: 600; }
-        .cluster-header strong { color: var(--text-primary); }
-        .health-summary strong { color: var(--text-primary); }
+        .cluster-header h2 { color: #1a3a6e; margin-bottom: 12px; font-size: 1.1em; font-weight: 600; }
+        .cluster-header strong { color: #222; }
+        .health-summary { background: #f5f6f9; border-color: #d0d3dc; color: #222; }
+        .health-summary strong { color: #333; }
         .cluster-meta {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -313,7 +315,7 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .meta-item { display: flex; flex-direction: column; min-width: 0; }
         .meta-label {
             font-size: 0.72em;
-            color: var(--accent);
+            color: #555;
             text-transform: uppercase;
             letter-spacing: 0.1em;
             margin-bottom: 2px;
@@ -322,7 +324,7 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .meta-value {
             font-size: 0.95em;
             font-weight: 600;
-            color: #ffffff;
+            color: #111;
             word-break: break-word;
             overflow-wrap: break-word;
             font-family: var(--mono);
@@ -346,11 +348,11 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             letter-spacing: 0.06em;
             font-family: var(--mono);
         }
-        .status-badge.healthy, .status-badge.pass { background: var(--green-dim); color: var(--green); }
-        .status-badge.warning { background: var(--yellow-dim); color: var(--yellow); }
-        .status-badge.info { background: var(--info-dim); color: var(--info); }
-        .status-badge.fail, .status-badge.critical { background: var(--red-dim); color: var(--red); }
-        .status-badge.no-access { background: rgba(92,96,120,0.1); color: var(--text-muted); }
+        .status-badge.healthy, .status-badge.pass { background: #d4edda; color: #155724; }
+        .status-badge.warning { background: #fff3cd; color: #856404; }
+        .status-badge.info { background: #d1ecf1; color: #0c5460; }
+        .status-badge.fail, .status-badge.critical { background: #f8d7da; color: #721c24; }
+        .status-badge.no-access { background: #e9ecef; color: #495057; }
         .charts-container { padding: 16px 0; }
         .chart-wrapper {
             margin-bottom: 20px;
