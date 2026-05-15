@@ -3530,6 +3530,7 @@ EOF
     rmo_probe_total=0
     rmo_probe_failing=0
     rmo_probe_failing_targets=""
+    probe_count_mismatch=false
 
     if [ "$total_crd_count" -gt 0 ]; then
         echo "  Querying probe_success metrics from Thanos..."
