@@ -352,13 +352,13 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .charts-container { padding: 16px 0; }
         .chart-wrapper {
             margin-bottom: 20px;
-            background: var(--bg-card);
+            background: #f8f9fb;
             padding: 18px;
             border: 1px solid var(--border);
             border-radius: var(--radius);
         }
-        .chart-wrapper h3 { color: var(--text-primary); margin-bottom: 12px; font-size: 1em; font-weight: 600; }
-        .chart-canvas { max-height: 320px; }
+        .chart-wrapper h3 { color: #1a1d2b; margin-bottom: 12px; font-size: 1em; font-weight: 600; }
+        .chart-canvas { max-height: 320px; background: white; border-radius: 4px; padding: 4px; }
         .health-checks { margin-top: 16px; }
         .health-check {
             margin-bottom: 8px;
