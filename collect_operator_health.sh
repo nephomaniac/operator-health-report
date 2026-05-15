@@ -1535,15 +1535,15 @@ if [ "$pod_count" -gt 0 ]; then
         # Overall assessment
         if [ "$memory_trend" = "increasing" ] && [ "$cpu_trend" = "increasing" ]; then
             memory_check_status="WARNING"
-            memory_message="Both CPU and memory increased by >${MEMORY_LEAK_THRESHOLD_PERCENT}% (CPU: ${cpu_increase_percent}%, Mem: ${memory_increase_percent}%) - possible resource leak"
+            memory_message="Both CPU and memory increased by >${MEMORY_LEAK_THRESHOLD_PERCENT}% (CPU: ${cpu_increase_percent}%, Mem: ${memory_increase_percent}%) — investigate resource growth"
             warning_count=$((warning_count + 1))
         elif [ "$memory_trend" = "increasing" ]; then
             memory_check_status="WARNING"
-            memory_message="Memory increased by ${memory_increase_percent}% over ${lookback_hours}h - possible memory leak"
+            memory_message="Memory increased by ${memory_increase_percent}% over ${lookback_hours}h — possible memory leak"
             warning_count=$((warning_count + 1))
         elif [ "$cpu_trend" = "increasing" ]; then
             memory_check_status="WARNING"
-            memory_message="CPU increased by ${cpu_increase_percent}% over ${lookback_hours}h - possible CPU leak"
+            memory_message="CPU increased by ${cpu_increase_percent}% over ${lookback_hours}h — elevated CPU usage, may indicate increased reconciliation or workload"
             warning_count=$((warning_count + 1))
         elif [ -z "$memory_data" ] && [ -z "$cpu_data" ]; then
             memory_check_status="UNKNOWN"
