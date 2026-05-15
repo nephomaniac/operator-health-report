@@ -775,16 +775,37 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             return checkName.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
         }
 
-        function getThresholdPanel(checkType) {
+        function getThresholdPanel(checkType, cluster) {
+            const op = cluster?.operator_name || '';
+            const isRMO = op.includes('route-monitor');
+            const rmCheck = (cluster?.health_checks || []).find(c => c.check === 'rmo_routemonitor_status');
+            const monitorCount = rmCheck ? ((rmCheck.details?.routemonitor_count || 0) + (rmCheck.details?.clusterurlmonitor_count || 0)) : 0;
+            const clusterType = cluster?.cluster_type || 'standard';
+
             const thresholds = {
-                'resource_leak_detection': '<div style="margin-top: 15px; padding: 12px; background: #f0f8ff; border-left: 4px solid #667eea; border-radius: 4px; font-size: 0.85em;">' +
+                'resource_leak_detection': isRMO ?
+                    '<div style="margin-top: 15px; padding: 12px; background: #f0f8ff; border-left: 4px solid #667eea; border-radius: 4px; font-size: 0.85em;">' +
+                    '<strong style="color: #667eea; display: block; margin-bottom: 8px;">RMO Resource Context (' + monitorCount + ' monitors, ' + clusterType.replace('_', ' ') + '):</strong>' +
+                    '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">' +
+                    '<div><strong>Expected Memory by Type:</strong>' +
+                    '<div style="margin-left: 10px;">Standard (0 monitors): ~20-26 MB</div>' +
+                    '<div style="margin-left: 10px;">SC (2 monitors): ~28-88 MB</div>' +
+                    '<div style="margin-left: 10px;">MC (1-3 HCPs): ~60-200 MB</div>' +
+                    '<div style="margin-left: 10px;">MC (6-10 HCPs): ~225-460 MB</div></div>' +
+                    '<div><strong>Memory per Monitor:</strong>' +
+                    '<div style="margin-left: 10px;">~20 MB base + ~25-30 MB per HCP RouteMonitor</div>' +
+                    '<div style="margin-left: 10px;">Current: ' + (cluster?.health_checks?.find(c => c.check === 'resource_leak_detection')?.details?.peak_memory_mb || '?') + ' MB peak</div>' +
+                    (monitorCount > 0 ? '<div style="margin-left: 10px;">Per-monitor: ~' + ((cluster?.health_checks?.find(c => c.check === 'resource_leak_detection')?.details?.peak_memory_mb || 0) / Math.max(monitorCount, 1)).toFixed(0) + ' MB/monitor</div>' : '') +
+                    '</div></div></div>'
+                    :
+                    '<div style="margin-top: 15px; padding: 12px; background: #f0f8ff; border-left: 4px solid #667eea; border-radius: 4px; font-size: 0.85em;">' +
                     '<strong style="color: #667eea; display: block; margin-bottom: 8px;">CAMO Pod Resource Thresholds:</strong>' +
                     '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">' +
-                    '<div><strong>CAMO Pod CPU:</strong>' +
+                    '<div><strong>CPU:</strong>' +
                     '<div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 1.0m</div>' +
                     '<div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 1.0m - 5.0m</div>' +
                     '<div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 5.0m</div></div>' +
-                    '<div><strong>CAMO Pod Memory:</strong>' +
+                    '<div><strong>Memory:</strong>' +
                     '<div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 60 MB</div>' +
                     '<div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 60 - 100 MB</div>' +
                     '<div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 100 MB</div></div>' +
@@ -1237,10 +1258,15 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
                         ></canvas>
                         <div style="margin-top: 15px; padding: 12px; background: #f0f8ff; border-left: 4px solid #667eea; border-radius: 4px; font-size: 0.85em;">
-                            <strong style="color: #667eea; display: block; margin-bottom: 8px;">Memory Thresholds:</strong>
+                            ${cluster.operator_name?.includes('route-monitor') ?
+                            `<strong style="color: #667eea; display: block; margin-bottom: 8px;">RMO Memory Context (${(cluster.health_checks?.find(c => c.check === 'rmo_routemonitor_status')?.details?.routemonitor_count || 0) + (cluster.health_checks?.find(c => c.check === 'rmo_routemonitor_status')?.details?.clusterurlmonitor_count || 0)} monitors):</strong>
+                            <div style="margin-left: 10px;">Base: ~20 MB | Per HCP monitor: ~25-30 MB</div>
+                            <div style="margin-left: 10px;">Peak: ${details.peak_memory_mb || '?'} MB | Limit: ${cluster.health_checks?.find(c => c.check === 'resource_limits_validation')?.details?.limits_memory || '1000Mi'}</div>`
+                            :
+                            `<strong style="color: #667eea; display: block; margin-bottom: 8px;">Memory Thresholds:</strong>
                             <div style="color: #28a745; margin-left: 10px;">✓ Normal: &lt; 60 MB</div>
                             <div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 60 - 100 MB</div>
-                            <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 100 MB</div>
+                            <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 100 MB</div>`}
                         </div>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
                             <strong>Query:</strong> container_memory_working_set_bytes{namespace="${ns}", pod=~"${deploy}-.*", container="${containerName}"}
@@ -1435,7 +1461,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                                 </div>
                             ` : ''}
                         ` : ''}
-                        ${getThresholdPanel(check.check)}
+                        ${getThresholdPanel(check.check, cluster)}
                     </div>
                 `;
                 checksDiv.appendChild(checkDiv);
