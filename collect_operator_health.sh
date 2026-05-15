@@ -3544,20 +3544,38 @@ EOF
             rmo_probe_failing=$(echo "$probe_data" | jq '[.data.result[] | select(.value[1] == "0")] | length' 2>/dev/null || echo "0")
             rmo_probe_failing=$(echo "$rmo_probe_failing" | tr -d '[:space:]')
 
+            # Compare probe count against expected monitor count
+            probe_count_mismatch=false
+            if [ "$rmo_probe_total" -lt "$total_crd_count" ]; then
+                probe_count_mismatch=true
+            fi
+
             if [ "${rmo_probe_failing:-0}" -gt 0 ]; then
                 rmo_probe_failing_targets=$(echo "$probe_data" | jq -r '.data.result[] | select(.value[1] == "0") | .metric.instance // .metric.target // .metric.namespace | .[0:60]' 2>/dev/null | head -5 | tr '\n' ', ' | sed 's/,$//')
                 rmo_probe_status="WARNING"
-                rmo_probe_message="$rmo_probe_failing/$rmo_probe_total probe(s) currently failing"
+                rmo_probe_message="$rmo_probe_failing/$rmo_probe_total probe(s) failing (${total_crd_count} monitors expected)"
                 warning_count=$((warning_count + 1))
                 echo "  ⚠ $rmo_probe_failing/$rmo_probe_total probes failing"
+            elif [ "$probe_count_mismatch" = true ]; then
+                rmo_probe_status="WARNING"
+                rmo_probe_message="Probe count mismatch: $rmo_probe_total active probes but $total_crd_count monitors configured — RMO may not have created all ServiceMonitors"
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ Probe count mismatch: $rmo_probe_total probes vs $total_crd_count monitors"
             else
-                rmo_probe_message="All $rmo_probe_total probe(s) succeeding"
-                echo "  ✓ All $rmo_probe_total probes succeeding"
+                rmo_probe_message="All $rmo_probe_total/$total_crd_count probe(s) succeeding"
+                echo "  ✓ All $rmo_probe_total/$total_crd_count probes succeeding"
             fi
         else
-            rmo_probe_status="INFO"
-            rmo_probe_message="No probe_success metrics found (probes may not be scraped yet)"
-            echo "  ℹ No probe_success metrics available"
+            if [ "$total_crd_count" -gt 0 ]; then
+                rmo_probe_status="WARNING"
+                rmo_probe_message="No probe metrics found but $total_crd_count monitors exist — probes may not be scraped"
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ No probe metrics despite $total_crd_count monitors"
+            else
+                rmo_probe_status="INFO"
+                rmo_probe_message="No probe metrics (no monitors configured)"
+                echo "  ℹ No probe metrics available"
+            fi
         fi
     else
         rmo_probe_status="SKIP"
@@ -3572,7 +3590,9 @@ EOF
   "severity": "warning",
   "message": "$rmo_probe_message",
   "details": {
-    "total_probes": $rmo_probe_total,
+    "active_probes": $rmo_probe_total,
+    "expected_monitors": $total_crd_count,
+    "probe_count_match": $([ "$probe_count_mismatch" = true ] && echo "false" || echo "true"),
     "failing_probes": $rmo_probe_failing,
     "failing_targets": "$(echo "${rmo_probe_failing_targets:-none}" | sed 's/"/\\"/g')"
   }
