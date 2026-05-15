@@ -3988,9 +3988,10 @@ EOF
                 echo "  ℹ No HCPs on this MC"
             fi
         else
-            rmo_hcp_status="INFO"
-            rmo_hcp_message="HostedControlPlane CRD not available"
-            echo "  ℹ HCP CRD not found"
+            rmo_hcp_status="WARNING"
+            rmo_hcp_message="HostedControlPlane CRD not accessible on management_cluster — backplane RBAC issue or HCP operator not installed"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ HCP CRD not accessible on MC (RBAC or HCP operator issue)"
         fi
 
         health_checks+=("$(cat <<EOF
