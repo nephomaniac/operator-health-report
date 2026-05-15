@@ -191,10 +191,10 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .stat-number.healthy { color: var(--green); }
         .stat-label {
             font-size: 0.75em;
-            color: var(--text-muted);
+            color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 0.1em;
-            font-weight: 500;
+            font-weight: 600;
         }
         .content { padding: 16px; }
         .clusters-table-wrapper { overflow-x: auto; }
@@ -303,6 +303,8 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             border: 1px solid var(--border);
         }
         .cluster-header h2 { color: var(--accent); margin-bottom: 12px; font-size: 1.1em; font-weight: 600; }
+        .cluster-header strong { color: var(--text-primary); }
+        .health-summary strong { color: var(--text-primary); }
         .cluster-meta {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -311,16 +313,16 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .meta-item { display: flex; flex-direction: column; min-width: 0; }
         .meta-label {
             font-size: 0.72em;
-            color: var(--text-muted);
+            color: var(--accent);
             text-transform: uppercase;
             letter-spacing: 0.1em;
             margin-bottom: 2px;
-            font-weight: 500;
+            font-weight: 600;
         }
         .meta-value {
             font-size: 0.95em;
             font-weight: 600;
-            color: var(--text-primary);
+            color: #ffffff;
             word-break: break-word;
             overflow-wrap: break-word;
             font-family: var(--mono);
