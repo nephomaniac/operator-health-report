@@ -1379,9 +1379,10 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
                         ></canvas>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
-                            <strong>Note:</strong> Probe success reflects endpoint reachability, not RMO operator health.
-                            RMO health is measured by its ability to manage probes: ServiceMonitor creation, RouteMonitor reconciliation, and blackbox orchestration.
-                            A probe failure indicates the monitored endpoint is down, not that RMO itself is failing.
+                            <strong>Note:</strong> RMO creates and manages these probes via ServiceMonitors and blackbox exporter.
+                            Missing probes or target count mismatch = RMO issue (failed reconciliation).
+                            Probe failure with correct target count = endpoint unreachable (infra issue, not RMO).
+                            Expected targets should match RouteMonitor + ClusterUrlMonitor count.
                         </div>
                         <div style="margin-top: 6px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #333; word-break: break-all;">
                             <strong>Query:</strong> avg(probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"})
