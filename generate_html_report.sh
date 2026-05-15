@@ -285,27 +285,28 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .cluster-details-row.expanded { display: table-row; }
         .cluster-details-cell {
             padding: 0 !important;
-            background: var(--bg-primary);
+            background: #e8eaef;
             border-top: 2px solid var(--accent);
         }
+
+        /* ── Light island: everything inside .cluster-section uses dark-on-light ── */
         .cluster-section {
             padding: 24px;
-            background: var(--bg-secondary);
+            background: #f0f2f5;
             margin: 12px;
             border-radius: var(--radius);
-            border: 1px solid var(--border);
+            border: 1px solid #c8ccd6;
+            color: #1a1d2b;
         }
         .cluster-header {
-            background: #eef0f4;
+            background: #ffffff;
             padding: 18px;
             border-radius: var(--radius);
             margin-bottom: 16px;
-            border: 1px solid #d0d3dc;
-            color: #222;
+            border: 1px solid #d5d8e0;
         }
-        .cluster-header h2 { color: #1a3a6e; margin-bottom: 12px; font-size: 1.1em; font-weight: 600; }
+        .cluster-header h2 { color: #1a3a6e; margin-bottom: 12px; font-size: 1.1em; font-weight: 700; }
         .cluster-header strong { color: #222; }
-        .health-summary strong { color: #333; }
         .cluster-meta {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -314,7 +315,7 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .meta-item { display: flex; flex-direction: column; min-width: 0; }
         .meta-label {
             font-size: 0.72em;
-            color: #555;
+            color: #6b7080;
             text-transform: uppercase;
             letter-spacing: 0.1em;
             margin-bottom: 2px;
@@ -323,7 +324,7 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .meta-value {
             font-size: 0.95em;
             font-weight: 600;
-            color: #111;
+            color: #111318;
             word-break: break-word;
             overflow-wrap: break-word;
             font-family: var(--mono);
@@ -333,11 +334,14 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             gap: 16px;
             margin-top: 12px;
             padding: 12px;
-            background: #f5f6f9;
+            background: #ffffff;
             border-radius: var(--radius);
-            border: 1px solid #d0d3dc;
-            color: #222;
+            border: 1px solid #d5d8e0;
+            color: #1a1d2b;
         }
+        .health-summary strong { color: #222; }
+
+        /* Status badges — always dark text on pastel, works on any background */
         .status-badge {
             display: inline-block;
             padding: 3px 10px;
@@ -347,66 +351,71 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             text-transform: uppercase;
             letter-spacing: 0.06em;
             font-family: var(--mono);
-            text-shadow: 0 1px 0 rgba(255,255,255,0.3);
-            border: 1px solid rgba(0,0,0,0.1);
+            border: 1px solid rgba(0,0,0,0.12);
         }
         .status-badge.healthy, .status-badge.pass { background: #d4edda; color: #155724; }
         .status-badge.warning { background: #fff3cd; color: #856404; }
         .status-badge.info { background: #d1ecf1; color: #0c5460; }
         .status-badge.fail, .status-badge.critical { background: #f8d7da; color: #721c24; }
-        .status-badge.no-access { background: #e9ecef; color: #495057; }
+        .status-badge.no-access { background: #e2e3e5; color: #383d41; }
+
+        /* Charts — light panel */
         .charts-container { padding: 16px 0; }
         .chart-wrapper {
             margin-bottom: 20px;
-            background: #f8f9fb;
+            background: #ffffff;
             padding: 18px;
-            border: 1px solid var(--border);
+            border: 1px solid #d5d8e0;
             border-radius: var(--radius);
             color: #1a1d2b;
         }
         .chart-wrapper h3 { color: #111318; margin-bottom: 12px; font-size: 1em; font-weight: 700; }
         .chart-wrapper div { color: #333; }
-        .chart-wrapper strong { color: #1a1d2b; }
-        .chart-canvas { max-height: 320px; background: white; border-radius: 4px; padding: 4px; }
+        .chart-wrapper strong { color: #111318; }
+        .chart-canvas { max-height: 320px; background: #fafbfc; border-radius: 4px; padding: 4px; }
+
+        /* Health check accordion — dark cards on light island */
         .health-checks { margin-top: 16px; }
         .health-check {
             margin-bottom: 8px;
-            border: 1px solid var(--border);
+            border: 1px solid #c8ccd6;
             border-radius: var(--radius);
             overflow: hidden;
         }
         .check-header {
             padding: 10px 14px;
-            background: var(--bg-card);
+            background: #ffffff;
             display: flex;
             justify-content: space-between;
             align-items: center;
             cursor: pointer;
             transition: background 0.12s;
+            color: #1a1d2b;
         }
-        .check-header:hover { background: var(--bg-hover); }
-        .check-title { font-weight: 600; font-size: 0.88em; color: var(--text-primary); }
+        .check-header:hover { background: #f0f2f5; }
+        .check-title { font-weight: 600; font-size: 0.88em; color: #1a1d2b; }
         .check-icon { font-size: 1.1em; margin-right: 8px; }
-        .check-icon.pass { color: var(--green); }
-        .check-icon.fail { color: var(--red); }
-        .check-icon.warning { color: var(--yellow); }
-        .check-icon.info { color: var(--info); }
-        .check-icon.unknown { color: var(--text-muted); }
+        .check-icon.pass { color: #1a8754; }
+        .check-icon.fail { color: #c82333; }
+        .check-icon.warning { color: #d39e00; }
+        .check-icon.info { color: #138496; }
+        .check-icon.unknown { color: #6c757d; }
         .check-details {
             padding: 14px;
-            border-top: 1px solid var(--border);
-            background: var(--bg-expanded);
+            border-top: 1px solid #d5d8e0;
+            background: #f5f6f9;
             display: none;
+            color: #1a1d2b;
         }
         .check-details.expanded { display: block; }
         .check-message {
             margin-bottom: 10px;
             padding: 10px 12px;
-            background: var(--bg-card);
-            border-left: 3px solid var(--accent);
+            background: #ffffff;
+            border-left: 3px solid #4a6cf7;
             border-radius: 3px;
             font-size: 0.85em;
-            color: var(--text-secondary);
+            color: #333;
             font-family: var(--mono);
         }
         .detail-grid {
@@ -415,19 +424,19 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             gap: 8px;
         }
         .detail-item {
-            background: var(--bg-card);
+            background: #ffffff;
             padding: 8px 10px;
             border-radius: 3px;
-            border: 1px solid var(--border);
+            border: 1px solid #d5d8e0;
         }
         .detail-label {
             font-size: 0.72em;
-            color: var(--text-muted);
+            color: #6b7080;
             margin-bottom: 2px;
             text-transform: uppercase;
             letter-spacing: 0.06em;
         }
-        .detail-value { font-weight: 600; color: var(--text-primary); font-size: 0.85em; font-family: var(--mono); }
+        .detail-value { font-weight: 600; color: #111318; font-size: 0.85em; font-family: var(--mono); }
         .legend {
             margin-top: 12px;
             padding: 10px;
