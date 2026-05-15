@@ -147,42 +147,51 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .stat-card.healthy { border-color: var(--green); background: var(--green-dim); }
         .operator-tabs {
             display: flex;
-            background: var(--bg-card);
-            border-bottom: 1px solid var(--border);
-            padding: 0 24px;
-            gap: 2px;
+            background: linear-gradient(180deg, #2a2d3a 0%, #1e2130 100%);
+            border-bottom: 1px solid #3d4155;
+            padding: 6px 24px 0;
+            gap: 4px;
         }
         .operator-tab {
-            padding: 10px 20px;
+            padding: 10px 24px;
             cursor: pointer;
-            border: none;
-            background: transparent;
+            border: 1px solid transparent;
+            border-bottom: none;
+            background: linear-gradient(180deg, #33374a 0%, #282c3e 100%);
             font-family: var(--font);
-            font-size: 0.85em;
-            font-weight: 600;
-            color: var(--text-secondary);
-            border-bottom: 2px solid transparent;
+            font-size: 0.88em;
+            font-weight: 700;
+            color: #8a8fa8;
+            border-radius: 6px 6px 0 0;
             transition: all 0.15s;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
+            letter-spacing: 0.08em;
+            position: relative;
+            top: 1px;
         }
-        .operator-tab:hover { color: var(--text-primary); }
+        .operator-tab:hover {
+            color: #c8ccdf;
+            background: linear-gradient(180deg, #3d4258 0%, #303448 100%);
+        }
         .operator-tab.active {
-            color: var(--accent);
-            border-bottom-color: var(--accent);
+            color: #e8ecff;
+            background: linear-gradient(180deg, #4a5070 0%, #3a3f58 100%);
+            border-color: #4d5370 #4d5370 transparent;
+            box-shadow: 0 -2px 8px rgba(108,140,255,0.15);
         }
         .operator-tab .tab-badge {
             display: inline-block;
-            padding: 2px 7px;
+            padding: 2px 8px;
             border-radius: 3px;
             font-size: 0.78em;
-            margin-left: 6px;
-            font-weight: 500;
+            margin-left: 8px;
+            font-weight: 600;
             font-family: var(--mono);
+            border: 1px solid rgba(255,255,255,0.08);
         }
-        .operator-tab .tab-badge.healthy { background: var(--green-dim); color: var(--green); }
-        .operator-tab .tab-badge.warning { background: var(--yellow-dim); color: var(--yellow); }
-        .operator-tab .tab-badge.critical { background: var(--red-dim); color: var(--red); }
+        .operator-tab .tab-badge.healthy { background: rgba(45,212,160,0.2); color: #5eecc0; }
+        .operator-tab .tab-badge.warning { background: rgba(245,197,66,0.2); color: #fdd76b; }
+        .operator-tab .tab-badge.critical { background: rgba(242,92,92,0.2); color: #ff8a8a; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         .stat-number { font-size: 2em; font-weight: 700; margin: 6px 0; font-family: var(--mono); }
@@ -1891,19 +1900,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             const tabsContainer = document.getElementById('operatorTabs');
             const contentsContainer = document.getElementById('tabContents');
 
-            // If only one operator, skip tabs entirely
-            if (operators.length === 1) {
-                const opData = sortClusters(operatorGroups[operators[0]]);
-                const wrapper = document.createElement('div');
-                wrapper.className = 'content';
-                wrapper.innerHTML = '<div class="clusters-table-wrapper"><table class="clusters-table"><thead id="singleHeader"></thead><tbody id="singleBody"></tbody></table></div>';
-                contentsContainer.appendChild(wrapper);
-                renderOperatorTable(opData, document.getElementById('singleHeader'), document.getElementById('singleBody'), 'all');
-                tabsContainer.style.display = 'none';
-                return;
-            }
-
-            // Build tabs and tab content for each operator
+            // Build tabs and tab content for each operator (always show tabs)
             operators.forEach((op, idx) => {
                 const opData = sortClusters(operatorGroups[op]);
                 const shortName = op.replace(/-operator$/, '').replace(/configure-alertmanager/, 'CAMO').replace(/route-monitor/, 'RMO').replace(/osd-metrics-exporter/, 'OME');
