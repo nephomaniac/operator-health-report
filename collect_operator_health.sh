@@ -3878,6 +3878,11 @@ EOF
         hcp_unmonitored=0
         hcp_stale=0
         hcp_unmonitored_names=""
+        hcp_expected=0
+        hcp_not_ready=0
+        hcp_deleting=0
+        hcp_orphaned=0
+        rm_with_errors=0
 
         hcp_list=$(oc get hostedcontrolplane -A -o json 2>/dev/null)
         if [ -n "$hcp_list" ] && echo "$hcp_list" | jq -e '.items[0]' >/dev/null 2>&1; then
