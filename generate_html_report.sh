@@ -305,7 +305,6 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         }
         .cluster-header h2 { color: #1a3a6e; margin-bottom: 12px; font-size: 1.1em; font-weight: 600; }
         .cluster-header strong { color: #222; }
-        .health-summary { background: #f5f6f9; border-color: #d0d3dc; color: #222; }
         .health-summary strong { color: #333; }
         .cluster-meta {
             display: grid;
@@ -334,9 +333,10 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             gap: 16px;
             margin-top: 12px;
             padding: 12px;
-            background: var(--bg-secondary);
+            background: #f5f6f9;
             border-radius: var(--radius);
-            border: 1px solid var(--border);
+            border: 1px solid #d0d3dc;
+            color: #222;
         }
         .status-badge {
             display: inline-block;
