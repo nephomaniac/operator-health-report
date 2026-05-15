@@ -1539,9 +1539,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         '<div class="stat-number critical">' + criticalCount + '</div>' +
                         '<div class="stat-label">' + ((criticalCount/totalClusters)*100).toFixed(1) + '%</div>' +
                     '</div>' +
-                    '<div class="stat-card" style="background: #f0f0f0; border-left: 4px solid #6c757d;">' +
+                    '<div class="stat-card" style="border-color: var(--text-muted);">' +
                         '<div class="stat-label">No Access</div>' +
-                        '<div class="stat-number" style="color: #6c757d;">' + noAccessCount + '</div>' +
+                        '<div class="stat-number" style="color: var(--text-muted);">' + noAccessCount + '</div>' +
                         '<div class="stat-label">' + ((noAccessCount/totalClusters)*100).toFixed(1) + '%</div>' +
                     '</div>' +
                 '</div>' +
