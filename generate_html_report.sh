@@ -65,9 +65,9 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             --bg-expanded: #1a1d2b;
             --border: #2a2e3f;
             --border-light: #353a4f;
-            --text-primary: #e4e6ef;
-            --text-secondary: #8b8fa7;
-            --text-muted: #5c6078;
+            --text-primary: #f0f1f7;
+            --text-secondary: #b0b4c8;
+            --text-muted: #7e83a0;
             --accent: #6c8cff;
             --accent-dim: rgba(108,140,255,0.15);
             --green: #2dd4a0;
