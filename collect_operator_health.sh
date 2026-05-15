@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="9874607"
+SCRIPT_VERSION="e8be663"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -3415,7 +3415,13 @@ EOF
 EOF
 )")
 
-    # RMO Check 3: RouteMonitor and ClusterUrlMonitor CRD health
+    # RMO Check 3: RouteMonitor and ClusterUrlMonitor — MCC-expected resources
+    # Deployment chain:
+    #   managed-cluster-config (MCC) → osd-route-monitor-operator SSS → Hive ClusterSync → RouteMonitor CRs
+    #   RMO reconciler → ServiceMonitors, PrometheusRules, blackbox-exporter
+    # Expected CRs per cluster type (defined in MCC deploy/osd-route-monitor-operator/):
+    #   Standard/SC: RouteMonitor "console" (99.5% SLO) + ClusterUrlMonitor "api" (99.0% SLO)
+    #   MC: ClusterUrlMonitor "api" (99.0% SLO) + per-HCP RouteMonitors
     rmo_rm_status="PASS"
     rmo_rm_message=""
     rm_count=0
@@ -3423,6 +3429,8 @@ EOF
     rm_errors=0
     rm_missing_url=0
     rm_missing_sm=0
+    console_rm_exists=false
+    api_cum_exists=false
 
     routemonitors=$(oc get routemonitor -A -o json 2>/dev/null)
     clusterurlmonitors=$(oc get clusterurlmonitor -A -o json 2>/dev/null)
@@ -3431,6 +3439,10 @@ EOF
         rm_count=$(echo "$routemonitors" | jq '.items | length' 2>/dev/null || echo "0")
         rm_count=$(echo "$rm_count" | tr -d '[:space:]')
         [ -z "$rm_count" ] && rm_count=0
+
+        # Check for MCC-expected "console" RouteMonitor
+        console_check=$(echo "$routemonitors" | jq -r '.items[] | select(.metadata.name == "console" and .metadata.namespace == "openshift-route-monitor-operator")' 2>/dev/null)
+        [ -n "$console_check" ] && console_rm_exists=true
 
         if [ "$rm_count" -gt 0 ]; then
             rm_errors=$(echo "$routemonitors" | jq '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null || echo "0")
@@ -3447,6 +3459,10 @@ EOF
         cum_count_detail=$(echo "$cum_count_detail" | tr -d '[:space:]')
         [ -z "$cum_count_detail" ] && cum_count_detail=0
 
+        # Check for MCC-expected "api" ClusterUrlMonitor
+        api_check=$(echo "$clusterurlmonitors" | jq -r '.items[] | select(.metadata.name == "api" and .metadata.namespace == "openshift-route-monitor-operator")' 2>/dev/null)
+        [ -n "$api_check" ] && api_cum_exists=true
+
         if [ "$cum_count_detail" -gt 0 ]; then
             cum_errors=$(echo "$clusterurlmonitors" | jq '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null || echo "0")
             cum_errors=$(echo "$cum_errors" | tr -d '[:space:]')
@@ -3455,6 +3471,20 @@ EOF
     fi
 
     total_crd_count=$((rm_count + cum_count_detail))
+
+    # Validate MCC-expected resources per cluster type
+    mcc_issues=""
+    if [ "$cluster_type" = "management_cluster" ]; then
+        # MC expects: ClusterUrlMonitor "api" (from MCC deploy/osd-route-monitor-operator/management-cluster/)
+        # Console RouteMonitor is NOT expected on MCs
+        [ "$api_cum_exists" = false ] && mcc_issues="${mcc_issues}ClusterUrlMonitor 'api' missing (expected from MCC osd-route-monitor-operator/management-cluster/), "
+    else
+        # Standard/SC expects: RouteMonitor "console" + ClusterUrlMonitor "api" (from MCC deploy/osd-route-monitor-operator/)
+        [ "$console_rm_exists" = false ] && mcc_issues="${mcc_issues}RouteMonitor 'console' missing (expected from MCC osd-route-monitor-operator SSS), "
+        [ "$api_cum_exists" = false ] && mcc_issues="${mcc_issues}ClusterUrlMonitor 'api' missing (expected from MCC osd-route-monitor-operator SSS), "
+    fi
+    mcc_issues="${mcc_issues%, }"
+
     if [ "$total_crd_count" -eq 0 ]; then
         # Check if CRDs exist (different from CRs missing)
         rm_crd_exists=$(oc get crd routemonitors.monitoring.openshift.io --no-headers 2>/dev/null | wc -l | tr -d ' ')
@@ -3462,68 +3492,65 @@ EOF
 
         if [ "${rm_crd_exists:-0}" -eq 0 ] && [ "${cum_crd_exists:-0}" -eq 0 ]; then
             rmo_rm_status="FAIL"
-            rmo_rm_message="RouteMonitor and ClusterUrlMonitor CRDs not installed — RMO PKO package may not have deployed correctly"
+            rmo_rm_message="CRDs not installed — RMO PKO package (deployed via route-monitor-operator-pko SSS) may not have deployed correctly"
             critical_count=$((critical_count + 1))
-            echo "  ✗ CRITICAL: RouteMonitor/ClusterUrlMonitor CRDs missing"
-        elif [ "$cluster_type" = "management_cluster" ] || [ "$cluster_type" = "service_cluster" ]; then
-            rmo_rm_status="WARNING"
-            rmo_rm_message="No RouteMonitor or ClusterUrlMonitor CRs on $cluster_type — console/api monitors expected via SyncSet"
-            warning_count=$((warning_count + 1))
-            echo "  ⚠ No monitor CRs on $cluster_type (expected via SyncSet)"
+            echo "  ✗ CRITICAL: CRDs missing (source: PKO ClusterPackage via route-monitor-operator-pko SSS)"
         else
-            # Check if monitoring resources exist despite no RouteMonitor CRs
-            # Distinguish: PKO-managed (has package-operator.run labels) vs truly orphaned
-            orphan_sm_names=$(oc get servicemonitor -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}' | tr '\n' ', ' | sed 's/,$//')
-            orphan_sms=$(echo "$orphan_sm_names" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
-            # Exclude the PKO-managed controller-manager-metrics-monitor
-            orphan_sm_names=$(echo "$orphan_sm_names" | sed 's/controller-manager-metrics-monitor,\?//g' | sed 's/^,//;s/,$//')
-            orphan_sms_filtered=$(echo "$orphan_sm_names" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
+            # CRDs exist but no CRs — check for orphaned monitoring resources
+            orphan_sm_names=$(oc get servicemonitor -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}' | sed '/controller-manager-metrics-monitor/d' | tr '\n' ', ' | sed 's/,$//')
+            orphan_sms_filtered=$(echo "$orphan_sm_names" | tr ',' '\n' | command grep -c . 2>/dev/null || echo "0")
             [ -z "$orphan_sm_names" ] && orphan_sms_filtered=0
-
             orphan_pr_names=$(oc get prometheusrule -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}' | tr '\n' ', ' | sed 's/,$//')
-            orphan_prs=$(echo "$orphan_pr_names" | tr ',' '\n' | grep -c . 2>/dev/null || echo "0")
+            orphan_prs=$(echo "$orphan_pr_names" | tr ',' '\n' | command grep -c . 2>/dev/null || echo "0")
             [ -z "$orphan_pr_names" ] && orphan_prs=0
-
             bb_running=$(oc get deployment blackbox-exporter -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-
-            # Check if resources have PKO ownership
-            pko_owned_sms=$(oc get servicemonitor -n "$NAMESPACE" -o json 2>/dev/null | jq '[.items[] | select(.metadata.labels["package-operator.run/instance"] != null)] | length' 2>/dev/null || echo "0")
 
             if [ "${orphan_sms_filtered:-0}" -gt 0 ] || [ "${orphan_prs:-0}" -gt 0 ] || [ "${bb_running:-0}" -gt 0 ]; then
                 rmo_rm_status="WARNING"
-                orphan_detail="no RouteMonitor CRs but"
-                [ "${orphan_sms_filtered:-0}" -gt 0 ] && orphan_detail="$orphan_detail ServiceMonitors: $NAMESPACE/{$orphan_sm_names},"
-                [ "${orphan_prs:-0}" -gt 0 ] && orphan_detail="$orphan_detail PrometheusRules: $NAMESPACE/{$orphan_pr_names},"
-                [ "${bb_running:-0}" -gt 0 ] && orphan_detail="$orphan_detail blackbox-exporter running,"
-                orphan_detail="${orphan_detail%,}"
-                rmo_rm_message="LOAD-BEARING ORPHANS: $orphan_detail — RouteMonitor CRs deleted by SyncSet but monitoring resources remain. DO NOT DELETE — nothing will recreate them. SyncSet should be fixed to restore RouteMonitor CRs."
+                orphan_detail=""
+                [ "${orphan_sms_filtered:-0}" -gt 0 ] && orphan_detail="${orphan_detail}ServiceMonitors: $NAMESPACE/{$orphan_sm_names}, "
+                [ "${orphan_prs:-0}" -gt 0 ] && orphan_detail="${orphan_detail}PrometheusRules: $NAMESPACE/{$orphan_pr_names}, "
+                [ "${bb_running:-0}" -gt 0 ] && orphan_detail="${orphan_detail}blackbox-exporter running, "
+                orphan_detail="${orphan_detail%, }"
+                rmo_rm_message="LOAD-BEARING ORPHANS: ${mcc_issues}. Orphaned resources remain: ${orphan_detail}. Source: MCC osd-route-monitor-operator SSS should deploy CRs via Hive ClusterSync. RMO reconciler creates child resources from CRs. If CRs are deleted, children become unmanaged. DO NOT DELETE orphans — nothing will recreate them."
                 warning_count=$((warning_count + 1))
-                echo "  ⚠ LOAD-BEARING ORPHANS: $orphan_detail"
-                echo "    These are the only route monitoring resources. No SyncSet/PKO/reconciler will recreate them if deleted."
+                echo "  ⚠ LOAD-BEARING ORPHANS: $mcc_issues"
+                echo "    Orphaned: $orphan_detail"
+                echo "    Source: MCC → osd-route-monitor-operator SSS → Hive ClusterSync → CRs → RMO reconciler → monitoring"
+                echo "    Fix: Investigate ClusterSync on hive shard for this cluster"
             else
-                rmo_rm_status="INFO"
-                rmo_rm_message="No RouteMonitor CRs and no orphaned monitoring resources in $NAMESPACE"
-                echo "  ℹ No CRs and no orphaned resources"
+                rmo_rm_status="WARNING"
+                rmo_rm_message="$mcc_issues. No monitoring resources present. Source: MCC osd-route-monitor-operator SSS should deploy CRs via Hive ClusterSync. Investigate ClusterSync status on hive shard."
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ $mcc_issues"
+                echo "    No monitoring resources — route monitoring completely absent"
+                echo "    Source: MCC → osd-route-monitor-operator SSS → Hive ClusterSync"
             fi
         fi
+    elif [ -n "$mcc_issues" ]; then
+        # Some CRs exist but MCC-expected ones are missing
+        rmo_rm_status="WARNING"
+        rmo_rm_message="$mcc_issues (${rm_count} RouteMonitor(s), ${cum_count_detail} ClusterUrlMonitor(s) present)"
+        warning_count=$((warning_count + 1))
+        echo "  ⚠ $mcc_issues"
     elif [ "$rm_errors" -gt 0 ]; then
         rmo_rm_status="WARNING"
-        rmo_rm_message="$rm_errors monitor(s) have errorStatus set"
+        rmo_rm_message="$rm_errors monitor(s) have errorStatus — RMO reconciler failed to create monitoring resources"
         warning_count=$((warning_count + 1))
-        echo "  ⚠ $rm_errors monitor(s) with errors"
+        echo "  ⚠ $rm_errors monitor(s) with errors (RMO reconciler issue)"
     elif [ "$rm_missing_url" -gt 0 ]; then
         rmo_rm_status="WARNING"
-        rmo_rm_message="$rm_missing_url RouteMonitor(s) missing routeURL"
+        rmo_rm_message="$rm_missing_url RouteMonitor(s) missing routeURL — target route may not exist"
         warning_count=$((warning_count + 1))
         echo "  ⚠ $rm_missing_url RouteMonitor(s) missing URL"
     elif [ "$rm_missing_sm" -gt 0 ]; then
         rmo_rm_status="WARNING"
-        rmo_rm_message="$rm_missing_sm RouteMonitor(s) missing ServiceMonitor reference"
+        rmo_rm_message="$rm_missing_sm RouteMonitor(s) missing ServiceMonitor ref — RMO reconciler may not have processed them"
         warning_count=$((warning_count + 1))
         echo "  ⚠ $rm_missing_sm RouteMonitor(s) missing ServiceMonitor"
     else
-        rmo_rm_message="$rm_count RouteMonitor(s), $cum_count_detail ClusterUrlMonitor(s) — all healthy"
-        echo "  ✓ $rm_count RouteMonitor(s), $cum_count_detail ClusterUrlMonitor(s) — all healthy"
+        rmo_rm_message="$rm_count RouteMonitor(s), $cum_count_detail ClusterUrlMonitor(s) — all healthy (console: $console_rm_exists, api: $api_cum_exists)"
+        echo "  ✓ $rm_count RouteMonitor(s), $cum_count_detail ClusterUrlMonitor(s) — MCC expectations met"
     fi
 
     health_checks+=("$(cat <<EOF
@@ -3535,9 +3562,13 @@ EOF
   "details": {
     "routemonitor_count": $rm_count,
     "clusterurlmonitor_count": $cum_count_detail,
+    "console_routemonitor_present": $console_rm_exists,
+    "api_clusterurlmonitor_present": $api_cum_exists,
     "error_count": $rm_errors,
     "missing_url_count": $rm_missing_url,
-    "missing_servicemonitor_count": $rm_missing_sm
+    "missing_servicemonitor_count": $rm_missing_sm,
+    "mcc_issues": "$(echo "${mcc_issues:-none}" | sed 's/"/\\"/g')",
+    "deployment_chain": "MCC (deploy/osd-route-monitor-operator/) → osd-route-monitor-operator SSS → Hive ClusterSync → RouteMonitor CRs → RMO reconciler → ServiceMonitors + PrometheusRules + blackbox"
   }
 }
 EOF
