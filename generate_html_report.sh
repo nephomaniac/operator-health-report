@@ -356,8 +356,11 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             padding: 18px;
             border: 1px solid var(--border);
             border-radius: var(--radius);
+            color: #1a1d2b;
         }
-        .chart-wrapper h3 { color: #1a1d2b; margin-bottom: 12px; font-size: 1em; font-weight: 600; }
+        .chart-wrapper h3 { color: #111318; margin-bottom: 12px; font-size: 1em; font-weight: 700; }
+        .chart-wrapper div { color: #333; }
+        .chart-wrapper strong { color: #1a1d2b; }
         .chart-canvas { max-height: 320px; background: white; border-radius: 4px; padding: 4px; }
         .health-checks { margin-top: 16px; }
         .health-check {
@@ -1264,7 +1267,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             <div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 60 - 100 MB</div>
                             <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 100 MB</div>`}
                         </div>
-                        <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #333; word-break: break-all;">
                             <strong>Query:</strong> container_memory_working_set_bytes{namespace="${ns}", pod=~"${deploy}-.*", container="${containerName}"}
                         </div>
                     `;
@@ -1288,7 +1291,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             <div style="color: #ffc107; margin-left: 10px;">⚠ Warning: 1.0m - 5.0m</div>
                             <div style="color: #dc3545; margin-left: 10px;">✗ Error: &gt; 5.0m</div>
                         </div>
-                        <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #333; word-break: break-all;">
                             <strong>Query:</strong> rate(container_cpu_usage_seconds_total{namespace="${ns}", pod=~"${deploy}-.*", container="${containerName}"}[5m])
                         </div>
                     `;
@@ -1306,7 +1309,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             data-restart-events='${JSON.stringify(restartEvents).replace(/'/g, "&#39;")}'
                             data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
                         ></canvas>
-                        <div style="margin-top: 8px; padding: 8px 12px; background: #f8f8f8; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #666; word-break: break-all;">
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #333; word-break: break-all;">
                             <strong>Query:</strong> avg(probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"})
                         </div>
                     `;
