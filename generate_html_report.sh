@@ -342,11 +342,13 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
             display: inline-block;
             padding: 3px 10px;
             border-radius: 3px;
-            font-weight: 600;
+            font-weight: 700;
             font-size: 0.78em;
             text-transform: uppercase;
             letter-spacing: 0.06em;
             font-family: var(--mono);
+            text-shadow: 0 1px 0 rgba(255,255,255,0.3);
+            border: 1px solid rgba(0,0,0,0.1);
         }
         .status-badge.healthy, .status-badge.pass { background: #d4edda; color: #155724; }
         .status-badge.warning { background: #fff3cd; color: #856404; }
