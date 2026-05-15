@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="7771759"
+SCRIPT_VERSION="9874607"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -3496,9 +3496,10 @@ EOF
                 [ "${orphan_prs:-0}" -gt 0 ] && orphan_detail="$orphan_detail PrometheusRules: $NAMESPACE/{$orphan_pr_names},"
                 [ "${bb_running:-0}" -gt 0 ] && orphan_detail="$orphan_detail blackbox-exporter running,"
                 orphan_detail="${orphan_detail%,}"
-                rmo_rm_message="Orphaned RMO resources: $orphan_detail — RMO finalizer cleanup may not have completed when RouteMonitor CRs were deleted by SyncSet"
+                rmo_rm_message="LOAD-BEARING ORPHANS: $orphan_detail — RouteMonitor CRs deleted by SyncSet but monitoring resources remain. DO NOT DELETE — nothing will recreate them. SyncSet should be fixed to restore RouteMonitor CRs."
                 warning_count=$((warning_count + 1))
-                echo "  ⚠ Orphaned: $orphan_detail"
+                echo "  ⚠ LOAD-BEARING ORPHANS: $orphan_detail"
+                echo "    These are the only route monitoring resources. No SyncSet/PKO/reconciler will recreate them if deleted."
             else
                 rmo_rm_status="INFO"
                 rmo_rm_message="No RouteMonitor CRs and no orphaned monitoring resources in $NAMESPACE"
