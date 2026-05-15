@@ -61,7 +61,8 @@ OCM_ENV=$(detect_ocm_environment)
 # Capture script version (git commit SHA of operator-health-report repo)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_VERSION=$(cd "$SCRIPT_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+# AUTO-UPDATED by post-commit hook — do not edit manually
+SCRIPT_VERSION="8417798"
 
 # Default values
 NAMESPACE="openshift-monitoring"
