@@ -893,6 +893,17 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         fill: true,
                         pointRadius: 2,
                         pointHoverRadius: 4
+                    }, {
+                        label: '--- Version Update (pod restart)',
+                        data: [],
+                        borderColor: '#ff6384',
+                        borderDash: [5, 5],
+                        pointRadius: 0
+                    }, {
+                        label: '— Abnormal Restart',
+                        data: [],
+                        borderColor: '#ff9f40',
+                        pointRadius: 0
                     }]
                 },
                 options: {
@@ -952,6 +963,17 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         fill: true,
                         pointRadius: 2,
                         pointHoverRadius: 4
+                    }, {
+                        label: '--- Version Update (pod restart)',
+                        data: [],
+                        borderColor: '#ff6384',
+                        borderDash: [5, 5],
+                        pointRadius: 0
+                    }, {
+                        label: '— Abnormal Restart',
+                        data: [],
+                        borderColor: '#ff9f40',
+                        pointRadius: 0
                     }]
                 },
                 options: {
@@ -1007,6 +1029,12 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         borderColor: '#28a745',
                         backgroundColor: 'rgba(40, 167, 69, 0.1)',
                         tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 4
+                    }, {
+                        label: '--- Version Update (pod restart)',
+                        data: [],
+                        borderColor: '#ff6384',
+                        borderDash: [5, 5],
+                        pointRadius: 0
                     }]
                 },
                 options: {
@@ -1263,17 +1291,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     chartsDiv.appendChild(probeChartDiv);
                 }
 
-                if ((details.memory_timeseries && details.memory_timeseries.length > 0) ||
-                    (details.cpu_timeseries && details.cpu_timeseries.length > 0)) {
-                    const legendDiv = document.createElement('div');
-                    legendDiv.className = 'legend';
-                    legendDiv.innerHTML = `
-                        <h4>Chart Indicators</h4>
-                        <div class="legend-item"><span class="legend-marker version"></span><span>Version Update (dashed red line) — pod restart occurs at each version change</span></div>
-                        <div class="legend-item"><span class="legend-marker restart"></span><span>Abnormal Pod Restart (orange line) — CrashLoopBackOff / OOMKilled</span></div>
-                    `;
-                    chartsDiv.appendChild(legendDiv);
-                }
+                // Legend is now inline in each chart via empty datasets
             }
             detailsDiv.appendChild(chartsDiv);
 
