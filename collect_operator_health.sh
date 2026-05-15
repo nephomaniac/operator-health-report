@@ -1439,17 +1439,38 @@ if [ "$pod_count" -gt 0 ]; then
         peak_cpu_cores=0
         peak_cpu_millicores="0"
 
-        # Query probe_success timeseries for RMO (blackbox exporter probes)
+        # Query probe metrics for RMO (blackbox exporter probes)
         probe_timeseries="[]"
+        probe_duration_timeseries="[]"
+        probe_target_count=0
         if [[ "$OPERATOR_NAME" == *"route-monitor"* ]]; then
+            # Probe success rate over time
             probe_query="avg(probe_success{namespace=~\"openshift-route-monitor-operator|ocm-.*\"})"
             probe_query_encoded=$(printf '%s' "$probe_query" | jq -sRr @uri)
             probe_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
                 wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
             if [ -n "$probe_ts_data" ] && echo "$probe_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
                 probe_timeseries=$(echo "$probe_ts_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
-                probe_ts_count=$(echo "$probe_timeseries" | jq 'length' 2>/dev/null || echo "0")
-                echo "  Probe success timeseries: $probe_ts_count data points"
+                echo "  Probe success: $(echo "$probe_timeseries" | jq 'length' 2>/dev/null || echo 0) data points"
+            fi
+
+            # Probe duration (avg response time) over time
+            duration_query="avg(probe_duration_seconds{namespace=~\"openshift-route-monitor-operator|ocm-.*\"})"
+            duration_query_encoded=$(printf '%s' "$duration_query" | jq -sRr @uri)
+            duration_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${duration_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
+            if [ -n "$duration_ts_data" ] && echo "$duration_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+                probe_duration_timeseries=$(echo "$duration_ts_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
+                echo "  Probe duration: $(echo "$probe_duration_timeseries" | jq 'length' 2>/dev/null || echo 0) data points"
+            fi
+
+            # Count active probe targets
+            target_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+                wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'count(probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"})' | jq -sRr @uri)" 2>/dev/null)
+            if [ -n "$target_data" ] && echo "$target_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+                probe_target_count=$(echo "$target_data" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)
+                probe_target_count=$(echo "$probe_target_count" | tr -d '[:space:]')
+                echo "  Active probe targets: $probe_target_count"
             fi
         fi
 
@@ -1581,7 +1602,9 @@ health_checks+=("$(cat <<EOF
     "container_name": "$container_name",
     "pod_name": "${pod_name:-unknown}",
     "query_errors": "$(echo "${query_errors%, }" | sed 's/"/\\"/g')",
-    "probe_timeseries": $probe_timeseries
+    "probe_timeseries": $probe_timeseries,
+    "probe_duration_timeseries": $probe_duration_timeseries,
+    "probe_target_count": ${probe_target_count:-0}
   }
 }
 EOF

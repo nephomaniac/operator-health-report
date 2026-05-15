@@ -559,6 +559,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             if (chartType === 'memory') createMemoryChart(el.id, chartData, restarts, versions);
                             if (chartType === 'cpu') createCPUChart(el.id, chartData, restarts, versions);
                             if (chartType === 'probe') createProbeChart(el.id, chartData, restarts, versions);
+                            if (chartType === 'duration') createDurationChart(el.id, chartData, restarts, versions);
                         }, 50);
                     });
                 }
@@ -1093,6 +1094,58 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             });
         }
 
+        function createDurationChart(canvasId, data, restartEvents, versionEvents) {
+            const ctx = document.getElementById(canvasId);
+            if (!ctx) return;
+            const durationData = data.probe_duration_timeseries || [];
+            if (durationData.length === 0) return;
+
+            const timestamps = durationData.map(point => point[0] * 1000);
+            const values = durationData.map(point => parseFloat(point[1]) * 1000);
+            const annotations = {};
+            const minTs = Math.min(...timestamps);
+            const maxTs = Math.max(...timestamps);
+            addEventAnnotations(annotations, versionEvents, restartEvents, minTs, maxTs);
+
+            const chartData = timestamps.map((time, idx) => ({ x: time, y: values[idx] }));
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'Avg Probe Duration (ms)',
+                        data: chartData,
+                        borderColor: '#e67e22',
+                        backgroundColor: 'rgba(230, 126, 34, 0.1)',
+                        tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 4
+                    }, {
+                        label: '--- Version Update (pod restart)',
+                        data: [],
+                        borderColor: '#ff6384',
+                        borderDash: [5, 5],
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: true,
+                    plugins: {
+                        legend: { display: true, position: 'top' },
+                        tooltip: {
+                            mode: 'index', intersect: false,
+                            callbacks: {
+                                title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
+                                label: ctx => `Duration: ${ctx.parsed.y.toFixed(1)} ms`
+                            }
+                        },
+                        annotation: { annotations }
+                    },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
+                        y: { beginAtZero: true, title: { display: true, text: 'Duration (ms)' } }
+                    }
+                }
+            });
+        }
+
         function generateClusterDetails(cluster, clusterIdx) {
             const detailsDiv = document.createElement('div');
             detailsDiv.className = 'cluster-section';
@@ -1314,21 +1367,45 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 }
 
                 if (details.probe_timeseries && details.probe_timeseries.length > 0) {
+                    const targetCount = details.probe_target_count || 0;
                     const probeChartDiv = document.createElement('div');
                     probeChartDiv.className = 'chart-wrapper';
                     probeChartDiv.innerHTML = `
-                        <h3>Probe Success Rate Over Time</h3>
+                        <h3>Endpoint Availability — Probe Success Rate (${targetCount} active targets)</h3>
                         <canvas id="probe-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="probe"
                             data-chart-data='${JSON.stringify(details).replace(/'/g, "&#39;")}'
                             data-restart-events='${JSON.stringify(restartEvents).replace(/'/g, "&#39;")}'
                             data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
                         ></canvas>
-                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #333; word-break: break-all;">
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Note:</strong> Probe success reflects endpoint reachability, not RMO operator health.
+                            RMO health is measured by its ability to manage probes: ServiceMonitor creation, RouteMonitor reconciliation, and blackbox orchestration.
+                            A probe failure indicates the monitored endpoint is down, not that RMO itself is failing.
+                        </div>
+                        <div style="margin-top: 6px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #333; word-break: break-all;">
                             <strong>Query:</strong> avg(probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"})
                         </div>
                     `;
                     chartsDiv.appendChild(probeChartDiv);
+                }
+
+                if (details.probe_duration_timeseries && details.probe_duration_timeseries.length > 0) {
+                    const durationChartDiv = document.createElement('div');
+                    durationChartDiv.className = 'chart-wrapper';
+                    durationChartDiv.innerHTML = `
+                        <h3>Endpoint Latency — Avg Probe Duration</h3>
+                        <canvas id="duration-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="duration"
+                            data-chart-data='${JSON.stringify(details).replace(/'/g, "&#39;")}'
+                            data-restart-events='${JSON.stringify(restartEvents).replace(/'/g, "&#39;")}'
+                            data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #333; word-break: break-all;">
+                            <strong>Query:</strong> avg(probe_duration_seconds{namespace=~"openshift-route-monitor-operator|ocm-.*"})
+                        </div>
+                    `;
+                    chartsDiv.appendChild(durationChartDiv);
                 }
 
                 // Legend is now inline in each chart via empty datasets
