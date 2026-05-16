@@ -62,12 +62,12 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="e8be663"
+SCRIPT_VERSION="76be8b1"
 
 # Default values
 NAMESPACE="openshift-monitoring"
 DEPLOYMENT="configure-alertmanager-operator"
-OUTPUT_FORMAT="json"
+OUTPUT_FORMAT="json"  # only JSON output is supported
 CLUSTER_ID=""
 CLUSTER_NAME=""
 CLUSTER_VERSION=""
@@ -98,9 +98,17 @@ discover_hive_target() {
 
     # Query OCM for provision_shard to get Hive cluster info
     local provision_shard
-    provision_shard=$(ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/provision_shard" 2>/dev/null)
+    local _psef
+    _psef=$(mktemp)
+    provision_shard=$(ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/provision_shard" 2>"$_psef")
+    local _psrc=$?
+    if [ $_psrc -ne 0 ]; then
+        local _pserr=$(head -1 "$_psef")
+        log_api_error "Get provision shard for $cluster_id" "${_pserr:-unknown error}" "$_psrc"
+    fi
+    rm -f "$_psef"
 
-    if [ $? -ne 0 ] || [ -z "$provision_shard" ]; then
+    if [ $_psrc -ne 0 ] || [ -z "$provision_shard" ]; then
         # Fallback to environment-based defaults if OCM query fails
         case "$ocm_env" in
             stage) echo "staging" ;;
@@ -234,7 +242,6 @@ Perform comprehensive operator health check
 OPTIONS:
     --namespace, -n NAMESPACE   Namespace to query (default: openshift-monitoring)
     --deployment, -d DEPLOY     Deployment name (default: configure-alertmanager-operator)
-    --format, -f FORMAT         Output format: json or csv (default: json)
     --cluster-id, -c ID         Cluster ID for tracking (auto-detected if not provided)
     --cluster-name NAME         Cluster name for display (auto-detected if not provided)
     --cluster-version VERSION   Cluster OpenShift version (auto-detected if not provided)
@@ -270,7 +277,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --namespace|-n) NAMESPACE="$2"; shift 2 ;;
         --deployment|-d) DEPLOYMENT="$2"; shift 2 ;;
-        --format|-f) OUTPUT_FORMAT="$2"; shift 2 ;;
+        --format|-f) shift 2 ;; # ignored, JSON is the only output format
         --cluster-id|-c) CLUSTER_ID="$2"; shift 2 ;;
         --cluster-name) CLUSTER_NAME="$2"; shift 2 ;;
         --cluster-version) CLUSTER_VERSION="$2"; shift 2 ;;
@@ -342,42 +349,118 @@ add_health_check() {
     debug_log "Added health check #${#health_checks[@]}: $check_name"
 }
 
+# Current check context — set before each check section so errors know which check they belong to
+CURRENT_CHECK=""
+
 # Function to log API errors
 log_api_error() {
     local operation="$1"
     local error_message="$2"
     local exit_code="${3:-1}"
+    local command="${4:-}"
 
     debug_log "API Error: $operation - $error_message (exit code: $exit_code)"
 
     # Escape values for JSON
     local escaped_operation=$(echo "$operation" | jq -Rs . 2>/dev/null || echo "\"unknown\"")
     local escaped_error=$(echo "$error_message" | jq -Rs . 2>/dev/null || echo "\"API error\"")
+    local escaped_command=$(echo "$command" | jq -Rs . 2>/dev/null || echo "\"\"")
+
+    # Classify error type: api_error (server response) vs script_error (local tooling/bash)
+    local error_type="api_error"
+    local err_lower=$(echo "$error_message" | tr '[:upper:]' '[:lower:]')
+    if echo "$err_lower" | grep -qE 'command not found|no such file|permission denied|syntax error|unbound variable|bad substitution'; then
+        error_type="script_error"
+    elif echo "$err_lower" | grep -qE 'forbidden|unauthorized|not found|error from server|cannot|denied'; then
+        error_type="api_error"
+    elif [ "$exit_code" -eq 126 ] || [ "$exit_code" -eq 127 ]; then
+        error_type="script_error"
+    fi
 
     local error_entry=$(cat <<EOF
 {
   "operation": $escaped_operation,
   "error_message": $escaped_error,
+  "command": $escaped_command,
+  "check": "${CURRENT_CHECK:-unknown}",
+  "error_type": "$error_type",
   "exit_code": $exit_code,
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 )
     api_errors+=("$error_entry")
-    debug_log "Added API error entry #${#api_errors[@]}"
+    debug_log "Added API error entry #${#api_errors[@]} (check: ${CURRENT_CHECK:-unknown})"
+}
+
+# Run an oc/ocm command with error capture and reporting.
+# Sets global variables instead of using subshell capture, so api_errors is updated.
+#   __oc_out  — stdout of the command (empty on failure)
+#   __oc_rc   — exit code
+#   __oc_err  — first line of stderr (empty on success)
+# Usage:
+#   _run_oc "Get RouteMonitor CRs" ocm backplane elevate "$REASON" -- get routemonitor -A -o json
+#   routemonitors="$__oc_out"
+#   if [ $__oc_rc -ne 0 ]; then echo "FAILED: $__oc_err"; fi
+_run_oc() {
+    local _desc="$1"
+    shift
+    local _cmd="$*"
+    local _ef
+    _ef=$(mktemp)
+    __oc_out=$("$@" 2>"$_ef")
+    __oc_rc=$?
+    if [ $__oc_rc -ne 0 ]; then
+        __oc_err=$(head -1 "$_ef")
+        rm -f "$_ef"
+        log_api_error "$_desc" "$__oc_err" "$__oc_rc" "$_cmd"
+        __oc_out=""
+        return $__oc_rc
+    fi
+    __oc_err=""
+    rm -f "$_ef"
+    return 0
+}
+
+# Like _run_oc but treats "not found" as an expected result, not an error.
+# Use for existence checks where absence is a valid outcome (e.g., OLM subscription on PKO cluster).
+# Still sets __oc_out/__oc_rc/__oc_err; only logs to api_errors if error is NOT "not found".
+_run_oc_optional() {
+    local _desc="$1"
+    shift
+    local _cmd="$*"
+    local _ef
+    _ef=$(mktemp)
+    __oc_out=$("$@" 2>"$_ef")
+    __oc_rc=$?
+    if [ $__oc_rc -ne 0 ]; then
+        __oc_err=$(head -1 "$_ef")
+        rm -f "$_ef"
+        if ! echo "$__oc_err" | grep -qi "not found"; then
+            log_api_error "$_desc" "$__oc_err" "$__oc_rc" "$_cmd"
+        fi
+        __oc_out=""
+        return $__oc_rc
+    fi
+    __oc_err=""
+    rm -f "$_ef"
+    return 0
 }
 
 # Auto-detect cluster ID if not provided
 if [ -z "$CLUSTER_ID" ]; then
-    CLUSTER_ID=$(oc get clusterversion version -o jsonpath='{.spec.clusterID}' 2>/dev/null || echo "unknown")
+    _run_oc "Get cluster ID from clusterversion" oc get clusterversion version -o jsonpath='{.spec.clusterID}'
+    CLUSTER_ID="${__oc_out:-unknown}"
 fi
 debug_var CLUSTER_ID
 
 # Auto-detect cluster name if not provided
 if [ -z "$CLUSTER_NAME" ]; then
-    CLUSTER_NAME=$(ocm backplane status 2>/dev/null | grep "Cluster Name:" | awk '{print $3}' || echo "")
+    _run_oc "Get cluster name from backplane status" ocm backplane status
+    CLUSTER_NAME=$(echo "$__oc_out" | grep "Cluster Name:" | awk '{print $3}')
     if [ -z "$CLUSTER_NAME" ]; then
-        CLUSTER_NAME=$(ocm get cluster "$CLUSTER_ID" 2>/dev/null | jq -r '.name // "unknown"' || echo "unknown")
+        _run_oc "Get cluster name from OCM API" ocm get cluster "$CLUSTER_ID"
+        CLUSTER_NAME=$(echo "$__oc_out" | jq -r '.name // "unknown"' 2>/dev/null || echo "unknown")
     fi
 fi
 
@@ -392,7 +475,8 @@ collect_cluster_metadata() {
     fi
 
     local cluster_data
-    cluster_data=$(ocm get cluster "$cluster_id" 2>/dev/null)
+    _run_oc "Get cluster data from OCM" ocm get cluster "$cluster_id"
+    local cluster_data="$__oc_out"
 
     if [ -z "$cluster_data" ]; then
         echo "{}"
@@ -400,8 +484,8 @@ collect_cluster_metadata() {
     fi
 
     # Query provision_shard separately (not in main cluster object)
-    local provision_shard
-    provision_shard=$(ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/provision_shard" 2>/dev/null)
+    _run_oc "Get provision shard for $cluster_id" ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/provision_shard"
+    local provision_shard="$__oc_out"
     local shard_url
     shard_url=$(echo "$provision_shard" | jq -r '.hive_config.server // "unknown"' 2>/dev/null || echo "unknown")
 
@@ -410,7 +494,8 @@ collect_cluster_metadata() {
     limited_support_count=$(echo "$cluster_data" | jq -r '.status.limited_support_reason_count // 0')
     local limited_support_reasons="[]"
     if [ "$limited_support_count" -gt 0 ]; then
-        limited_support_reasons=$(ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/limited_support_reasons" 2>/dev/null | jq '[.items[] | {summary: .summary, details: .details, created: .creation_timestamp}]' 2>/dev/null || echo "[]")
+        _run_oc "Get limited support reasons for $cluster_id" ocm get "/api/clusters_mgmt/v1/clusters/${cluster_id}/limited_support_reasons"
+        limited_support_reasons=$(echo "$__oc_out" | jq '[.items[] | {summary: .summary, details: .details, created: .creation_timestamp}]' 2>/dev/null || echo "[]")
     fi
 
     # Use jq to extract and format all fields in one pass (avoids newlines in output)
@@ -480,7 +565,8 @@ if [ -n "$CLUSTER_VERSION" ]; then
     cluster_version="$CLUSTER_VERSION"
 else
     echo "Getting cluster version..."
-    cluster_version=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || echo "unknown")
+    _run_oc "Get cluster version" oc get clusterversion version -o jsonpath='{.status.desired.version}'
+    cluster_version="${__oc_out:-unknown}"
 fi
 echo "Cluster version: $cluster_version"
 
@@ -493,13 +579,14 @@ deployment_fetch_exit_code=$?
 if [ $deployment_fetch_exit_code -ne 0 ] || [ -z "$operator_image" ]; then
     echo "  ⚠ Deployment fetch failed (backplane creds may not have synced)"
     # Try ClusterPackage as fallback (cluster-scoped, doesn't require namespace RBAC)
-    operator_image=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.image}' 2>/dev/null)
+    _run_oc "Get operator image from ClusterPackage" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.image}'
+    operator_image="$__oc_out"
     if [ -n "$operator_image" ]; then
         echo "  ✓ Recovered image from ClusterPackage: $operator_image"
     else
         # Last resort: try with elevation
-        operator_image=$(ocm backplane elevate "${REASON}" -- get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o json 2>>"$deployment_fetch_error" | \
-            jq -r '.spec.template.spec.containers[0].image // ""' 2>/dev/null)
+        _run_oc "Get deployment with elevation" ocm backplane elevate "${REASON}" -- get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o json
+        operator_image=$(echo "$__oc_out" | jq -r '.spec.template.spec.containers[0].image // ""' 2>/dev/null)
     fi
 fi
 
@@ -566,8 +653,10 @@ fi
 
 # Try ClusterPackage spec.config.version (authoritative for PKO-deployed operators)
 if [ "$operator_version" = "unknown" ]; then
-    pkg_version=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.version}' 2>/dev/null)
-    pkg_image=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.image}' 2>/dev/null)
+    _run_oc "Get ClusterPackage version" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.version}'
+    pkg_version="$__oc_out"
+    _run_oc "Get ClusterPackage image" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.spec.config.image}'
+    pkg_image="$__oc_out"
     if [ -n "$pkg_version" ] && [ "$pkg_version" != "null" ]; then
         operator_version="$pkg_version"
         git_commit="${pkg_version:0:12}"
@@ -585,7 +674,8 @@ if [ "$operator_version" = "unknown" ] && [ -n "$operator_image" ] && [ "$operat
 
     # Try to get image labels using skopeo (if available)
     if command -v skopeo &> /dev/null; then
-        image_labels=$(skopeo inspect --no-tags "docker://$operator_image" 2>/dev/null | jq -r '.Labels // {}' 2>/dev/null)
+        _run_oc "Version detection: read git commit from image labels (skopeo inspect $operator_image)" skopeo inspect --no-tags "docker://$operator_image"
+        image_labels=$(echo "$__oc_out" | jq -r '.Labels // {}' 2>/dev/null)
 
         if [ -n "$image_labels" ] && [ "$image_labels" != "{}" ]; then
             # Try common label keys for git commit
@@ -609,8 +699,8 @@ if [ "$operator_version" = "unknown" ] && [ -n "$operator_image" ] && [ "$operat
 
     # Fallback: try to get build annotations from deployment
     if [ -z "$git_commit" ] || [ "$git_commit" = "null" ]; then
-        deployment_annotations=$(oc get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o json 2>/dev/null | \
-            jq -r '.metadata.annotations // {}' 2>/dev/null)
+        _run_oc "Get deployment annotations" oc get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o json
+        deployment_annotations=$(echo "$__oc_out" | jq -r '.metadata.annotations // {}' 2>/dev/null)
 
         if [ -n "$deployment_annotations" ] && [ "$deployment_annotations" != "{}" ]; then
             git_commit=$(echo "$deployment_annotations" | jq -r '
@@ -653,10 +743,12 @@ if [ "$operator_version" = "unknown" ]; then
 
     # Retry: try extracting version from ClusterPackage image if available
     if [ "$operator_version" = "unknown" ]; then
-        pkg_image=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}' 2>/dev/null | grep -oE '[a-f0-9]{7,12}' | head -1)
+        _run_oc "Get ClusterPackage Available message (version fallback)" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}'
+        pkg_image=$(echo "$__oc_out" | grep -oE '[a-f0-9]{7,12}' | head -1)
         if [ -z "$pkg_image" ]; then
             # Try getting image directly from the running pod
-            pod_image=$(oc get pods -n "$NAMESPACE" -l "${pod_selector:-name=$DEPLOYMENT}" -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null)
+            _run_oc "Get pod image (version fallback)" oc get pods -n "$NAMESPACE" -l "${pod_selector:-name=$DEPLOYMENT}" -o jsonpath='{.items[0].spec.containers[0].image}'
+            pod_image="$__oc_out"
             if [ -n "$pod_image" ] && [ "$pod_image" != "$operator_image" ]; then
                 echo "    - Retrying with pod image: $pod_image"
                 if [[ "$pod_image" =~ :v([0-9]+\.[0-9]+\.[0-9]+(-g[a-f0-9]+)?) ]]; then
@@ -706,19 +798,21 @@ warning_count=0
 # 0. NAMESPACE STATUS CHECK
 #=============================================================================
 echo "================================================================================"
+CURRENT_CHECK="namespace_status"
 echo "CHECK 0: Namespace Status"
 echo "================================================================================"
 
 namespace_check_status="PASS"
 namespace_message=""
-namespace_phase=$(oc get namespace "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
-namespace_exit=$?
+_run_oc "Get namespace $NAMESPACE phase" oc get namespace "$NAMESPACE" -o jsonpath='{.status.phase}'
+namespace_phase="$__oc_out"
+namespace_exit=$__oc_rc
 
 if [ $namespace_exit -ne 0 ] || [ -z "$namespace_phase" ]; then
     namespace_check_status="FAIL"
-    namespace_message="Namespace $NAMESPACE does not exist"
+    namespace_message="Namespace $NAMESPACE does not exist${__oc_err:+ (error: $__oc_err)}"
     critical_count=$((critical_count + 1))
-    echo "  ✗ CRITICAL: Namespace $NAMESPACE not found"
+    echo "  ✗ CRITICAL: Namespace $NAMESPACE not found${__oc_err:+ (error: $__oc_err)}"
 elif [ "$namespace_phase" = "Terminating" ]; then
     namespace_check_status="FAIL"
     namespace_message="Namespace $NAMESPACE is Terminating"
@@ -763,6 +857,7 @@ if [ "$namespace_check_status" != "FAIL" ]; then
 # 1. VERSION VERIFICATION
 #=============================================================================
 echo "================================================================================"
+CURRENT_CHECK="version_verification"
 echo "CHECK 1: Version Verification Against ${OCM_ENV^} Environment Target"
 echo "================================================================================"
 
@@ -825,14 +920,16 @@ elif [ -n "$SAAS_REFS_SCRIPT" ] && [ -f "$SAAS_REFS_SCRIPT" ]; then
                     echo "  Fetching current HEAD commit of branch '$ref' from GitHub..."
 
                     # Get GitHub repo URL from saas file
-                    github_repo_url=$(curl -s "https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data/services/osd-operators/cicd/saas/${SAAS_FILE}?ref_type=heads" 2>/dev/null | yq -r ".resourceTemplates[] | select(.name | test(\"${OPERATOR_NAME}\")) | .url" 2>/dev/null)
+                    _run_oc "Fetch SAAS file from app-interface" curl -s "https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data/services/osd-operators/cicd/saas/${SAAS_FILE}?ref_type=heads"
+                    github_repo_url=$(echo "$__oc_out" | yq -r ".resourceTemplates[] | select(.name | test(\"${OPERATOR_NAME}\")) | .url" 2>/dev/null)
 
                     if [ -n "$github_repo_url" ]; then
                         # Extract owner/repo from GitHub URL
                         github_repo=$(echo "$github_repo_url" | sed -E 's|https://github.com/||' | sed 's|\.git$||')
 
                         # Query GitHub API for current HEAD of the branch
-                        branch_head=$(curl -s "https://api.github.com/repos/${github_repo}/commits/${ref}" 2>/dev/null | jq -r '.sha' 2>/dev/null)
+                        _run_oc "Get branch HEAD from GitHub API" curl -s "https://api.github.com/repos/${github_repo}/commits/${ref}"
+                        branch_head=$(echo "$__oc_out" | jq -r '.sha' 2>/dev/null)
 
                         if [ -n "$branch_head" ] && [ "$branch_head" != "null" ]; then
                             # Replace canonical_version with the actual branch HEAD commit
@@ -898,7 +995,8 @@ if [ -n "$canonical_version" ]; then
         else
             # Query registry and cache result
             echo "  Resolving tag to SHA: $operator_image"
-            resolved_sha=$(skopeo inspect --no-tags "docker://${operator_image}" 2>/dev/null | jq -r '.Digest // empty' 2>/dev/null)
+            _run_oc "Version check: resolve deployed image tag to SHA digest (skopeo)" skopeo inspect --no-tags "docker://${operator_image}"
+            resolved_sha=$(echo "$__oc_out" | jq -r '.Digest // empty' 2>/dev/null)
             if [ -n "$resolved_sha" ] && [ "$resolved_sha" != "null" ]; then
                 image_sha_cache[$operator_image]="$resolved_sha"
                 current_image_sha="$resolved_sha"
@@ -923,7 +1021,8 @@ if [ -n "$canonical_version" ]; then
     # Try SHA comparison if we have both the current SHA and staging image tag
     if [ "$version_match" = false ] && [ -n "$current_image_sha" ] && [ -n "$canonical_image_tag" ] && [ "$canonical_image_tag" != "null" ] && [ "$canonical_image_tag" != "N/A" ]; then
         echo "  Querying staging image SHA for comparison..."
-        staging_image_sha=$(skopeo inspect --no-tags "docker://quay.io/app-sre/${DEPLOYMENT}:${canonical_image_tag}" 2>/dev/null | jq -r '.Digest' 2>/dev/null)
+        _run_oc "Version check: compare deployed image SHA against staging tag '${canonical_image_tag}' in quay.io/app-sre/${OPERATOR_NAME}" skopeo inspect --no-tags "docker://quay.io/app-sre/${OPERATOR_NAME}:${canonical_image_tag}"
+        staging_image_sha=$(echo "$__oc_out" | jq -r '.Digest' 2>/dev/null)
 
         if [ -n "$staging_image_sha" ] && [ "$staging_image_sha" != "null" ]; then
             staging_image_sha_short=$(echo "$staging_image_sha" | cut -c8-19)
@@ -1025,6 +1124,7 @@ echo ""
 # 2. POD STATUS AND RESTART CHECKS
 #=============================================================================
 echo "================================================================================"
+CURRENT_CHECK="pod_status_and_restarts"
 echo "CHECK 2: Pod Status and Restart Analysis"
 echo "================================================================================"
 
@@ -1166,7 +1266,8 @@ recent_crash=false
 if [ "$pod_count" -gt 0 ]; then
     current_ts=$(date +%s)
     pod_created=$(echo "$pods_json" | jq -r '.items[0].status.startTime // empty' 2>/dev/null)
-    deploy_created=$(oc get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+    _run_oc "Get deployment creation timestamp" oc get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o jsonpath='{.metadata.creationTimestamp}'
+    deploy_created="$__oc_out"
 
     if [ -n "$pod_created" ]; then
         pod_epoch=$(parse_timestamp "$pod_created")
@@ -1218,6 +1319,7 @@ echo ""
 # 2b. LEADER ELECTION LEASE CHECK
 #=============================================================================
 echo "================================================================================"
+CURRENT_CHECK="leader_election"
 echo "CHECK 2b: Leader Election"
 echo "================================================================================"
 
@@ -1241,7 +1343,8 @@ if [ "${desired_replicas:-1}" -le 1 ]; then
 fi
 
 if [ "$lease_check_status" != "SKIP" ]; then
-lease_json=$(oc get lease -n "$NAMESPACE" "$lease_name" -o json 2>/dev/null)
+_run_oc "Get lease $NAMESPACE/$lease_name" oc get lease -n "$NAMESPACE" "$lease_name" -o json
+lease_json="$__oc_out"
 
 if [ -n "$lease_json" ] && echo "$lease_json" | jq -e '.metadata.name' >/dev/null 2>&1; then
     lease_holder=$(echo "$lease_json" | jq -r '.spec.holderIdentity // empty' 2>/dev/null)
@@ -1327,6 +1430,7 @@ echo ""
 # 3. CPU AND MEMORY LEAK DETECTION
 #=============================================================================
 echo "================================================================================"
+CURRENT_CHECK="resource_leak_detection"
 echo "CHECK 3: CPU and Memory Trend Analysis"
 echo "================================================================================"
 
@@ -1441,38 +1545,70 @@ if [ "$pod_count" -gt 0 ]; then
         peak_cpu_millicores="0"
 
         # Query probe metrics for RMO (blackbox exporter probes)
+        # Probe timeseries: per-endpoint success rate and latency
+        # Returns separate timeseries per probe (api, console) instead of avg()
+        # probe_timeseries format: [{label: "api|console", values: [[ts, val], ...]}, ...]
         probe_timeseries="[]"
         probe_duration_timeseries="[]"
         probe_target_count=0
+        probe_target_names=""
         if [[ "$OPERATOR_NAME" == *"route-monitor"* ]]; then
-            # Probe success rate over time
-            probe_query="avg(probe_success{namespace=~\"openshift-route-monitor-operator|ocm-.*\"})"
+            # Per-probe success rate over time (each probe gets its own line)
+            probe_query="probe_success{namespace=\"openshift-route-monitor-operator\"}"
             probe_query_encoded=$(printf '%s' "$probe_query" | jq -sRr @uri)
+            probe_ts_err=$(mktemp)
             probe_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
-            if [ -n "$probe_ts_data" ] && echo "$probe_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-                probe_timeseries=$(echo "$probe_ts_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
-                echo "  Probe success: $(echo "$probe_timeseries" | jq 'length' 2>/dev/null || echo 0) data points"
+                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>"$probe_ts_err")
+            if [ $? -ne 0 ]; then
+                probe_ts_err_msg=$(head -1 "$probe_ts_err")
+                query_errors="${query_errors}probe success query failed${probe_ts_err_msg:+ ($probe_ts_err_msg)}, "
+                log_api_error "Local probe success rate query" "${probe_ts_err_msg:-timeout or connection error}" "$?"
+                echo "  ⚠ Probe success query failed: ${probe_ts_err_msg:-timeout or connection error}"
+            elif [ -n "$probe_ts_data" ] && echo "$probe_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+                # Extract per-probe timeseries with labels derived from probe_url
+                probe_timeseries=$(echo "$probe_ts_data" | jq -c '[.data.result[] | {
+                    label: (if .metric.probe_url then
+                        (if (.metric.probe_url | test("console")) then "console"
+                         elif (.metric.probe_url | test("api|livez")) then "api"
+                         else (.metric.probe_url | split("/")[-1] // "unknown") end)
+                    else "probe-" + (.metric.instance // "unknown") end),
+                    probe_url: (.metric.probe_url // ""),
+                    values: .values
+                }]' 2>/dev/null || echo "[]")
+                probe_target_count=$(echo "$probe_ts_data" | jq '.data.result | length' 2>/dev/null | tr -d '[:space:]')
+                probe_target_names=$(echo "$probe_ts_data" | jq -r '[.data.result[] | if .metric.probe_url then (if (.metric.probe_url | test("console")) then "console" elif (.metric.probe_url | test("api|livez")) then "api" else .metric.probe_url end) else "unknown" end] | join(", ")' 2>/dev/null)
+                echo "  Probe success: $probe_target_count endpoint(s): $probe_target_names"
+            else
+                echo "  ℹ Probe success: no data returned (probes may not be active)"
             fi
+            rm -f "$probe_ts_err"
 
-            # Probe duration (avg response time) over time
-            duration_query="avg(probe_duration_seconds{namespace=~\"openshift-route-monitor-operator|ocm-.*\"})"
+            # Per-probe duration (latency) over time
+            duration_query="probe_duration_seconds{namespace=\"openshift-route-monitor-operator\"}"
             duration_query_encoded=$(printf '%s' "$duration_query" | jq -sRr @uri)
+            duration_ts_err=$(mktemp)
             duration_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${duration_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>/dev/null)
-            if [ -n "$duration_ts_data" ] && echo "$duration_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-                probe_duration_timeseries=$(echo "$duration_ts_data" | jq -c '[.data.result[].values[]] | sort_by(.[0]) | unique_by(.[0])' 2>/dev/null || echo "[]")
-                echo "  Probe duration: $(echo "$probe_duration_timeseries" | jq 'length' 2>/dev/null || echo 0) data points"
+                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${duration_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>"$duration_ts_err")
+            if [ $? -ne 0 ]; then
+                dur_err_msg=$(head -1 "$duration_ts_err")
+                query_errors="${query_errors}probe duration query failed${dur_err_msg:+ ($dur_err_msg)}, "
+                log_api_error "Local probe duration query" "${dur_err_msg:-timeout or connection error}" "$?"
+                echo "  ⚠ Probe duration query failed: ${dur_err_msg:-timeout or connection error}"
+            elif [ -n "$duration_ts_data" ] && echo "$duration_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+                probe_duration_timeseries=$(echo "$duration_ts_data" | jq -c '[.data.result[] | {
+                    label: (if .metric.probe_url then
+                        (if (.metric.probe_url | test("console")) then "console"
+                         elif (.metric.probe_url | test("api|livez")) then "api"
+                         else (.metric.probe_url | split("/")[-1] // "unknown") end)
+                    else "probe-" + (.metric.instance // "unknown") end),
+                    probe_url: (.metric.probe_url // ""),
+                    values: .values
+                }]' 2>/dev/null || echo "[]")
+                echo "  Probe duration: $(echo "$duration_ts_data" | jq '.data.result | length' 2>/dev/null | tr -d '[:space:]') endpoint(s)"
+            else
+                echo "  ℹ Probe duration: no data returned"
             fi
-
-            # Count active probe targets
-            target_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-                wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'count(probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"})' | jq -sRr @uri)" 2>/dev/null)
-            if [ -n "$target_data" ] && echo "$target_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-                probe_target_count=$(echo "$target_data" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null)
-                probe_target_count=$(echo "$probe_target_count" | tr -d '[:space:]')
-                echo "  Active probe targets: $probe_target_count"
-            fi
+            rm -f "$duration_ts_err"
         fi
 
         # Process memory data
@@ -1617,6 +1753,7 @@ echo ""
 # 3b. RESOURCE LIMITS VALIDATION
 #=============================================================================
 echo "================================================================================"
+CURRENT_CHECK="resource_limits_validation"
 echo "CHECK 3b: Resource Limits Validation"
 echo "================================================================================"
 
@@ -1634,7 +1771,8 @@ cpu_usage_percent="0"
 memory_usage_percent="0"
 
 if [ "$pod_count" -gt 0 ]; then
-    resource_json=$(oc get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o jsonpath='{.spec.template.spec.containers[0].resources}' 2>/dev/null)
+    _run_oc "Get deployment resource limits" oc get deployment -n "$NAMESPACE" "$DEPLOYMENT" -o jsonpath='{.spec.template.spec.containers[0].resources}'
+    resource_json="$__oc_out"
 
     if [ -n "$resource_json" ]; then
         limits_cpu_value=$(echo "$resource_json" | jq -r '.limits.cpu // empty' 2>/dev/null)
@@ -1751,6 +1889,7 @@ echo ""
 # 4. LOG ERROR ANALYSIS
 #=============================================================================
 echo "================================================================================"
+CURRENT_CHECK="log_error_analysis"
 echo "CHECK 4: Log Error Analysis"
 echo "================================================================================"
 
@@ -1768,7 +1907,8 @@ if [ "$pod_count" -gt 0 ]; then
         echo "Analyzing logs for pod: $pod_name"
 
         # Get recent logs and look for errors
-        logs=$(oc logs -n "$NAMESPACE" "$pod_name" --tail=500 2>/dev/null || echo "")
+        _run_oc "Get logs for pod $pod_name" oc logs -n "$NAMESPACE" "$pod_name" --tail=500
+        logs="$__oc_out"
 
         if [ -n "$logs" ]; then
             # Count error lines (case-insensitive)
@@ -1865,6 +2005,7 @@ echo ""
 # 5. OPERATOR-SPECIFIC HEALTH CHECKS
 #=============================================================================
 echo "================================================================================"
+CURRENT_CHECK="operator_specific"
 echo "CHECK 5: Operator-Specific Health"
 echo "================================================================================"
 
@@ -1872,8 +2013,10 @@ echo "==========================================================================
 if [[ "$OPERATOR_NAME" == *"configure-alertmanager"* ]]; then
     echo "Running CAMO-specific health checks..."
 
+    CURRENT_CHECK="alertmanager_pods"
     # Check 1: Alertmanager pods status and restarts
-    alertmanager_pods=$(oc get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=alertmanager" -o json 2>/dev/null)
+    _run_oc "Get AlertManager pods" oc get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=alertmanager" -o json
+    alertmanager_pods="$__oc_out"
     alertmanager_pod_count=$(echo "$alertmanager_pods" | jq -r '.items | length' 2>/dev/null || echo "0")
 
     alertmanager_pods_status="SKIP"
@@ -1947,7 +2090,8 @@ if [[ "$OPERATOR_NAME" == *"configure-alertmanager"* ]]; then
         # Get CAMO operator pod creation time to correlate with AlertManager restarts
         camo_pod_creation=""
         camo_pod_age="unknown"
-        camo_pods=$(oc get pods -n "$NAMESPACE" -l "app=$DEPLOYMENT" -o json 2>/dev/null)
+        _run_oc "Get CAMO operator pods" oc get pods -n "$NAMESPACE" -l "app=$DEPLOYMENT" -o json
+        camo_pods="$__oc_out"
         if [ -n "$camo_pods" ]; then
             camo_pod_creation=$(echo "$camo_pods" | jq -r '[.items[].metadata.creationTimestamp] | sort | .[0] // ""' 2>/dev/null)
 
@@ -2037,6 +2181,7 @@ if [[ "$OPERATOR_NAME" == *"configure-alertmanager"* ]]; then
 EOF
 )")
 
+    CURRENT_CHECK="alertmanager_statefulset"
     # Check 2: Alertmanager StatefulSet status
     alertmanager_sts_error=$(mktemp)
     alertmanager_sts=$(oc get statefulset alertmanager-main -n "$NAMESPACE" -o json 2>"$alertmanager_sts_error")
@@ -2085,8 +2230,10 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="controller_availability"
     # Check 3: Operator controller availability
-    controller_available=$(oc get deployment "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null)
+    _run_oc "Get deployment Available condition" oc get deployment "$DEPLOYMENT" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+    controller_available="$__oc_out"
     controller_status="FAIL"
     controller_message="Controller not available"
 
@@ -2110,9 +2257,11 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="reconciliation_activity"
     # Check 4: Recent reconciliation activity with resource change validation
     # Get recent reconciliation log count
-    recent_logs=$(oc logs -n "$NAMESPACE" "deployment/$DEPLOYMENT" --since=5m --tail=10 2>/dev/null | wc -l | tr -d ' ')
+    _run_oc "Get recent CAMO logs (5m)" oc logs -n "$NAMESPACE" "deployment/$DEPLOYMENT" --since=5m --tail=10
+    recent_logs=$(echo "$__oc_out" | wc -l | tr -d ' ')
 
     # Get timestamp for 5 minutes ago for resource change detection
     if date --version >/dev/null 2>&1; then
@@ -2127,9 +2276,14 @@ EOF
     echo "  Checking for recent changes to watched resources..."
 
     # Count recent secret changes across all namespaces (CAMO watches secrets cluster-wide)
+    # Requires elevation — cluster-wide secret listing is RBAC-restricted
     secret_changes_count=0
-    secrets_data=$(oc get secrets --all-namespaces -o json 2>/dev/null)
-    if [ -n "$secrets_data" ]; then
+    reconciliation_query_errors=""
+    _run_oc "Get secrets (all namespaces, elevated)" ocm backplane elevate "${REASON}" -- get secrets --all-namespaces -o json
+    secrets_data="$__oc_out"
+    if [ $__oc_rc -ne 0 ]; then
+        reconciliation_query_errors="${reconciliation_query_errors}secrets query failed (${__oc_err}); "
+    elif [ -n "$secrets_data" ]; then
         secret_changes_count=$(echo "$secrets_data" | jq "[.items[] | select(
             (.metadata.creationTimestamp > \"$lookback_timestamp\") or
             ([.metadata.managedFields[]?.time // \"\" | select(. > \"$lookback_timestamp\")] | length > 0)
@@ -2138,8 +2292,11 @@ EOF
 
     # Count recent configmap changes across all namespaces (CAMO watches configmaps cluster-wide)
     configmap_changes_count=0
-    configmaps_data=$(oc get configmaps --all-namespaces -o json 2>/dev/null)
-    if [ -n "$configmaps_data" ]; then
+    _run_oc "Get configmaps (all namespaces, elevated)" ocm backplane elevate "${REASON}" -- get configmaps --all-namespaces -o json
+    configmaps_data="$__oc_out"
+    if [ $__oc_rc -ne 0 ]; then
+        reconciliation_query_errors="${reconciliation_query_errors}configmaps query failed (${__oc_err}); "
+    elif [ -n "$configmaps_data" ]; then
         configmap_changes_count=$(echo "$configmaps_data" | jq "[.items[] | select(
             (.metadata.creationTimestamp > \"$lookback_timestamp\") or
             ([.metadata.managedFields[]?.time // \"\" | select(. > \"$lookback_timestamp\")] | length > 0)
@@ -2148,7 +2305,8 @@ EOF
 
     # Check for recent ClusterVersion changes (CAMO watches for upgrades)
     clusterversion_changes_count=0
-    clusterversion_data=$(oc get clusterversion version -o json 2>/dev/null)
+    _run_oc "Get clusterversion" oc get clusterversion version -o json
+    clusterversion_data="$__oc_out"
     if [ -n "$clusterversion_data" ]; then
         clusterversion_last_update=$(echo "$clusterversion_data" | jq -r '.status.history[0].completionTime // ""' 2>/dev/null)
         if [ -n "$clusterversion_last_update" ] && [ "$clusterversion_last_update" != "null" ]; then
@@ -2171,7 +2329,12 @@ EOF
     reconciliation_status="PASS"
     reconciliation_message=""
 
-    if [ "$recent_logs" -gt 0 ]; then
+    if [ -n "$reconciliation_query_errors" ]; then
+        reconciliation_status="WARNING"
+        reconciliation_message="Cannot fully assess reconciliation — query errors: ${reconciliation_query_errors%. }"
+        warning_count=$((warning_count + 1))
+        echo "  ⚠ Incomplete data: ${reconciliation_query_errors%. }"
+    elif [ "$recent_logs" -gt 0 ]; then
         reconciliation_status="PASS"
         reconciliation_message="Active reconciliation ($recent_logs log entries, $total_resource_changes resource changes in last 5m)"
         echo "  ✓ Operator is actively reconciling (${recent_logs} logs, ${total_resource_changes} resource changes)"
@@ -2199,14 +2362,17 @@ EOF
     "secret_changes": $secret_changes_count,
     "configmap_changes": $configmap_changes_count,
     "clusterversion_changes": $clusterversion_changes_count,
-    "total_resource_changes": $total_resource_changes
+    "total_resource_changes": $total_resource_changes,
+    "query_errors": "$(echo "${reconciliation_query_errors:-}" | sed 's/"/\\"/g')"
   }
 }
 EOF
 )")
 
+    CURRENT_CHECK="configuration_errors"
     # Check 5: Configuration errors in operator logs
-    config_errors=$(oc logs -n "$NAMESPACE" "deployment/$DEPLOYMENT" --tail=100 2>/dev/null | grep -iE "failed|error|invalid.*config" | grep -v "level=info" | wc -l)
+    _run_oc "Get CAMO logs (last 100 lines)" oc logs -n "$NAMESPACE" "deployment/$DEPLOYMENT" --tail=100
+    config_errors=$(echo "$__oc_out" | grep -iE "failed|error|invalid.*config" | grep -v "level=info" | wc -l)
     config_errors_status="PASS"
     config_errors_message="No significant configuration errors"
 
@@ -2232,6 +2398,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="prometheus_metrics"
     # Check 6: Prometheus Metrics Validation (All 10 CAMO metrics)
     echo "  Querying operator Prometheus metrics from Thanos..."
 
@@ -2257,10 +2424,19 @@ EOF
         local query="${metric_name}{namespace=\"$NAMESPACE\"}"
         local query_encoded=$(printf '%s' "$query" | jq -sRr @uri)
 
+        local _qef
+        _qef=$(mktemp)
         local data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>/dev/null)
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>"$_qef")
+        local _qrc=$?
+        if [ $_qrc -ne 0 ]; then
+            local _qerr=$(head -1 "$_qef")
+            log_api_error "Prometheus query: $metric_name" "${_qerr:-timeout or connection error}" "$_qrc"
+            echo "  ⚠ $metric_name query failed: ${_qerr:-timeout or connection error}" >&2
+        fi
+        rm -f "$_qef"
 
-        if [ -n "$data" ] && echo "$data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+        if [ $_qrc -eq 0 ] && [ -n "$data" ] && echo "$data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
             echo "$data" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null
         else
             echo "0"
@@ -2384,6 +2560,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="reconciliation_behavior"
     # Check 7: Reconciliation Behavior Validation
     # NOTE: Reuses resource change data from reconciliation_activity check to avoid duplicate API calls
     echo "  Validating reconciliation behavior for loops and excessive reconciliation..."
@@ -2463,6 +2640,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="alertmanager_logs"
     # Check 8: AlertManager Log Analysis (with smart DNS warning filtering)
     echo "  Analyzing AlertManager logs..."
 
@@ -2512,10 +2690,11 @@ EOF
         # Filter out expected DNS warnings during cluster formation
         for am_pod in $alertmanager_pod_names; do
             if [ -n "${pod_start_time:-}" ]; then
-                pod_logs=$(oc logs -n "$NAMESPACE" "$am_pod" --since-time="$pod_start_time" 2>/dev/null)
+                _run_oc "Get AlertManager logs for $am_pod (since pod start)" oc logs -n "$NAMESPACE" "$am_pod" --since-time="$pod_start_time"
             else
-                pod_logs=$(oc logs -n "$NAMESPACE" "$am_pod" --tail=1000 2>/dev/null)
+                _run_oc "Get AlertManager logs for $am_pod (tail 1000)" oc logs -n "$NAMESPACE" "$am_pod" --tail=1000
             fi
+            pod_logs="$__oc_out"
 
             # Count all errors (no filtering)
             pod_errors=$(echo "$pod_logs" | grep -i "level=error" | wc -l | tr -d ' ')
@@ -2631,6 +2810,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="alertmanager_events"
     # Check 9: AlertManager Pod Events
     echo "  Checking AlertManager pod events..."
 
@@ -2642,7 +2822,8 @@ EOF
 
     if [ -n "$alertmanager_pod_names" ]; then
         for am_pod in $alertmanager_pod_names; do
-            pod_events=$(oc get events -n "$NAMESPACE" --field-selector involvedObject.name="$am_pod" -o json 2>/dev/null)
+            _run_oc "Get events for pod $am_pod" oc get events -n "$NAMESPACE" --field-selector involvedObject.name="$am_pod" -o json
+            pod_events="$__oc_out"
 
             if [ -n "$pod_events" ]; then
                 warning_events=$(echo "$pod_events" | jq -r '[.items[] | select(.type == "Warning")] | length' 2>/dev/null || echo "0")
@@ -2694,6 +2875,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="camo_events"
     # Check 10: CAMO Deployment Events
     echo "  Checking CAMO deployment events..."
 
@@ -2702,7 +2884,8 @@ EOF
     camo_warning_events=0
     camo_events_json="[]"
 
-    camo_events=$(oc get events -n "$NAMESPACE" --field-selector involvedObject.name="$DEPLOYMENT" -o json 2>/dev/null)
+    _run_oc "Get events for deployment $DEPLOYMENT" oc get events -n "$NAMESPACE" --field-selector involvedObject.name="$DEPLOYMENT" -o json
+    camo_events="$__oc_out"
 
     if [ -n "$camo_events" ]; then
         camo_warning_events=$(echo "$camo_events" | jq -r '[.items[] | select(.type == "Warning")] | length' 2>/dev/null || echo "0")
@@ -2745,6 +2928,7 @@ fi
 
 # General deployment method checks (OLM/PKO) — applies to all operators
 
+    CURRENT_CHECK="olm_subscription_health"
     # Check 11: OLM Subscription and CSV Orphan Detection
     # Always check deployment method health regardless of version match
     echo "  Checking for OLM subscription issues..."
@@ -2758,24 +2942,28 @@ fi
     subscription_exists="false"
 
     # Check if subscription exists (indicates OLM installation vs PKO)
-    subscription_check=$(oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" 2>/dev/null)
+    _run_oc_optional "Check OLM subscription $PACKAGE_NAME" oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE"
+    subscription_check="$__oc_out"
 
-    if [ $? -eq 0 ] && [ -n "$subscription_check" ]; then
+    if [ $__oc_rc -eq 0 ] && [ -n "$subscription_check" ]; then
         subscription_exists="true"
         echo "  ✓ Subscription exists (OLM installation detected)"
 
         # Check for ResolutionFailed status
-        resolution_failed_status=$(oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].status}' 2>/dev/null)
+        _run_oc "Get subscription ResolutionFailed condition" oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].status}'
+        resolution_failed_status="$__oc_out"
 
         if [ "$resolution_failed_status" = "True" ]; then
             resolution_failed="true"
-            resolution_failed_message=$(oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].message}' 2>/dev/null | head -c 500)
+            _run_oc "Get subscription ResolutionFailed message" oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].message}'
+            resolution_failed_message=$(echo "$__oc_out" | head -c 500)
 
             echo "  ✗ CRITICAL: Subscription has ResolutionFailed=True"
             echo "    Error: ${resolution_failed_message:0:100}..."
 
             # Check for orphaned CSVs (CSVs without ownerReferences)
-            csvs=$(oc get csv.operators.coreos.com -n "$NAMESPACE" -o json 2>/dev/null | jq -r ".items[] | select(.metadata.name | contains(\"$DEPLOYMENT\"))")
+            _run_oc "Get CSVs in $NAMESPACE" oc get csv.operators.coreos.com -n "$NAMESPACE" -o json
+            csvs=$(echo "$__oc_out" | jq -r ".items[] | select(.metadata.name | contains(\"$DEPLOYMENT\"))" 2>/dev/null)
 
             if [ -n "$csvs" ]; then
                 orphaned_csv_list=$(echo "$csvs" | jq -r '. | select(.metadata.ownerReferences == null or (.metadata.ownerReferences | length) == 0) | .metadata.name' 2>/dev/null)
@@ -2812,6 +3000,7 @@ fi
         echo "  ℹ No OLM subscription found (checking PKO...)"
     fi
 
+    CURRENT_CHECK="pko_clusterpackage_health"
     # Check 12: PKO (Package Operator) ClusterPackage Health
     # Always check deployment method health regardless of version match
     echo "  Checking for PKO ClusterPackage..."
@@ -2826,19 +3015,25 @@ fi
     dual_installation_message=""
 
     # Check if ClusterPackage exists (indicates PKO installation)
-    cluster_package_check=$(oc get clusterpackage "$PACKAGE_NAME" 2>/dev/null)
+    _run_oc_optional "Check ClusterPackage $PACKAGE_NAME" oc get clusterpackage "$PACKAGE_NAME"
+    cluster_package_check="$__oc_out"
+    cluster_package_check_rc=$__oc_rc
 
-    if [ $? -eq 0 ] && [ -n "$cluster_package_check" ]; then
+    if [ $cluster_package_check_rc -eq 0 ] && [ -n "$cluster_package_check" ]; then
         cluster_package_exists="true"
         echo "  ✓ ClusterPackage exists (PKO installation detected)"
 
         # Get ClusterPackage status conditions (PKO uses Available/Progressing/Unpacked, not Ready/Phase)
-        cluster_package_available=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "unknown")
-        cluster_package_progressing=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null || echo "unknown")
-        cluster_package_unpacked=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].status}' 2>/dev/null || echo "unknown")
+        _run_oc "Get ClusterPackage Available condition" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+        cluster_package_available="${__oc_out:-unknown}"
+        _run_oc "Get ClusterPackage Progressing condition" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}'
+        cluster_package_progressing="${__oc_out:-unknown}"
+        _run_oc "Get ClusterPackage Unpacked condition" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].status}'
+        cluster_package_unpacked="${__oc_out:-unknown}"
 
         # Get all conditions
-        cluster_package_conditions=$(oc get clusterpackage "$PACKAGE_NAME" -o json 2>/dev/null | jq -c '.status.conditions // []' 2>/dev/null || echo "[]")
+        _run_oc "Get ClusterPackage conditions JSON" oc get clusterpackage "$PACKAGE_NAME" -o json
+        cluster_package_conditions=$(echo "$__oc_out" | jq -c '.status.conditions // []' 2>/dev/null || echo "[]")
 
         # Store legacy field names for JSON output compatibility
         cluster_package_ready="$cluster_package_available"  # Map Available to ready for backwards compatibility
@@ -2861,7 +3056,8 @@ fi
                 echo "  ✓ PKO ClusterPackage healthy (Available, not progressing, unpacked)"
             elif [ "$cluster_package_available" = "False" ]; then
                 # Get failure reason from Available condition
-                failure_reason=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}' 2>/dev/null | head -c 200)
+                _run_oc "Get ClusterPackage Available message" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}'
+                failure_reason=$(echo "$__oc_out" | head -c 200)
                 pko_package_status="FAIL"
                 pko_package_message="PKO ClusterPackage not available: $failure_reason"
                 critical_count=$((critical_count + 1))
@@ -2869,7 +3065,8 @@ fi
                 echo "    Available: $cluster_package_available"
                 echo "    Reason: ${failure_reason:0:100}..."
             elif [ "$cluster_package_progressing" = "True" ]; then
-                progressing_msg=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].message}' 2>/dev/null)
+                _run_oc "Get ClusterPackage Progressing message" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].message}'
+                progressing_msg="$__oc_out"
                 if echo "$progressing_msg" | grep -q "immutable" 2>/dev/null; then
                     pko_package_status="FAIL"
                     pko_package_message="PKO ClusterPackage stuck: spec.template field is immutable"
@@ -2885,7 +3082,8 @@ fi
                 echo "    Progressing: $cluster_package_progressing"
             elif [ "$cluster_package_unpacked" = "False" ]; then
                 # Package not unpacked
-                unpack_reason=$(oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].message}' 2>/dev/null | head -c 200)
+                _run_oc "Get ClusterPackage Unpacked message" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Unpacked")].message}'
+                unpack_reason=$(echo "$__oc_out" | head -c 200)
                 pko_package_status="FAIL"
                 pko_package_message="PKO ClusterPackage not unpacked: $unpack_reason"
                 critical_count=$((critical_count + 1))
@@ -2931,11 +3129,10 @@ fi
             olm_subscription_message="No OLM subscription found (PKO installation detected)"
 
             # On PKO-only clusters, verify no orphaned CSVs remain from OLM migration
-            leftover_csvs=$(oc get csv -n "$NAMESPACE" -o json 2>/dev/null | \
-                jq -r "[.items[] | select(.metadata.name | test(\"$DEPLOYMENT\"))] | length" 2>/dev/null || echo "0")
+            _run_oc "Get CSVs in $NAMESPACE (leftover check)" oc get csv -n "$NAMESPACE" -o json
+            leftover_csvs=$(echo "$__oc_out" | jq -r "[.items[] | select(.metadata.name | test(\"$DEPLOYMENT\"))] | length" 2>/dev/null || echo "0")
             if [ "$leftover_csvs" -gt 0 ]; then
-                leftover_csv_names=$(oc get csv -n "$NAMESPACE" -o json 2>/dev/null | \
-                    jq -r "[.items[] | select(.metadata.name | test(\"$DEPLOYMENT\")) | .metadata.name]" 2>/dev/null || echo "[]")
+                leftover_csv_names=$(echo "$__oc_out" | jq -r "[.items[] | select(.metadata.name | test(\"$DEPLOYMENT\")) | .metadata.name]" 2>/dev/null || echo "[]")
                 orphaned_csvs=$leftover_csvs
                 orphaned_csv_names="$leftover_csv_names"
                 olm_subscription_status="WARNING"
@@ -2980,7 +3177,7 @@ EOF
     "cluster_package_phase": "$cluster_package_phase",
     "cluster_package_ready": "$cluster_package_ready",
     "cluster_package_conditions": $cluster_package_conditions,
-    "revision": $([ "$cluster_package_exists" = "true" ] && oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.revision}' 2>/dev/null || echo "0"),
+    "revision": $(if [ "$cluster_package_exists" = "true" ]; then _run_oc "Get ClusterPackage revision" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.revision}'; echo "${__oc_out:-0}"; else echo "0"; fi),
     "dual_installation": $dual_installation,
     "dual_installation_message": "$dual_installation_message"
   }
@@ -2996,7 +3193,8 @@ EOF
     stale_job_count=0
     orphaned_pods=0
 
-    jobs_json=$(oc get jobs -n "$NAMESPACE" -o json 2>/dev/null)
+    _run_oc "Get jobs in $NAMESPACE" oc get jobs -n "$NAMESPACE" -o json
+    jobs_json="$__oc_out"
     if [ -n "$jobs_json" ]; then
         olm_cleanup_jobs=$(echo "$jobs_json" | jq '[.items[] | select(.metadata.name | startswith("olm-cleanup"))]' 2>/dev/null)
         stale_job_count=$(echo "$olm_cleanup_jobs" | jq 'length' 2>/dev/null || echo "0")
@@ -3009,7 +3207,8 @@ EOF
             echo "  OLM cleanup jobs: $stale_job_count total, $hung_jobs hung, $failed_jobs failed"
 
             # Check for orphaned pods
-            orphaned_pods=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq '[.items[] | select(.metadata.name | startswith("olm-cleanup")) | select(.status.phase == "Running") | select(.metadata.ownerReferences == null)] | length' 2>/dev/null || echo "0")
+            _run_oc "Get pods in $NAMESPACE for orphan check" oc get pods -n "$NAMESPACE" -o json
+            orphaned_pods=$(echo "$__oc_out" | jq '[.items[] | select(.metadata.name | startswith("olm-cleanup")) | select(.status.phase == "Running") | select(.metadata.ownerReferences == null)] | length' 2>/dev/null || echo "0")
 
             issues=()
             [ "$hung_jobs" -gt 0 ] && issues+=("$hung_jobs hung job(s)")
@@ -3051,7 +3250,7 @@ EOF
 EOF
 )")
 
-    # Check for ImagePullBackOff — indicates SAAS deployed before Konflux build completed
+    CURRENT_CHECK="image_pull_status"\n    # Check for ImagePullBackOff — indicates SAAS deployed before Konflux build completed
     image_pull_status="PASS"
     image_pull_message=""
     waiting_pods=$(echo "${pods_json:-{}}" | jq -r '[.items[]? | select(.status.containerStatuses[]? | select(.state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")) | .metadata.name] | length' 2>/dev/null || echo "0")
@@ -3096,19 +3295,14 @@ EOF
         pko_only=true
     fi
 
-    # OLM label for this operator: operators.coreos.com/<deployment>.<namespace>
-    olm_label="operators.coreos.com/${DEPLOYMENT}.${NAMESPACE}"
-    # Also check by operator name pattern in CSV/CatalogSource names
+    # Check by operator name pattern in CSV/CatalogSource names
     op_name_pattern="${OPERATOR_NAME:-$DEPLOYMENT}"
 
     orphan_details=""
     if [ "$pko_only" = true ]; then
-        # Check for CSVs owned by this operator (by label or name match)
-        op_csvs=$(oc get csv -n "$NAMESPACE" -l "$olm_label" --no-headers 2>/dev/null)
-        if [ -z "$op_csvs" ]; then
-            # Fallback: match by operator name in CSV name
-            op_csvs=$(oc get csv -n "$NAMESPACE" --no-headers 2>/dev/null | grep -i "$op_name_pattern" || true)
-        fi
+        # Check for CSVs owned by this operator (by name match — label queries are unreliable due to 63-char limit)
+        _run_oc_optional "Get CSVs in $NAMESPACE (orphan check)" oc get csv -n "$NAMESPACE" --no-headers
+        op_csvs=$(echo "$__oc_out" | grep -i "$op_name_pattern" || true)
         op_olm_csvs=$(echo "$op_csvs" | grep -c . 2>/dev/null || echo "0")
         op_olm_csvs=$(echo "$op_olm_csvs" | tr -d '[:space:]')
 
@@ -3118,7 +3312,8 @@ EOF
         fi
 
         # Check for CatalogSources owned by this operator
-        op_catsrc=$(oc get catalogsource -n "$NAMESPACE" --no-headers 2>/dev/null | grep -i "$op_name_pattern" || true)
+        _run_oc_optional "Get CatalogSources in $NAMESPACE" oc get catalogsource -n "$NAMESPACE" --no-headers
+        op_catsrc=$(echo "$__oc_out" | grep -i "$op_name_pattern" || true)
         op_olm_catsrc=$(echo "$op_catsrc" | grep -c . 2>/dev/null || echo "0")
         op_olm_catsrc=$(echo "$op_olm_catsrc" | tr -d '[:space:]')
 
@@ -3128,10 +3323,8 @@ EOF
         fi
 
         # Check for Subscriptions owned by this operator (should not exist on PKO-only)
-        op_subs=$(oc get subscription.operators.coreos.com -n "$NAMESPACE" -l "$olm_label" --no-headers 2>/dev/null)
-        if [ -z "$op_subs" ]; then
-            op_subs=$(oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" --no-headers 2>/dev/null || true)
-        fi
+        _run_oc_optional "Get Subscription $PACKAGE_NAME (orphan check)" oc get subscription.operators.coreos.com "$PACKAGE_NAME" -n "$NAMESPACE" --no-headers
+        op_subs="$__oc_out"
         op_olm_subs=$(echo "$op_subs" | grep -c . 2>/dev/null || echo "0")
         op_olm_subs=$(echo "$op_olm_subs" | tr -d '[:space:]')
 
@@ -3142,11 +3335,11 @@ EOF
     fi
 
     if [ -n "$orphan_details" ]; then
-        orphan_check_status="WARNING"
+        orphan_check_status="FAIL"
         orphan_details="${orphan_details%; }"
-        orphan_check_message="PKO-only: orphaned OLM resources for $DEPLOYMENT — $orphan_details"
-        warning_count=$((warning_count + 1))
-        echo "  ⚠ Orphaned OLM resources for $DEPLOYMENT: $orphan_details"
+        orphan_check_message="PKO-only: orphaned OLM artifacts — OLM-to-PKO migration cleanup incomplete. $orphan_details"
+        critical_count=$((critical_count + 1))
+        echo "  ✗ CRITICAL: Orphaned OLM artifacts (migration cleanup failed): $orphan_details"
     else
         if [ "$pko_only" = true ]; then
             orphan_check_message="PKO-only: no orphaned OLM resources for $DEPLOYMENT"
@@ -3159,11 +3352,10 @@ EOF
 {
   "check": "orphaned_resources",
   "status": "$orphan_check_status",
-  "severity": "warning",
+  "severity": "critical",
   "message": "$orphan_check_message",
   "details": {
     "pko_only": $pko_only,
-    "olm_label": "$(echo "$olm_label" | sed 's/"/\\"/g')",
     "operator_csvs": ${op_olm_csvs:-0},
     "orphaned_csv_names": "$(echo "${orphan_csv_names:-none}" | sed 's/"/\\"/g')",
     "operator_subscriptions": ${op_olm_subs:-0},
@@ -3179,8 +3371,10 @@ EOF
     if [ "$CHECK_SECRETS" = true ] && [[ "$OPERATOR_NAME" == *"configure-alertmanager"* ]]; then
         echo "  Running extended CAMO checks (secrets enabled)..."
 
+        CURRENT_CHECK="alertmanager_secret"
         # Check 6: Alertmanager main secret exists (managed by CAMO)
-        alertmanager_secret=$(ocm backplane elevate "${REASON}" -- get secret alertmanager-main -n "$NAMESPACE" -o json 2>/dev/null)
+        _run_oc "Get alertmanager-main secret (elevated)" ocm backplane elevate "${REASON}" -- get secret alertmanager-main -n "$NAMESPACE" -o json
+        alertmanager_secret="$__oc_out"
         alertmanager_secret_status="FAIL"
         alertmanager_secret_message="Secret not found"
         secret_size=0
@@ -3209,7 +3403,8 @@ EOF
 )")
 
         # Check 7: CAMO ConfigMap exists
-        camo_config=$(oc get configmap configure-alertmanager-operator-config -n "$NAMESPACE" -o json 2>/dev/null)
+        _run_oc "Get CAMO ConfigMap" oc get configmap configure-alertmanager-operator-config -n "$NAMESPACE" -o json
+        camo_config="$__oc_out"
         camo_configmap_status="INFO"
         camo_configmap_message="ConfigMap not found (may not be required)"
         config_keys=0
@@ -3237,7 +3432,8 @@ EOF
 )")
 
         # Check 8: PagerDuty secret (if configured)
-        pd_secret=$(ocm backplane elevate "${REASON}" -- get secret pd-secret -n "$NAMESPACE" 2>/dev/null)
+        _run_oc "Get pd-secret (elevated)" ocm backplane elevate "${REASON}" -- get secret pd-secret -n "$NAMESPACE"
+        pd_secret="$__oc_out"
         pd_secret_status="INFO"
         pd_secret_message="PagerDuty secret not found (may not be configured)"
 
@@ -3263,14 +3459,54 @@ EOF
         echo "  ℹ Extended secret checks disabled (use --secrets to enable)"
     fi
 
+# RHOBS Prometheus query helper (MC only)
+# Execs into the RHOBS hypershift monitoring stack Prometheus to query HCP metrics.
+# Returns query result on stdout. Sets __rhobs_rc and __rhobs_err.
+# Usage: result=$(query_rhobs_prometheus "description" "promql_query")
+query_rhobs_prometheus() {
+    local _desc="$1"
+    local _query="$2"
+    local _qenc=$(printf '%s' "$_query" | jq -sRr @uri)
+    local _qerr=$(mktemp)
+    local _qout
+    _qout=$(ocm backplane elevate "${REASON}" -- exec -n openshift-observability-operator \
+        statefulset/prometheus-rhobs-hypershift-monitoring-stack -c prometheus -- \
+        curl -sf --max-time 30 "http://localhost:9090/api/v1/query?query=${_qenc}" 2>"$_qerr")
+    __rhobs_rc=$?
+    if [ $__rhobs_rc -ne 0 ]; then
+        __rhobs_err=$(head -1 "$_qerr")
+        log_api_error "$_desc" "$__rhobs_err" "$__rhobs_rc" "exec prometheus-rhobs-hypershift-monitoring-stack: query=$_query"
+        echo "  ⚠ RHOBS query failed: $_desc: ${__rhobs_err:-timeout}" >&2
+        rm -f "$_qerr"
+        echo ""
+        return $__rhobs_rc
+    fi
+    __rhobs_err=""
+    rm -f "$_qerr"
+    if [ -n "$_qout" ] && echo "$_qout" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+        echo "$_qout"
+    else
+        echo ""
+    fi
+    return 0
+}
+
+# Extract a scalar value from a Prometheus instant query result
+# Usage: count=$(echo "$result" | prom_scalar)
+prom_scalar() {
+    jq -r '.data.result[0].value[1] // "0"' 2>/dev/null | tr -d '[:space:]'
+}
+
 # RMO-specific checks
 if [[ "$OPERATOR_NAME" == *"route-monitor"* ]]; then
     echo "Running RMO-specific health checks..."
 
+    CURRENT_CHECK="rmo_controller_manager"
     # RMO Check 1: Controller-manager pod status
     rmo_cm_status="PASS"
     rmo_cm_message=""
-    rmo_cm_pods=$(oc get pods -n "$NAMESPACE" -l control-plane=controller-manager -o json 2>/dev/null)
+    _run_oc "Get RMO controller-manager pods" oc get pods -n "$NAMESPACE" -l control-plane=controller-manager -o json
+    rmo_cm_pods="$__oc_out"
     rmo_cm_pod_count=$(echo "$rmo_cm_pods" | jq '.items | length' 2>/dev/null || echo "0")
     rmo_cm_restarts=0
     rmo_cm_termination_reason=""
@@ -3333,6 +3569,19 @@ if [[ "$OPERATOR_NAME" == *"route-monitor"* ]]; then
 EOF
 )")
 
+    # Query RouteMonitor and ClusterUrlMonitor CRs with elevation (required on managed clusters).
+    # Results are shared by the blackbox check (Check 2) and the CR validation check (Check 3).
+    _run_oc "Get RouteMonitor CRs (elevated)" ocm backplane elevate "${REASON}" -- get routemonitor -A -o json
+    routemonitors="$__oc_out"
+    rm_query_error="$__oc_err"
+    rm_query_rc=$__oc_rc
+
+    _run_oc "Get ClusterUrlMonitor CRs (elevated)" ocm backplane elevate "${REASON}" -- get clusterurlmonitor -A -o json
+    clusterurlmonitors="$__oc_out"
+    cum_query_error="$__oc_err"
+    cum_query_rc=$__oc_rc
+
+    CURRENT_CHECK="rmo_blackbox_exporter"
     # RMO Check 2: Blackbox exporter health
     # Blackbox is created by RMO on-demand — only exists if RouteMonitors/ClusterUrlMonitors exist
     rmo_bb_status="PASS"
@@ -3342,14 +3591,30 @@ EOF
     rmo_bb_restarts=0
     rmo_bb_svc_exists=false
     rmo_bb_cm_exists=false
-    rmo_bb_deploy=$(oc get deployment -n "$NAMESPACE" blackbox-exporter -o json 2>/dev/null)
+    _run_oc "Get blackbox-exporter deployment" oc get deployment -n "$NAMESPACE" blackbox-exporter -o json
+    rmo_bb_deploy="$__oc_out"
 
     # Check if any monitors exist to determine if blackbox should be present
     has_monitors=false
-    monitor_count=$(oc get routemonitor -A --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    cum_count=$(oc get clusterurlmonitor -A --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    monitor_count=0
+    cum_count=0
+    if [ -n "$routemonitors" ] && echo "$routemonitors" | jq -e '.items' >/dev/null 2>&1; then
+        monitor_count=$(echo "$routemonitors" | jq '.items | length' 2>/dev/null | tr -d '[:space:]')
+        [ -z "$monitor_count" ] && monitor_count=0
+    fi
+    if [ -n "$clusterurlmonitors" ] && echo "$clusterurlmonitors" | jq -e '.items' >/dev/null 2>&1; then
+        cum_count=$(echo "$clusterurlmonitors" | jq '.items | length' 2>/dev/null | tr -d '[:space:]')
+        [ -z "$cum_count" ] && cum_count=0
+    fi
     total_monitors=$((monitor_count + cum_count))
     [ "$total_monitors" -gt 0 ] && has_monitors=true
+
+    # If both CR queries failed, report it — cannot determine blackbox necessity
+    if [ $rm_query_rc -ne 0 ] && [ $cum_query_rc -ne 0 ]; then
+        rmo_bb_status="UNKNOWN"
+        rmo_bb_message="Cannot determine monitor count — RouteMonitor query failed: ${rm_query_error}; ClusterUrlMonitor query failed: ${cum_query_error}"
+        echo "  ⚠ Cannot query RouteMonitor/ClusterUrlMonitor CRs (RBAC? auth?): ${rm_query_error}"
+    fi
 
     if [ -z "$rmo_bb_deploy" ] || ! echo "$rmo_bb_deploy" | jq -e '.metadata.name' >/dev/null 2>&1; then
         if [ "$has_monitors" = true ]; then
@@ -3366,14 +3631,17 @@ EOF
         rmo_bb_desired=$(echo "$rmo_bb_deploy" | jq -r '.spec.replicas // 0' 2>/dev/null)
         rmo_bb_ready=$(echo "$rmo_bb_deploy" | jq -r '.status.readyReplicas // 0' 2>/dev/null)
 
-        rmo_bb_pods=$(oc get pods -n "$NAMESPACE" -l app=blackbox-exporter -o json 2>/dev/null)
+        _run_oc "Get blackbox-exporter pods" oc get pods -n "$NAMESPACE" -l app=blackbox-exporter -o json
+        rmo_bb_pods="$__oc_out"
         rmo_bb_restarts=$(echo "$rmo_bb_pods" | jq '[.items[].status.containerStatuses[]?.restartCount // 0] | add // 0' 2>/dev/null || echo "0")
         rmo_bb_restarts=$(echo "$rmo_bb_restarts" | tr -d '[:space:]')
         [ -z "$rmo_bb_restarts" ] && rmo_bb_restarts=0
 
         # Check companion resources
-        oc get service -n "$NAMESPACE" blackbox-exporter &>/dev/null && rmo_bb_svc_exists=true
-        oc get configmap -n "$NAMESPACE" blackbox-exporter &>/dev/null && rmo_bb_cm_exists=true
+        _run_oc "Check blackbox-exporter service" oc get service -n "$NAMESPACE" blackbox-exporter
+        [ $__oc_rc -eq 0 ] && rmo_bb_svc_exists=true
+        _run_oc "Check blackbox-exporter configmap" oc get configmap -n "$NAMESPACE" blackbox-exporter
+        [ $__oc_rc -eq 0 ] && rmo_bb_cm_exists=true
 
         if [ "$rmo_bb_ready" -ne "$rmo_bb_desired" ]; then
             rmo_bb_status="WARNING"
@@ -3415,6 +3683,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="rmo_routemonitor_status"
     # RMO Check 3: RouteMonitor and ClusterUrlMonitor — MCC-expected resources
     # Deployment chain:
     #   managed-cluster-config (MCC) → osd-route-monitor-operator SSS → Hive ClusterSync → RouteMonitor CRs
@@ -3432,63 +3701,74 @@ EOF
     console_rm_exists=false
     api_cum_exists=false
 
-    routemonitors=$(oc get routemonitor -A -o json 2>/dev/null)
-    clusterurlmonitors=$(oc get clusterurlmonitor -A -o json 2>/dev/null)
+    # routemonitors and clusterurlmonitors were already queried with elevation above (before Check 2)
+    # rm_query_rc/rm_query_error and cum_query_rc/cum_query_error track query status
+
+    # If CR queries failed, report UNKNOWN — cannot validate what we cannot see
+    if [ $rm_query_rc -ne 0 ] && [ $cum_query_rc -ne 0 ]; then
+        rmo_rm_status="UNKNOWN"
+        rmo_rm_message="Cannot query RouteMonitor/ClusterUrlMonitor CRs — API error (${rm_query_error}). Check RBAC, auth token, or cluster state."
+        echo "  ⚠ CANNOT QUERY CRs — all results below are unreliable: ${rm_query_error}"
+    fi
 
     if [ -n "$routemonitors" ] && echo "$routemonitors" | jq -e '.items' >/dev/null 2>&1; then
-        rm_count=$(echo "$routemonitors" | jq '.items | length' 2>/dev/null || echo "0")
-        rm_count=$(echo "$rm_count" | tr -d '[:space:]')
+        rm_count=$(echo "$routemonitors" | jq '.items | length' 2>/dev/null | tr -d '[:space:]')
         [ -z "$rm_count" ] && rm_count=0
 
-        # Check for MCC-expected "console" RouteMonitor
         console_check=$(echo "$routemonitors" | jq -r '.items[] | select(.metadata.name == "console" and .metadata.namespace == "openshift-route-monitor-operator")' 2>/dev/null)
         [ -n "$console_check" ] && console_rm_exists=true
 
         if [ "$rm_count" -gt 0 ]; then
-            rm_errors=$(echo "$routemonitors" | jq '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null || echo "0")
-            rm_errors=$(echo "$rm_errors" | tr -d '[:space:]')
-            rm_missing_url=$(echo "$routemonitors" | jq '[.items[] | select(.status.routeURL == null or .status.routeURL == "")] | length' 2>/dev/null || echo "0")
-            rm_missing_url=$(echo "$rm_missing_url" | tr -d '[:space:]')
-            rm_missing_sm=$(echo "$routemonitors" | jq '[.items[] | select(.status.serviceMonitorRef.name == null or .status.serviceMonitorRef.name == "")] | length' 2>/dev/null || echo "0")
-            rm_missing_sm=$(echo "$rm_missing_sm" | tr -d '[:space:]')
+            rm_errors=$(echo "$routemonitors" | jq '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null | tr -d '[:space:]')
+            [ -z "$rm_errors" ] && rm_errors=0
+            rm_missing_url=$(echo "$routemonitors" | jq '[.items[] | select(.status.routeURL == null or .status.routeURL == "")] | length' 2>/dev/null | tr -d '[:space:]')
+            [ -z "$rm_missing_url" ] && rm_missing_url=0
+            rm_missing_sm=$(echo "$routemonitors" | jq '[.items[] | select(.status.serviceMonitorRef.name == null or .status.serviceMonitorRef.name == "")] | length' 2>/dev/null | tr -d '[:space:]')
+            [ -z "$rm_missing_sm" ] && rm_missing_sm=0
         fi
+    elif [ $rm_query_rc -ne 0 ]; then
+        echo "  ⚠ RouteMonitor query failed (rc=$rm_query_rc): $rm_query_error"
     fi
 
     if [ -n "$clusterurlmonitors" ] && echo "$clusterurlmonitors" | jq -e '.items' >/dev/null 2>&1; then
-        cum_count_detail=$(echo "$clusterurlmonitors" | jq '.items | length' 2>/dev/null || echo "0")
-        cum_count_detail=$(echo "$cum_count_detail" | tr -d '[:space:]')
+        cum_count_detail=$(echo "$clusterurlmonitors" | jq '.items | length' 2>/dev/null | tr -d '[:space:]')
         [ -z "$cum_count_detail" ] && cum_count_detail=0
 
-        # Check for MCC-expected "api" ClusterUrlMonitor
         api_check=$(echo "$clusterurlmonitors" | jq -r '.items[] | select(.metadata.name == "api" and .metadata.namespace == "openshift-route-monitor-operator")' 2>/dev/null)
         [ -n "$api_check" ] && api_cum_exists=true
 
         if [ "$cum_count_detail" -gt 0 ]; then
-            cum_errors=$(echo "$clusterurlmonitors" | jq '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null || echo "0")
-            cum_errors=$(echo "$cum_errors" | tr -d '[:space:]')
+            cum_errors=$(echo "$clusterurlmonitors" | jq '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null | tr -d '[:space:]')
+            [ -z "$cum_errors" ] && cum_errors=0
             rm_errors=$((rm_errors + cum_errors))
         fi
+    elif [ $cum_query_rc -ne 0 ]; then
+        echo "  ⚠ ClusterUrlMonitor query failed (rc=$cum_query_rc): $cum_query_error"
     fi
 
     total_crd_count=$((rm_count + cum_count_detail))
 
-    # Validate MCC-expected resources per cluster type
+    # Validate MCC-expected resources per cluster type (only if queries succeeded)
     mcc_issues=""
-    if [ "$cluster_type" = "management_cluster" ]; then
-        # MC expects: ClusterUrlMonitor "api" (from MCC deploy/osd-route-monitor-operator/management-cluster/)
-        # Console RouteMonitor is NOT expected on MCs
-        [ "$api_cum_exists" = false ] && mcc_issues="${mcc_issues}ClusterUrlMonitor 'api' missing (expected from MCC osd-route-monitor-operator/management-cluster/), "
-    else
-        # Standard/SC expects: RouteMonitor "console" + ClusterUrlMonitor "api" (from MCC deploy/osd-route-monitor-operator/)
-        [ "$console_rm_exists" = false ] && mcc_issues="${mcc_issues}RouteMonitor 'console' missing (expected from MCC osd-route-monitor-operator SSS), "
-        [ "$api_cum_exists" = false ] && mcc_issues="${mcc_issues}ClusterUrlMonitor 'api' missing (expected from MCC osd-route-monitor-operator SSS), "
+    if [ "$rmo_rm_status" != "UNKNOWN" ]; then
+        if [ "$cluster_type" = "management_cluster" ]; then
+            [ "$api_cum_exists" = false ] && mcc_issues="${mcc_issues}ClusterUrlMonitor 'api' missing (expected from MCC osd-route-monitor-operator/management-cluster/), "
+        else
+            [ "$console_rm_exists" = false ] && mcc_issues="${mcc_issues}RouteMonitor 'console' missing (expected from MCC osd-route-monitor-operator SSS), "
+            [ "$api_cum_exists" = false ] && mcc_issues="${mcc_issues}ClusterUrlMonitor 'api' missing (expected from MCC osd-route-monitor-operator SSS), "
+        fi
+        mcc_issues="${mcc_issues%, }"
     fi
-    mcc_issues="${mcc_issues%, }"
 
-    if [ "$total_crd_count" -eq 0 ]; then
+    if [ "$rmo_rm_status" = "UNKNOWN" ]; then
+        # Already reported above — skip all downstream validation
+        :
+    elif [ "$total_crd_count" -eq 0 ]; then
         # Check if CRDs exist (different from CRs missing)
-        rm_crd_exists=$(oc get crd routemonitors.monitoring.openshift.io --no-headers 2>/dev/null | wc -l | tr -d ' ')
-        cum_crd_exists=$(oc get crd clusterurlmonitors.monitoring.openshift.io --no-headers 2>/dev/null | wc -l | tr -d ' ')
+        _run_oc "Check RouteMonitor CRD existence" oc get crd routemonitors.monitoring.openshift.io --no-headers
+        rm_crd_exists=$(echo "$__oc_out" | wc -l | tr -d ' ')
+        _run_oc "Check ClusterUrlMonitor CRD existence" oc get crd clusterurlmonitors.monitoring.openshift.io --no-headers
+        cum_crd_exists=$(echo "$__oc_out" | wc -l | tr -d ' ')
 
         if [ "${rm_crd_exists:-0}" -eq 0 ] && [ "${cum_crd_exists:-0}" -eq 0 ]; then
             rmo_rm_status="FAIL"
@@ -3497,13 +3777,16 @@ EOF
             echo "  ✗ CRITICAL: CRDs missing (source: PKO ClusterPackage via route-monitor-operator-pko SSS)"
         else
             # CRDs exist but no CRs — check for orphaned monitoring resources
-            orphan_sm_names=$(oc get servicemonitor -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}' | sed '/controller-manager-metrics-monitor/d' | tr '\n' ', ' | sed 's/,$//')
+            _run_oc "Get ServiceMonitors in $NAMESPACE" ocm backplane elevate "${REASON}" -- get servicemonitor -n "$NAMESPACE" --no-headers
+            orphan_sm_names=$(echo "$__oc_out" | awk '{print $1}' | sed '/controller-manager-metrics-monitor/d' | tr '\n' ', ' | sed 's/,$//')
             orphan_sms_filtered=$(echo "$orphan_sm_names" | tr ',' '\n' | command grep -c . 2>/dev/null || echo "0")
             [ -z "$orphan_sm_names" ] && orphan_sms_filtered=0
-            orphan_pr_names=$(oc get prometheusrule -n "$NAMESPACE" --no-headers 2>/dev/null | awk '{print $1}' | tr '\n' ', ' | sed 's/,$//')
+            _run_oc "Get PrometheusRules in $NAMESPACE" ocm backplane elevate "${REASON}" -- get prometheusrule -n "$NAMESPACE" --no-headers
+            orphan_pr_names=$(echo "$__oc_out" | awk '{print $1}' | tr '\n' ', ' | sed 's/,$//')
             orphan_prs=$(echo "$orphan_pr_names" | tr ',' '\n' | command grep -c . 2>/dev/null || echo "0")
             [ -z "$orphan_pr_names" ] && orphan_prs=0
-            bb_running=$(oc get deployment blackbox-exporter -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            _run_oc "Get blackbox-exporter ready replicas" oc get deployment blackbox-exporter -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}'
+            bb_running="${__oc_out:-0}"
 
             if [ "${orphan_sms_filtered:-0}" -gt 0 ] || [ "${orphan_prs:-0}" -gt 0 ] || [ "${bb_running:-0}" -gt 0 ]; then
                 rmo_rm_status="WARNING"
@@ -3568,17 +3851,28 @@ EOF
     "missing_url_count": $rm_missing_url,
     "missing_servicemonitor_count": $rm_missing_sm,
     "mcc_issues": "$(echo "${mcc_issues:-none}" | sed 's/"/\\"/g')",
-    "deployment_chain": "MCC (deploy/osd-route-monitor-operator/) → osd-route-monitor-operator SSS → Hive ClusterSync → RouteMonitor CRs → RMO reconciler → ServiceMonitors + PrometheusRules + blackbox"
+    "deployment_chain": "MCC (deploy/osd-route-monitor-operator/) → osd-route-monitor-operator SSS → Hive ClusterSync → RouteMonitor CRs → RMO reconciler → ServiceMonitors + PrometheusRules + blackbox",
+    "routemonitor_query_error": "$(echo "${rm_query_error:-}" | sed 's/"/\\"/g')",
+    "clusterurlmonitor_query_error": "$(echo "${cum_query_error:-}" | sed 's/"/\\"/g')"
   }
 }
 EOF
 )")
 
+    CURRENT_CHECK="rmo_sre_probe_expectations"
     # RMO Check 3a: SRE probe-missing alerts — verify monitoring expectations are met
     rmo_sre_status="PASS"
     rmo_sre_message=""
-    sre_probe_missing_api=$(oc get prometheusrule sre-route-monitor-operator-probe-missing-api -n openshift-monitoring --no-headers 2>/dev/null | wc -l | tr -d ' ')
-    sre_probe_missing_console=$(oc get prometheusrule sre-route-monitor-operator-probe-missing-console -n openshift-monitoring --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    _run_oc_optional "Check SRE probe-missing-api PrometheusRule" ocm backplane elevate "${REASON}" -- get prometheusrule sre-route-monitor-operator-probe-missing-api -n openshift-monitoring --no-headers
+    sre_probe_missing_api=$(echo "$__oc_out" | wc -l | tr -d ' ')
+    [ $__oc_rc -ne 0 ] && sre_probe_missing_api=0
+    # Console probe-missing rule only exists on standard/SC clusters (MCC deploys console RouteMonitor there, not on MCs)
+    sre_probe_missing_console=0
+    if [ "$cluster_type" != "management_cluster" ]; then
+        _run_oc_optional "Check SRE probe-missing-console PrometheusRule" ocm backplane elevate "${REASON}" -- get prometheusrule sre-route-monitor-operator-probe-missing-console -n openshift-monitoring --no-headers
+        sre_probe_missing_console=$(echo "$__oc_out" | wc -l | tr -d ' ')
+        [ $__oc_rc -ne 0 ] && sre_probe_missing_console=0
+    fi
     sre_expects_probes=false
 
     if [ "${sre_probe_missing_api:-0}" -gt 0 ] || [ "${sre_probe_missing_console:-0}" -gt 0 ]; then
@@ -3623,6 +3917,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="rmo_probe_health"
     # RMO Check 3b: Probe health — verify blackbox probes are succeeding
     rmo_probe_status="PASS"
     rmo_probe_message=""
@@ -3633,37 +3928,62 @@ EOF
 
     if [ "$total_crd_count" -gt 0 ]; then
         echo "  Querying probe_success metrics from Thanos..."
+        probe_err=$(mktemp)
         probe_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}' | jq -sRr @uri)" 2>/dev/null)
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}' | jq -sRr @uri)" 2>"$probe_err")
+        probe_data_rc=$?
+        if [ $probe_data_rc -ne 0 ]; then
+            probe_err_msg=$(head -1 "$probe_err")
+            log_api_error "Probe success instant query" "${probe_err_msg:-timeout or connection error}" "$probe_data_rc"
+            echo "  ⚠ Probe success query failed: ${probe_err_msg:-timeout or connection error}"
+        fi
+        rm -f "$probe_err"
 
-        if [ -n "$probe_data" ] && echo "$probe_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+        if [ $probe_data_rc -eq 0 ] && [ -n "$probe_data" ] && echo "$probe_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
             rmo_probe_total=$(echo "$probe_data" | jq '.data.result | length' 2>/dev/null || echo "0")
             rmo_probe_total=$(echo "$rmo_probe_total" | tr -d '[:space:]')
+
+            # Extract endpoint names from probe_url for display
+            probe_endpoint_names=$(echo "$probe_data" | jq -r '[.data.result[] | {
+                name: (if .metric.probe_url then
+                    (if (.metric.probe_url | test("console")) then "console"
+                     elif (.metric.probe_url | test("api|livez")) then "api"
+                     else (.metric.probe_url | split("/")[-1] // "unknown") end)
+                else "unknown" end),
+                status: (if .value[1] == "1" then "ok" else "FAILING" end),
+                url: (.metric.probe_url // "")
+            }] | map("\(.name)=\(.status)") | join(", ")' 2>/dev/null)
 
             # Find probes with success=0 (currently failing)
             rmo_probe_failing=$(echo "$probe_data" | jq '[.data.result[] | select(.value[1] == "0")] | length' 2>/dev/null || echo "0")
             rmo_probe_failing=$(echo "$rmo_probe_failing" | tr -d '[:space:]')
+            rmo_probe_failing_targets=$(echo "$probe_data" | jq -r '[.data.result[] | select(.value[1] == "0") | if .metric.probe_url then (if (.metric.probe_url | test("console")) then "console" elif (.metric.probe_url | test("api|livez")) then "api" else .metric.probe_url end) else "unknown" end] | join(", ")' 2>/dev/null)
 
-            # Compare probe count against expected monitor count
+            # On MCs, only the ClusterUrlMonitor "api" probe is visible in platform Thanos
+            # HCP probes are scraped by the RHOBS monitoring stack (checked in rmo_hcp_probe_coverage)
+            expected_visible_probes=$total_crd_count
             probe_count_mismatch=false
-            if [ "$rmo_probe_total" -lt "$total_crd_count" ]; then
+            if [ "$cluster_type" = "management_cluster" ]; then
+                expected_visible_probes=$cum_count_detail
+                echo "  ℹ MC: HCP probes in RHOBS stack (see HCP Probes check); local probes: $expected_visible_probes expected"
+            fi
+            if [ "$rmo_probe_total" -lt "$expected_visible_probes" ]; then
                 probe_count_mismatch=true
             fi
 
             if [ "${rmo_probe_failing:-0}" -gt 0 ]; then
-                rmo_probe_failing_targets=$(echo "$probe_data" | jq -r '.data.result[] | select(.value[1] == "0") | .metric.instance // .metric.target // .metric.namespace | .[0:60]' 2>/dev/null | head -5 | tr '\n' ', ' | sed 's/,$//')
                 rmo_probe_status="WARNING"
-                rmo_probe_message="$rmo_probe_failing/$rmo_probe_total probe(s) failing (${total_crd_count} monitors expected)"
+                rmo_probe_message="Failing endpoint(s): $rmo_probe_failing_targets ($rmo_probe_failing/$rmo_probe_total failing)"
                 warning_count=$((warning_count + 1))
-                echo "  ⚠ $rmo_probe_failing/$rmo_probe_total probes failing"
+                echo "  ⚠ Failing: $rmo_probe_failing_targets"
             elif [ "$probe_count_mismatch" = true ]; then
                 rmo_probe_status="WARNING"
-                rmo_probe_message="Probe count mismatch: $rmo_probe_total active probes but $total_crd_count monitors configured — RMO may not have created all ServiceMonitors"
+                rmo_probe_message="Probe count mismatch: $rmo_probe_total active ($probe_endpoint_names) but $expected_visible_probes expected"
                 warning_count=$((warning_count + 1))
-                echo "  ⚠ Probe count mismatch: $rmo_probe_total probes vs $total_crd_count monitors"
+                echo "  ⚠ Mismatch: $rmo_probe_total vs $expected_visible_probes expected"
             else
-                rmo_probe_message="All $rmo_probe_total/$total_crd_count probe(s) succeeding"
-                echo "  ✓ All $rmo_probe_total/$total_crd_count probes succeeding"
+                rmo_probe_message="All endpoints healthy: $probe_endpoint_names ($rmo_probe_total/$expected_visible_probes)"
+                echo "  ✓ All endpoints healthy: $probe_endpoint_names"
             fi
         else
             if [ "$total_crd_count" -gt 0 ]; then
@@ -3700,6 +4020,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="rmo_servicemonitor_health"
     # RMO Check 4: ServiceMonitor validation
     # Use status.serviceMonitorRef from each monitor to verify existence directly
     # (ownerReferences are not always set, especially on coreos.com ServiceMonitors)
@@ -3715,29 +4036,32 @@ EOF
         rmo_sm_message="Skipped — no RouteMonitor/ClusterUrlMonitor CRs exist (see routemonitor_status)"
         echo "  ℹ ServiceMonitor check skipped (no monitors)"
     elif [ "$total_crd_count" -gt 0 ]; then
-        # Collect serviceMonitorRefs from RouteMonitors
+        # Collect serviceMonitorRefs with their API group (from spec.serviceMonitorType)
+        # serviceMonitorType: "monitoring.coreos.com" or "monitoring.rhobs"
         sm_refs=""
         if [ -n "${routemonitors:-}" ]; then
-            sm_refs=$(echo "$routemonitors" | jq -r '.items[] | select(.status.serviceMonitorRef.name != null and .status.serviceMonitorRef.name != "") | "\(.status.serviceMonitorRef.namespace)/\(.status.serviceMonitorRef.name)"' 2>/dev/null)
+            sm_refs=$(echo "$routemonitors" | jq -r '.items[] | select(.status.serviceMonitorRef.name != null and .status.serviceMonitorRef.name != "") | "\(.spec.serviceMonitorType // "monitoring.coreos.com")|\(.status.serviceMonitorRef.namespace)/\(.status.serviceMonitorRef.name)"' 2>/dev/null)
         fi
         if [ -n "${clusterurlmonitors:-}" ]; then
-            cum_sm_refs=$(echo "$clusterurlmonitors" | jq -r '.items[] | select(.status.serviceMonitorRef.name != null and .status.serviceMonitorRef.name != "") | "\(.status.serviceMonitorRef.namespace)/\(.status.serviceMonitorRef.name)"' 2>/dev/null)
+            cum_sm_refs=$(echo "$clusterurlmonitors" | jq -r '.items[] | select(.status.serviceMonitorRef.name != null and .status.serviceMonitorRef.name != "") | "\(.spec.serviceMonitorType // "monitoring.coreos.com")|\(.status.serviceMonitorRef.namespace)/\(.status.serviceMonitorRef.name)"' 2>/dev/null)
             [ -n "$cum_sm_refs" ] && sm_refs="${sm_refs}${sm_refs:+$'\n'}${cum_sm_refs}"
         fi
 
-        # Verify each referenced ServiceMonitor exists (try both API groups)
+        # Verify each referenced ServiceMonitor exists using the correct API group
         if [ -n "$sm_refs" ]; then
-            while IFS= read -r ref; do
-                [ -z "$ref" ] && continue
+            while IFS= read -r ref_line; do
+                [ -z "$ref_line" ] && continue
+                sm_api="${ref_line%%|*}"
+                ref="${ref_line#*|}"
                 sm_ns="${ref%%/*}"
                 sm_name="${ref#*/}"
-                if oc get servicemonitor.monitoring.coreos.com "$sm_name" -n "$sm_ns" &>/dev/null || \
-                   oc get servicemonitor.monitoring.rhobs "$sm_name" -n "$sm_ns" &>/dev/null; then
+                _run_oc "Check ServiceMonitor $sm_ns/$sm_name" ocm backplane elevate "${REASON}" -- get servicemonitor.${sm_api} "$sm_name" -n "$sm_ns"
+                if [ $__oc_rc -eq 0 ]; then
                     rmo_sm_found=$((rmo_sm_found + 1))
-                    echo "  ✓ ServiceMonitor: $sm_ns/$sm_name"
+                    echo "  ✓ ServiceMonitor: $sm_ns/$sm_name (${sm_api})"
                 else
                     rmo_sm_missing=$((rmo_sm_missing + 1))
-                    echo "  ⚠ Missing ServiceMonitor: $sm_ns/$sm_name"
+                    echo "  ⚠ Missing ServiceMonitor: $sm_ns/$sm_name (${sm_api}): $__oc_err"
                 fi
             done <<< "$sm_refs"
         fi
@@ -3776,6 +4100,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="rmo_prometheusrule_health"
     # RMO Check 5: PrometheusRule validation
     # Use status.prometheusRuleRef from each monitor to verify rules exist in their namespaces
     rmo_pr_status="PASS"
@@ -3813,11 +4138,12 @@ EOF
             [ -z "$ref" ] && continue
             pr_ns="${ref%%/*}"
             pr_name="${ref#*/}"
-            if oc get prometheusrule "$pr_name" -n "$pr_ns" &>/dev/null; then
+            _run_oc "Check PrometheusRule $pr_ns/$pr_name" ocm backplane elevate "${REASON}" -- get prometheusrule "$pr_name" -n "$pr_ns"
+            if [ $__oc_rc -eq 0 ]; then
                 rmo_pr_found=$((rmo_pr_found + 1))
             else
                 rmo_pr_missing=$((rmo_pr_missing + 1))
-                echo "  ⚠ Missing: $pr_ns/$pr_name"
+                echo "  ⚠ Missing: $pr_ns/$pr_name (error: $__oc_err)"
             fi
         done <<< "$pr_refs"
     fi
@@ -3851,6 +4177,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="rmo_operator_metrics"
     # RMO Check 6: Operator metrics
     rmo_metrics_status="PASS"
     rmo_metrics_message=""
@@ -3863,13 +4190,25 @@ EOF
         local metric_name="$1"
         local query="${metric_name}{namespace=\"$NAMESPACE\"}"
         local query_encoded=$(printf '%s' "$query" | jq -sRr @uri)
-        ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>/dev/null
+        local _mef
+        _mef=$(mktemp)
+        local _mout
+        _mout=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>"$_mef")
+        local _mrc=$?
+        if [ $_mrc -ne 0 ]; then
+            local _merr=$(head -1 "$_mef")
+            log_api_error "Prometheus query: $metric_name" "${_merr:-timeout or connection error}" "$_mrc"
+            echo "  ⚠ $metric_name query failed: ${_merr:-timeout or connection error}" >&2
+        fi
+        rm -f "$_mef"
+        echo "$_mout"
+        return $_mrc
     }
 
     echo "  Querying RMO Prometheus metrics..."
     rmo_info_data=$(query_rmo_metric "rhobs_route_monitor_operator_info")
-    if [ -n "$rmo_info_data" ] && echo "$rmo_info_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+    if [ $? -eq 0 ] && [ -n "$rmo_info_data" ] && echo "$rmo_info_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
         rmo_info_version=$(echo "$rmo_info_data" | jq -r '.data.result[0].metric.version // empty' 2>/dev/null)
         echo "  ✓ RMO info metric present (version: ${rmo_info_version:-unknown})"
     else
@@ -3926,13 +4265,16 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="rmo_config"
     # RMO Check 7: ConfigMap configuration
     rmo_config_status="PASS"
     rmo_config_message=""
     # PKO creates route-monitor-operator-manager-config; runtime creates route-monitor-operator-config
-    rmo_config_data=$(oc get configmap -n "$NAMESPACE" route-monitor-operator-manager-config -o json 2>/dev/null)
+    _run_oc "Get RMO manager ConfigMap" oc get configmap -n "$NAMESPACE" route-monitor-operator-manager-config -o json
+    rmo_config_data="$__oc_out"
     if [ -z "$rmo_config_data" ] || ! echo "$rmo_config_data" | jq -e '.metadata.name' >/dev/null 2>&1; then
-        rmo_config_data=$(oc get configmap -n "$NAMESPACE" route-monitor-operator-config -o json 2>/dev/null)
+        _run_oc "Get RMO ConfigMap (alternate name)" oc get configmap -n "$NAMESPACE" route-monitor-operator-config -o json
+        rmo_config_data="$__oc_out"
     fi
     rmo_probe_api_url=""
     rmo_only_public=""
@@ -3968,6 +4310,7 @@ EOF
 EOF
 )")
 
+    CURRENT_CHECK="rmo_hcp_coverage"
     # RMO Check 8: HCP RouteMonitor coverage (MC clusters only)
     if [ "$cluster_type" = "management_cluster" ]; then
         rmo_hcp_status="PASS"
@@ -3983,7 +4326,8 @@ EOF
         hcp_orphaned=0
         rm_with_errors=0
 
-        hcp_list=$(oc get hostedcontrolplane -A -o json 2>/dev/null)
+        _run_oc "Get HostedControlPlane CRs" oc get hostedcontrolplane -A -o json
+        hcp_list="$__oc_out"
         if [ -n "$hcp_list" ] && echo "$hcp_list" | jq -e '.items[0]' >/dev/null 2>&1; then
             hcp_count=$(echo "$hcp_list" | jq '.items | length' 2>/dev/null || echo "0")
             hcp_count=$(echo "$hcp_count" | tr -d '[:space:]')
@@ -4114,6 +4458,325 @@ EOF
 }
 EOF
 )")
+
+        CURRENT_CHECK="rmo_hcp_probe_coverage"
+        # RMO Check 8b: HCP Probe Health (from RHOBS Prometheus)
+        # Queries the RHOBS hypershift monitoring stack for actual HCP probe status
+        echo "  Querying HCP probe health from RHOBS Prometheus..."
+        hpc_cov_status="PASS"
+        hpc_cov_message=""
+        hpc_total_probes=0
+        hpc_probes_ok=0
+        hpc_probes_failing=0
+        hpc_ready_with_probes=0
+        hpc_failing_urls=""
+        __rhobs_rc=0
+        __rhobs_err=""
+
+        # Query RHOBS Prometheus for HCP probe data
+        rhobs_probe_raw=$(query_rhobs_prometheus "HCP probe_success (all)" 'probe_success')
+        if [ -n "$rhobs_probe_raw" ]; then
+            hpc_total_probes=$(echo "$rhobs_probe_raw" | jq '.data.result | length' 2>/dev/null | tr -d '[:space:]')
+            [ -z "$hpc_total_probes" ] && hpc_total_probes=0
+            hpc_probes_ok=$(echo "$rhobs_probe_raw" | jq '[.data.result[] | select(.value[1] == "1")] | length' 2>/dev/null | tr -d '[:space:]')
+            [ -z "$hpc_probes_ok" ] && hpc_probes_ok=0
+            hpc_probes_failing=$(echo "$rhobs_probe_raw" | jq '[.data.result[] | select(.value[1] == "0")] | length' 2>/dev/null | tr -d '[:space:]')
+            [ -z "$hpc_probes_failing" ] && hpc_probes_failing=0
+            hpc_failing_urls=$(echo "$rhobs_probe_raw" | jq -r '[.data.result[] | select(.value[1] == "0") | .metric.probe_url] | join(", ")' 2>/dev/null)
+        fi
+
+        # Ready HCPs with probes (filtered by state)
+        rhobs_ready_raw=$(query_rhobs_prometheus "Ready HCPs with probes" 'count(count by (_id) (probe_success and on (_id) hypershift_cluster_vcpus > 0 unless on (_id) hypershift_cluster_limited_support_enabled == 1 unless on (_id) hypershift_cluster_waiting_initial_availability_duration_seconds unless on (_id) hypershift_cluster_deleting_duration_seconds))')
+        if [ -n "$rhobs_ready_raw" ]; then
+            hpc_ready_with_probes=$(echo "$rhobs_ready_raw" | prom_scalar)
+        fi
+        [ -z "$hpc_ready_with_probes" ] && hpc_ready_with_probes=0
+
+        echo "  Total probes: $hpc_total_probes ($hpc_probes_ok ok, $hpc_probes_failing failing) | Ready with probes: $hpc_ready_with_probes"
+
+        if [ $__rhobs_rc -ne 0 ]; then
+            hpc_cov_status="UNKNOWN"
+            hpc_cov_message="Cannot query RHOBS Prometheus: $__rhobs_err"
+        elif [ "$hpc_total_probes" -eq 0 ] 2>/dev/null; then
+            hpc_cov_status="WARNING"
+            hpc_cov_message="No HCP probes found in RHOBS Prometheus — RMO may not have created probes yet"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ No HCP probes in RHOBS Prometheus"
+        elif [ "$hpc_probes_failing" -gt 0 ] 2>/dev/null; then
+            hpc_cov_status="WARNING"
+            hpc_cov_message="$hpc_probes_failing/$hpc_total_probes HCP probe(s) failing — kube-apiserver may be unreachable"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ $hpc_probes_failing failing probes: $hpc_failing_urls"
+        else
+            hpc_cov_message="All $hpc_total_probes HCP probes succeeding ($hpc_ready_with_probes on ready HCPs)"
+            echo "  ✓ All $hpc_total_probes HCP probes succeeding"
+        fi
+
+        health_checks+=("$(cat <<EOF
+{
+  "check": "rmo_hcp_probe_coverage",
+  "status": "$hpc_cov_status",
+  "severity": "warning",
+  "message": "$hpc_cov_message",
+  "details": {
+    "total_probes": $hpc_total_probes,
+    "probes_succeeding": $hpc_probes_ok,
+    "probes_failing": $hpc_probes_failing,
+    "ready_hcps_with_probes": $hpc_ready_with_probes,
+    "failing_probe_urls": "$(echo "${hpc_failing_urls:-none}" | sed 's/"/\\"/g')",
+    "data_source": "RHOBS Prometheus (openshift-observability-operator/prometheus-rhobs-hypershift-monitoring-stack)"
+  }
+}
+EOF
+)")
+
+        CURRENT_CHECK="rmo_hcp_state"
+        # RMO Check 8c: HCP State Breakdown (from RHOBS Prometheus)
+        echo "  Querying HCP state breakdown from RHOBS Prometheus..."
+        hcp_prom_provisioned=0
+        hcp_prom_limited=0
+        hcp_prom_deleting=0
+        hcp_prom_waiting=0
+        hcp_prom_ready=0
+
+        prov_raw=$(query_rhobs_prometheus "HCP provisioned count" 'count(hypershift_cluster_vcpus > 0)')
+        [ -n "$prov_raw" ] && hcp_prom_provisioned=$(echo "$prov_raw" | prom_scalar)
+        [ -z "$hcp_prom_provisioned" ] && hcp_prom_provisioned=0
+
+        ls_raw=$(query_rhobs_prometheus "HCP limited support count" 'count(hypershift_cluster_limited_support_enabled == 1)')
+        [ -n "$ls_raw" ] && hcp_prom_limited=$(echo "$ls_raw" | prom_scalar)
+        [ -z "$hcp_prom_limited" ] && hcp_prom_limited=0
+
+        del_raw=$(query_rhobs_prometheus "HCP deleting count" 'count(hypershift_cluster_deleting_duration_seconds)')
+        [ -n "$del_raw" ] && hcp_prom_deleting=$(echo "$del_raw" | prom_scalar)
+        [ -z "$hcp_prom_deleting" ] && hcp_prom_deleting=0
+
+        wait_raw=$(query_rhobs_prometheus "HCP waiting availability count" 'count(hypershift_cluster_waiting_initial_availability_duration_seconds)')
+        [ -n "$wait_raw" ] && hcp_prom_waiting=$(echo "$wait_raw" | prom_scalar)
+        [ -z "$hcp_prom_waiting" ] && hcp_prom_waiting=0
+
+        ready_raw=$(query_rhobs_prometheus "HCP ready count" 'count(hypershift_cluster_vcpus > 0 unless on(_id) hypershift_cluster_limited_support_enabled == 1 unless on(_id) hypershift_cluster_waiting_initial_availability_duration_seconds unless on(_id) hypershift_cluster_deleting_duration_seconds)')
+        [ -n "$ready_raw" ] && hcp_prom_ready=$(echo "$ready_raw" | prom_scalar)
+        [ -z "$hcp_prom_ready" ] && hcp_prom_ready=0
+
+        echo "  HCP State: ${hcp_prom_provisioned} provisioned, ${hcp_prom_ready} ready, ${hcp_prom_limited} limited support, ${hcp_prom_deleting} deleting, ${hcp_prom_waiting} waiting"
+
+        health_checks+=("$(cat <<EOF
+{
+  "check": "rmo_hcp_state",
+  "status": "INFO",
+  "severity": "info",
+  "message": "${hcp_prom_provisioned} provisioned HCPs: ${hcp_prom_ready} ready, ${hcp_prom_limited} limited support, ${hcp_prom_deleting} deleting, ${hcp_prom_waiting} waiting",
+  "details": {
+    "provisioned": $hcp_prom_provisioned,
+    "ready": $hcp_prom_ready,
+    "limited_support": $hcp_prom_limited,
+    "deleting": $hcp_prom_deleting,
+    "waiting_availability": $hcp_prom_waiting,
+    "data_source": "RHOBS Prometheus hypershift_cluster_* metrics"
+  }
+}
+EOF
+)")
+
+        CURRENT_CHECK="rmo_limited_support_disagreement"
+        # RMO Check 8d: Limited Support Label vs Metric Disagreement
+        # RMO uses HCP label api.openshift.com/limited-support to decide probe lifecycle.
+        # Prometheus metric hypershift_cluster_limited_support_enabled comes from hypershift operator.
+        # If they disagree, RMO may keep probes on limited-support clusters (false SLO alerts)
+        # or delete probes on non-limited clusters (monitoring gap).
+        echo "  Cross-referencing limited support: HCP labels vs RHOBS Prometheus metrics..."
+        ls_status="PASS"
+        ls_message=""
+        ls_disagreements=""
+        ls_disagree_count=0
+
+        # Get limited-support cluster IDs from Prometheus
+        ls_prom_raw=$(query_rhobs_prometheus "Limited support cluster IDs (Prometheus)" 'hypershift_cluster_limited_support_enabled == 1')
+        prom_ls_ids=""
+        if [ -n "$ls_prom_raw" ]; then
+            prom_ls_ids=$(echo "$ls_prom_raw" | jq -r '[.data.result[] | .metric._id] | unique | .[]' 2>/dev/null)
+        fi
+
+        # Get limited-support labels from HCP CRs (reuse hcp_list from HCP coverage check)
+        if [ -n "${hcp_list:-}" ] && echo "$hcp_list" | jq -e '.items[0]' >/dev/null 2>&1; then
+            # Build lookup: clusterID -> label value, name
+            hcp_ls_data=$(echo "$hcp_list" | jq -r '.items[] | "\(.spec.clusterID // "unknown")|\(.metadata.labels["api.openshift.com/limited-support"] // "not-set")|\(.metadata.name)"' 2>/dev/null)
+
+            while IFS='|' read -r cid label_val hcp_name; do
+                [ -z "$cid" ] || [ "$cid" = "unknown" ] && continue
+                label_is_ls=false
+                [ "$label_val" = "true" ] && label_is_ls=true
+
+                prom_is_ls=false
+                if echo "$prom_ls_ids" | grep -q "^${cid}$" 2>/dev/null; then
+                    prom_is_ls=true
+                fi
+
+                if [ "$label_is_ls" != "$prom_is_ls" ]; then
+                    ls_disagree_count=$((ls_disagree_count + 1))
+                    if [ "$label_is_ls" = false ] && [ "$prom_is_ls" = true ]; then
+                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): Prometheus=limited but label=${label_val} — RMO will NOT delete probe (false SLO alerts possible); "
+                    else
+                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): label=limited but Prometheus=not-limited — RMO deleted probe but cluster may not be limited (monitoring gap); "
+                    fi
+                fi
+            done <<< "$hcp_ls_data"
+
+            ls_disagreements="${ls_disagreements%; }"
+
+            if [ "$ls_disagree_count" -gt 0 ]; then
+                ls_status="FAIL"
+                ls_message="${ls_disagree_count} HCP(s) disagree between label (what RMO uses) and Prometheus metric (what dashboards show): ${ls_disagreements}"
+                critical_count=$((critical_count + 1))
+                echo "  ✗ CRITICAL: ${ls_disagree_count} limited support disagreement(s) — probe lifecycle incorrect"
+                echo "    $ls_disagreements"
+            else
+                ls_message="All HCPs agree: label api.openshift.com/limited-support matches Prometheus hypershift_cluster_limited_support_enabled"
+                echo "  ✓ Limited support labels and metrics agree"
+            fi
+        else
+            ls_status="UNKNOWN"
+            ls_message="Cannot cross-reference — HCP list not available"
+            echo "  ⚠ Cannot check: HCP list not available"
+        fi
+
+        health_checks+=("$(cat <<EOF
+{
+  "check": "rmo_limited_support_disagreement",
+  "status": "$ls_status",
+  "severity": "critical",
+  "message": "$(echo "$ls_message" | sed 's/"/\\"/g')",
+  "details": {
+    "disagreement_count": $ls_disagree_count,
+    "disagreements": "$(echo "${ls_disagreements:-none}" | sed 's/"/\\"/g')",
+    "rmo_source": "HCP label api.openshift.com/limited-support",
+    "dashboard_source": "Prometheus metric hypershift_cluster_limited_support_enabled",
+    "prom_limited_count": ${hcp_prom_limited:-0},
+    "label_limited_count": $(echo "$hcp_ls_data" | grep -c '|true|' 2>/dev/null || echo "0")
+  }
+}
+EOF
+)")
+
+        CURRENT_CHECK="rmo_rhobs_api_health"
+        # RMO Check 8e: RHOBS API Health (from RHOBS Prometheus)
+        # RMO's own operational metrics for RHOBS probe management
+        echo "  Querying RMO RHOBS API health from RHOBS Prometheus..."
+        rhobs_api_status="PASS"
+        rhobs_api_message=""
+        rhobs_get_success=0
+        rhobs_get_error=0
+        rhobs_create_success=0
+        rhobs_create_error=0
+        rhobs_delete_success=0
+        rhobs_delete_error=0
+        rhobs_update_success=0
+        rhobs_update_error=0
+        rhobs_oidc_success=0
+        rhobs_oidc_error=0
+        rhobs_deletion_timeouts=0
+        rhobs_rmo_version=""
+
+        # API requests by operation
+        api_raw=$(query_rhobs_prometheus "RMO API requests" 'rhobs_route_monitor_operator_api_requests_total')
+        if [ -n "$api_raw" ]; then
+            rhobs_get_success=$(echo "$api_raw" | jq -r '[.data.result[] | select(.metric.operation == "get_probe" and .metric.status == "success") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+            rhobs_get_error=$(echo "$api_raw" | jq -r '[.data.result[] | select(.metric.operation == "get_probe" and .metric.status == "error") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+            rhobs_create_success=$(echo "$api_raw" | jq -r '[.data.result[] | select(.metric.operation == "create_probe" and .metric.status == "success") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+            rhobs_create_error=$(echo "$api_raw" | jq -r '[.data.result[] | select(.metric.operation == "create_probe" and .metric.status == "error") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+            rhobs_delete_success=$(echo "$api_raw" | jq -r '[.data.result[] | select(.metric.operation == "delete_probe" and .metric.status == "success") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+            rhobs_delete_error=$(echo "$api_raw" | jq -r '[.data.result[] | select(.metric.operation == "delete_probe" and .metric.status == "error") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+            rhobs_update_success=$(echo "$api_raw" | jq -r '[.data.result[] | select(.metric.operation == "update_probe_labels" and .metric.status == "success") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+            rhobs_update_error=$(echo "$api_raw" | jq -r '[.data.result[] | select(.metric.operation == "update_probe_labels" and .metric.status == "error") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+        fi
+        # Defaults
+        [ -z "$rhobs_get_success" ] && rhobs_get_success=0
+        [ -z "$rhobs_get_error" ] && rhobs_get_error=0
+        [ -z "$rhobs_create_success" ] && rhobs_create_success=0
+        [ -z "$rhobs_create_error" ] && rhobs_create_error=0
+        [ -z "$rhobs_delete_success" ] && rhobs_delete_success=0
+        [ -z "$rhobs_delete_error" ] && rhobs_delete_error=0
+        [ -z "$rhobs_update_success" ] && rhobs_update_success=0
+        [ -z "$rhobs_update_error" ] && rhobs_update_error=0
+
+        # OIDC token refresh
+        oidc_raw=$(query_rhobs_prometheus "RMO OIDC token refresh" 'rhobs_route_monitor_operator_oidc_token_refresh_total')
+        if [ -n "$oidc_raw" ]; then
+            rhobs_oidc_success=$(echo "$oidc_raw" | jq -r '[.data.result[] | select(.metric.status == "success") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+            rhobs_oidc_error=$(echo "$oidc_raw" | jq -r '[.data.result[] | select(.metric.status == "error") | .value[1] | tonumber] | add // 0' 2>/dev/null | tr -d '[:space:]')
+        fi
+        [ -z "$rhobs_oidc_success" ] && rhobs_oidc_success=0
+        [ -z "$rhobs_oidc_error" ] && rhobs_oidc_error=0
+
+        # Probe deletion timeouts (SREP-2832/2966)
+        timeout_raw=$(query_rhobs_prometheus "RMO probe deletion timeouts" 'rhobs_route_monitor_operator_probe_deletion_timeout_total')
+        if [ -n "$timeout_raw" ]; then
+            rhobs_deletion_timeouts=$(echo "$timeout_raw" | prom_scalar)
+        fi
+        [ -z "$rhobs_deletion_timeouts" ] && rhobs_deletion_timeouts=0
+
+        # RMO version from RHOBS Prometheus
+        info_raw=$(query_rhobs_prometheus "RMO info (RHOBS)" 'rhobs_route_monitor_operator_info')
+        if [ -n "$info_raw" ]; then
+            rhobs_rmo_version=$(echo "$info_raw" | jq -r '.data.result[0].metric.version // "unknown"' 2>/dev/null)
+        fi
+
+        total_api_errors=$((rhobs_get_error + rhobs_create_error + rhobs_delete_error + rhobs_update_error))
+        total_api_success=$((rhobs_get_success + rhobs_create_success + rhobs_delete_success + rhobs_update_success))
+
+        echo "  RHOBS API: get=${rhobs_get_success}ok/${rhobs_get_error}err create=${rhobs_create_success}ok/${rhobs_create_error}err delete=${rhobs_delete_success}ok/${rhobs_delete_error}err update=${rhobs_update_success}ok/${rhobs_update_error}err"
+        echo "  OIDC: ${rhobs_oidc_success} ok / ${rhobs_oidc_error} err | Deletion timeouts: ${rhobs_deletion_timeouts} | RMO version: ${rhobs_rmo_version:-unknown}"
+
+        if [ "$total_api_errors" -gt 0 ] && [ "$total_api_success" -eq 0 ]; then
+            rhobs_api_status="FAIL"
+            rhobs_api_message="All RHOBS API calls failing ($total_api_errors errors, 0 success) — probe management is broken"
+            critical_count=$((critical_count + 1))
+            echo "  ✗ CRITICAL: All RHOBS API calls failing"
+        elif [ "$rhobs_oidc_error" -gt 0 ] && [ "$rhobs_oidc_success" -eq 0 ]; then
+            rhobs_api_status="FAIL"
+            rhobs_api_message="OIDC token refresh failing ($rhobs_oidc_error errors, 0 success) — cannot authenticate to RHOBS API"
+            critical_count=$((critical_count + 1))
+            echo "  ✗ CRITICAL: OIDC token refresh failing"
+        elif [ "$rhobs_deletion_timeouts" -gt 0 ]; then
+            rhobs_api_status="WARNING"
+            rhobs_api_message="$rhobs_deletion_timeouts probe deletion timeout(s) (SREP-2832/2966) — HCP deletions were delayed waiting for probe cleanup"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ $rhobs_deletion_timeouts deletion timeouts (fail-open after 15min)"
+        elif [ "$total_api_errors" -gt 0 ]; then
+            rhobs_api_status="WARNING"
+            rhobs_api_message="Some RHOBS API errors: $total_api_errors errors out of $((total_api_success + total_api_errors)) total calls"
+            warning_count=$((warning_count + 1))
+        else
+            rhobs_api_message="RHOBS API healthy: $total_api_success API calls, OIDC ${rhobs_oidc_success} refreshes, 0 errors, 0 deletion timeouts"
+            echo "  ✓ RHOBS API healthy"
+        fi
+
+        health_checks+=("$(cat <<EOF
+{
+  "check": "rmo_rhobs_api_health",
+  "status": "$rhobs_api_status",
+  "severity": "$([ "$rhobs_api_status" = "FAIL" ] && echo "critical" || echo "warning")",
+  "message": "$(echo "$rhobs_api_message" | sed 's/"/\\"/g')",
+  "details": {
+    "get_probe_success": $rhobs_get_success,
+    "get_probe_error": $rhobs_get_error,
+    "create_probe_success": $rhobs_create_success,
+    "create_probe_error": $rhobs_create_error,
+    "delete_probe_success": $rhobs_delete_success,
+    "delete_probe_error": $rhobs_delete_error,
+    "update_labels_success": $rhobs_update_success,
+    "update_labels_error": $rhobs_update_error,
+    "oidc_refresh_success": $rhobs_oidc_success,
+    "oidc_refresh_error": $rhobs_oidc_error,
+    "probe_deletion_timeouts": $rhobs_deletion_timeouts,
+    "rmo_version": "${rhobs_rmo_version:-unknown}",
+    "data_source": "RHOBS Prometheus rhobs_route_monitor_operator_* metrics"
+  }
+}
+EOF
+)")
+
     else
         # Non-MC cluster — HCP coverage not applicable
         health_checks+=("$(cat <<EOF
@@ -4128,8 +4791,21 @@ EOF
 }
 EOF
 )")
+        for _skip_check in rmo_hcp_probe_coverage rmo_hcp_state rmo_limited_support_disagreement rmo_rhobs_api_health; do
+            health_checks+=("$(cat <<EOF
+{
+  "check": "$_skip_check",
+  "status": "SKIP",
+  "severity": "info",
+  "message": "MC-only check not applicable (${cluster_type} cluster)",
+  "details": { "cluster_type": "$cluster_type" }
+}
+EOF
+)")
+        done
     fi
 
+    CURRENT_CHECK="rmo_rhobs_integration"
     # RMO Check 9: RHOBS synthetics integration
     # RHOBS is enabled when HCP CRD exists or probe-api-url is configured (not limited to MC/SC)
     {
@@ -4235,9 +4911,8 @@ if [ -n "$pod_name" ]; then
     echo "Collecting pod restart events..."
 
     # Get pod events related to restarts
-    pod_events=$(oc get events -n "$NAMESPACE" \
-        --field-selector involvedObject.name="$pod_name" \
-        -o json 2>/dev/null || echo '{"items":[]}')
+    _run_oc "Get restart events for pod $pod_name" oc get events -n "$NAMESPACE" --field-selector involvedObject.name="$pod_name" -o json
+    pod_events="${__oc_out:-{\"items\":[]}}"
 
     # Extract restart events with timestamps
     restart_events=$(echo "$pod_events" | jq -c '
@@ -4261,15 +4936,14 @@ echo "Collecting operator version change history..."
 
 # Query ReplicaSet history to find version changes
 # Use deployment's own label selector to find ReplicaSets
-replicasets=$(oc get replicasets -n "$NAMESPACE" \
-    -l "${pod_selector:-name=$DEPLOYMENT}" \
-    -o json 2>/dev/null || echo '{"items":[]}')
+_run_oc "Get ReplicaSets for version history" oc get replicasets -n "$NAMESPACE" -l "${pod_selector:-name=$DEPLOYMENT}" -o json
+replicasets="${__oc_out:-{\"items\":[]}}"
 
 # Fallback: try owner-based lookup if label selector found nothing
 rs_count=$(echo "$replicasets" | jq '.items | length' 2>/dev/null || echo "0")
 if [ "$rs_count" -eq 0 ]; then
-    replicasets=$(oc get replicasets -n "$NAMESPACE" -o json 2>/dev/null | \
-        jq "{items: [.items[] | select(.metadata.ownerReferences[]? | select(.name == \"$DEPLOYMENT\"))]}" 2>/dev/null || echo '{"items":[]}')
+    _run_oc "Get ReplicaSets (owner-based fallback)" oc get replicasets -n "$NAMESPACE" -o json
+    replicasets=$(echo "$__oc_out" | jq "{items: [.items[] | select(.metadata.ownerReferences[]? | select(.name == \"$DEPLOYMENT\"))]}" 2>/dev/null || echo '{"items":[]}')
 fi
 
 # Extract version changes from ReplicaSet annotations and creation times
@@ -4332,11 +5006,15 @@ if [ "$DEBUG" = "true" ] && [ ${#health_checks[@]} -gt 0 ]; then
 fi
 debug_log "================================================================================"
 
+# Ensure event variables are valid single-line JSON arrays
+# Use jq -cs to slurp all input into one value, flatten if accidentally doubled
+version_events=$(printf '%s' "${version_events:-[]}" | jq -cs 'if type == "array" and (.[0] | type) == "array" then .[0] else if type == "array" then . else [] end end' 2>/dev/null || echo "[]")
+restart_events=$(printf '%s' "${restart_events:-[]}" | jq -cs 'if type == "array" and (.[0] | type) == "array" then .[0] else if type == "array" then . else [] end end' 2>/dev/null || echo "[]")
+
 # Restore stdout and output data
 exec 1>&3
 
 # Build final JSON output
-if [ "$OUTPUT_FORMAT" = "json" ]; then
     # Combine all health checks into JSON array
     # Default to empty array if health_checks is empty or jq fails
     debug_log "Health checks array size: ${#health_checks[@]}"
@@ -4425,8 +5103,3 @@ if [ "$OUTPUT_FORMAT" = "json" ]; then
   }
 }
 EOF
-else
-    # CSV output (simplified)
-    echo "cluster_id,cluster_name,operator_version,overall_status,critical_count,warning_count,timestamp"
-    echo "${health_data[cluster_id]},${health_data[cluster_name]},${health_data[operator_version]},$overall_status,$critical_count,$warning_count,${health_data[timestamp]}"
-fi

@@ -75,7 +75,7 @@ CLUSTER_FILTER="all"
 MAX_CLUSTERS=""
 OP_VER_ONLY=false
 HEALTH_CHECK=false
-COMPREHENSIVE_HEALTH=false
+COMPREHENSIVE_HEALTH=true
 METRICS_CHECK=false
 VERSION_COMPARE=false
 CHECK_HCP_CONTROLLERS=false
@@ -116,10 +116,9 @@ OPTIONS:
                                 Ignored if --cluster-list is provided
     --max-clusters, -m NUM      Maximum number of clusters to process
     --op-ver                    Only fetch operator version (cluster ID, name, operator version)
-    --health                    Perform health checks for production readiness (pod uptime, errors)
-    --comprehensive-health      Comprehensive health check (version verification, memory leaks, log errors)
+    --health                    Full health check (default mode): version, resources, logs, operator-specific checks
                                 Automatically generates HTML report unless --no-html is specified
-    --no-html                   Skip HTML report generation (only output JSON for --comprehensive-health)
+    --no-html                   Skip HTML report generation (only output JSON)
     --secrets                   Enable extended secret-based health checks (requires backplane elevation)
                                 Checks: alertmanager-main secret, CAMO ConfigMap, PagerDuty secret
     --metrics                   Collect CAMO Prometheus metrics (secrets, configmaps, validation status)
@@ -243,8 +242,7 @@ while [[ $# -gt 0 ]]; do
         --cluster-filter) CLUSTER_FILTER="$2"; shift 2 ;;
         --max-clusters|-m) MAX_CLUSTERS="$2"; shift 2 ;;
         --op-ver) OP_VER_ONLY=true; shift ;;
-        --health) HEALTH_CHECK=true; shift ;;
-        --comprehensive-health) COMPREHENSIVE_HEALTH=true; shift ;;
+        --health|--comprehensive-health) COMPREHENSIVE_HEALTH=true; shift ;;
         --no-html) GENERATE_HTML=false; shift ;;
         --secrets) CHECK_SECRETS=true; shift ;;
         --metrics) METRICS_CHECK=true; shift ;;
@@ -275,10 +273,8 @@ fi
 
 # Set default output filename based on mode if not specified
 if [ -z "$OUTPUT_FILE" ]; then
-    if [ "$HEALTH_CHECK" = true ]; then
-        OUTPUT_FILE="health_check_$(date +%Y%m%d_%H%M%S).csv"
-    elif [ "$COMPREHENSIVE_HEALTH" = true ]; then
-        OUTPUT_FILE="comprehensive_health_$(date +%Y%m%d_%H%M%S).json"
+    if [ "$COMPREHENSIVE_HEALTH" = true ]; then
+        OUTPUT_FILE="health_$(date +%Y%m%d_%H%M%S).json"
     elif [ "$METRICS_CHECK" = true ]; then
         OUTPUT_FILE="camo_metrics_$(date +%Y%m%d_%H%M%S).csv"
     elif [ "$VERSION_COMPARE" = true ]; then
@@ -325,10 +321,8 @@ for cmd in ocm oc jq; do
 done
 
 echo "================================================================================"
-if [ "$HEALTH_CHECK" = true ]; then
+if [ "$COMPREHENSIVE_HEALTH" = true ]; then
     echo "MULTI-CLUSTER HEALTH CHECK"
-elif [ "$COMPREHENSIVE_HEALTH" = true ]; then
-    echo "MULTI-CLUSTER COMPREHENSIVE HEALTH CHECK"
 elif [ "$METRICS_CHECK" = true ]; then
     echo "MULTI-CLUSTER METRICS COLLECTION"
 elif [ "$VERSION_COMPARE" = true ]; then
@@ -342,10 +336,8 @@ echo "Output:      $OUTPUT_FILE"
 echo "Reason:      $REASON"
 if [ "$OP_VER_ONLY" = true ]; then
     echo "Mode:        Operator version only"
-elif [ "$HEALTH_CHECK" = true ]; then
-    echo "Mode:        Health check (production readiness)"
 elif [ "$COMPREHENSIVE_HEALTH" = true ]; then
-    echo "Mode:        Comprehensive health check (version verification, memory leaks, log analysis)"
+    echo "Mode:        Health check (version, resources, logs, operator-specific checks)"
 elif [ "$METRICS_CHECK" = true ]; then
     echo "Mode:        Prometheus metrics collection"
 elif [ "$VERSION_COMPARE" = true ]; then
@@ -848,18 +840,7 @@ EOF
         echo ""
         echo "Collecting data for $op_label..."
 
-        if [ "$HEALTH_CHECK" = true ]; then
-            # Perform health check
-            "$SCRIPT_DIR/collect_pod_health.sh" \
-                --namespace "$op_namespace" \
-                --deployment "$op_deployment" \
-                --cluster-id "$cluster_id" \
-                --cluster-name "$cluster_name" \
-                --cluster-version "$cluster_version" \
-                --reason "$REASON" \
-                --format csv \
-                --operator-name "$op_name" >> "$OUTPUT_FILE"
-        elif [ "$COMPREHENSIVE_HEALTH" = true ]; then
+        if [ "$COMPREHENSIVE_HEALTH" = true ]; then
             # Perform comprehensive health check
             health_cmd="\"$SCRIPT_DIR/collect_operator_health.sh\" \
                 --namespace \"$op_namespace\" \
@@ -868,7 +849,6 @@ EOF
                 --cluster-name \"$cluster_name\" \
                 --cluster-version \"$cluster_version\" \
                 --reason \"$REASON\" \
-                --format json \
                 --operator-name \"$op_name\""
 
             # Pass cached Hive target to avoid re-discovery

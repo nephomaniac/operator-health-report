@@ -283,6 +283,7 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .status-icon.info { background: var(--info-dim); color: var(--info); }
         .status-icon.na { background: rgba(92,96,120,0.15); color: var(--text-muted); }
         .status-icon.no-access { background: rgba(92,96,120,0.1); color: var(--text-muted); border: 1px dashed var(--text-muted); }
+        .status-icon.unknown { background: rgba(108,117,125,0.2); color: #f39c12; border: 1px solid rgba(243,156,18,0.4); }
         .status-icon.status-pass { background: #28a745; color: white; }
         .status-icon.status-critical { background: #dc3545; color: white; }
         .status-icon.status-unknown { background: #6c757d; color: white; }
@@ -627,6 +628,32 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             }[status] || 'na';
         }
 
+        function formatApiError(err) {
+            const errMsg = (err.error_message || '').toLowerCase();
+            const isScript = (err.error_type === 'script_error');
+            const errType = isScript ? 'SCRIPT' :
+                            errMsg.includes('forbidden') ? 'RBAC' :
+                            errMsg.includes('timeout') || errMsg.includes('timed out') ? 'TIMEOUT' :
+                            errMsg.includes('unauthorized') || errMsg.includes('auth') ? 'AUTH' :
+                            errMsg.includes('not found') ? 'NOT_FOUND' :
+                            errMsg.includes('connection') ? 'NETWORK' : 'API';
+            const typeColors = { SCRIPT: '#6f42c1', RBAC: '#e74c3c', TIMEOUT: '#f39c12', AUTH: '#e74c3c', NOT_FOUND: '#6c757d', NETWORK: '#e67e22', API: '#dc3545' };
+            const color = typeColors[errType] || '#dc3545';
+            const ts = err.timestamp ? (err.timestamp.split('T')[1] || '').replace('Z','') : '';
+            const op = (err.operation || 'Unknown operation').replace(/\n/g, ' ');
+            const msg = (err.error_message || 'No error message').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const cmd = (err.command || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, ' ');
+            return '<div style="padding:8px 10px;background:#fff;border:1px solid #f5c6cb;border-radius:4px;font-size:0.9em;margin-top:4px;">' +
+                '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
+                    '<span style="display:inline-block;background:' + color + ';color:#fff;font-size:0.75em;padding:1px 6px;border-radius:3px;font-weight:600;">' + errType + '</span>' +
+                    '<span style="font-weight:600;color:#333;">' + op + '</span>' +
+                    '<span style="font-size:0.85em;color:#6c757d;margin-left:auto;">rc=' + (err.exit_code || '?') + ' ' + ts + '</span>' +
+                '</div>' +
+                (cmd ? '<pre style="margin:0 0 4px;padding:3px 8px;background:#f0f0f0;border:1px solid #ddd;border-radius:3px;font-size:0.8em;color:#555;overflow-x:auto;white-space:pre-wrap;">$ ' + cmd + '</pre>' : '') +
+                '<pre style="margin:0;padding:4px 8px;background:#f8f0f0;border:1px solid #f5c6cb;border-radius:3px;font-size:0.85em;overflow-x:auto;white-space:pre-wrap;word-break:break-all;color:#721c24;">' + msg + '</pre>' +
+            '</div>';
+        }
+
         function getAllCheckTypes(data) {
             const sourceData = data || healthData;
             const checkTypes = new Set();
@@ -673,6 +700,10 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'rmo_operator_metrics',
                 'rmo_config',
                 'rmo_hcp_coverage',
+                'rmo_hcp_probe_coverage',
+                'rmo_hcp_state',
+                'rmo_limited_support_disagreement',
+                'rmo_rhobs_api_health',
                 'rmo_rhobs_integration'
             ];
 
@@ -808,7 +839,11 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'rmo_operator_metrics': 'RMO Metrics',
                 'rmo_config': 'RMO Config',
                 'rmo_hcp_coverage': 'HCP Coverage',
-                'rmo_rhobs_integration': 'RHOBS',
+                'rmo_hcp_probe_coverage': 'HCP Probes',
+                'rmo_hcp_state': 'HCP State',
+                'rmo_limited_support_disagreement': 'LS Mismatch',
+                'rmo_rhobs_api_health': 'RHOBS API',
+                'rmo_rhobs_integration': 'RHOBS Config',
                 'log_error_analysis': 'Log Analysis'
             };
 
@@ -1273,28 +1308,31 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         ` : ''}
                     </div>
                 ` : ''}
-                ${cluster.api_errors && cluster.api_errors.length > 0 ? `
-                    <div class="api-errors-status" style="margin-top: 15px; padding: 12px; background: #fff3cd; border-left: 4px solid #f57c00; border-radius: 4px;">
-                        <strong style="color: #856404;">⚠ API Request Errors (${cluster.api_errors.length}):</strong>
-                        <details style="margin-top: 10px;">
-                            <summary style="cursor: pointer; font-weight: 500; color: #856404;">Show API Error Details</summary>
-                            <div style="margin-top: 10px;">
-                                ${cluster.api_errors.map(err => `
-                                    <div style="margin-bottom: 15px; padding: 10px; background: #fff; border: 1px solid #ffeaa7; border-radius: 4px;">
-                                        <div style="font-weight: 600; color: #856404; margin-bottom: 5px;">
-                                            ${err.operation || 'Unknown operation'}
-                                            <span style="float: right; font-size: 0.9em; color: #6c757d;">${err.timestamp || ''}</span>
-                                        </div>
-                                        <div style="font-size: 0.9em; color: #dc3545; margin-bottom: 5px;">
-                                            Exit Code: ${err.exit_code || 'unknown'}
-                                        </div>
-                                        <pre style="margin: 0; padding: 8px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; font-size: 0.85em; overflow-x: auto; white-space: pre-wrap; word-break: break-all;">${err.error_message || 'No error message available'}</pre>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        </details>
-                    </div>
-                ` : ''}
+                ${(() => {
+                    const allErrors = cluster.api_errors || [];
+                    if (allErrors.length === 0) return '';
+                    const checkNames = new Set((cluster.health_checks || []).map(c => c.check));
+                    const orphanedErrors = allErrors.filter(e => !e.check || e.check === 'unknown' || !checkNames.has(e.check));
+                    const inlineCount = allErrors.length - orphanedErrors.length;
+                    let html = '';
+                    if (orphanedErrors.length > 0) {
+                        html += '<div style="margin-top:15px;padding:14px;background:#fff3cd;border-left:5px solid #dc3545;border-radius:4px;">' +
+                            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">' +
+                                '<span style="font-size:1.3em;">🚨</span>' +
+                                '<strong style="color:#721c24;font-size:1.05em;">Errors (' + orphanedErrors.length + ')</strong>' +
+                            '</div>' +
+                            '<div style="display:grid;gap:8px;">' +
+                                orphanedErrors.map(err => formatApiError(err)).join('') +
+                            '</div>' +
+                        '</div>';
+                    }
+                    if (inlineCount > 0) {
+                        html += '<div style="margin-top:8px;padding:8px 12px;background:rgba(220,53,69,0.08);border-radius:4px;font-size:0.85em;color:#721c24;">' +
+                            inlineCount + ' error(s) shown inline under their respective checks below' +
+                        '</div>';
+                    }
+                    return html;
+                })()}
                 <div class="health-thresholds" style="margin-top: 15px; padding: 15px; background: #e7f3ff; border-left: 4px solid #667eea; border-radius: 4px;">
                     <h4 style="margin: 0 0 10px 0; color: #667eea; font-size: 0.95em;">Health Check Thresholds</h4>
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; font-size: 0.85em;">
@@ -1463,6 +1501,14 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     </div>
                     <div class="check-details" id="check-details-${checkId}">
                         ${check.message ? `<div class="check-message">${check.message}</div>` : ''}
+                        ${(() => {
+                            const checkErrors = (cluster.api_errors || []).filter(e => e.check === check.check);
+                            if (checkErrors.length === 0) return '';
+                            return '<div style="margin:8px 0;padding:8px;background:#fff3cd;border-left:3px solid #dc3545;border-radius:3px;font-size:0.85em;">' +
+                                '<strong style="color:#721c24;">API/Script Errors (' + checkErrors.length + '):</strong>' +
+                                checkErrors.map(e => formatApiError(e)).join('') +
+                            '</div>';
+                        })()}
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
                                 if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples')) return '';
@@ -1603,23 +1649,41 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             if (!summaryEl || !healthData || healthData.length === 0) return;
 
             // Count unique clusters, aggregate worst status per cluster across operators
+            // Derive from actual check results — any FAIL check = CRITICAL, any WARNING = WARNING
             const clusterStatuses = {};
+            const priority = { 'CRITICAL': 4, 'NO_ACCESS': 3, 'WARNING': 2, 'HEALTHY': 1, 'UNKNOWN': 0 };
             healthData.forEach(entry => {
                 if (entry.operator_name === 'unknown') return;
                 const cid = entry.cluster_id || entry.cluster_name;
-                const status = entry.health_summary?.overall_status || 'UNKNOWN';
-                const priority = { 'CRITICAL': 4, 'NO_ACCESS': 3, 'WARNING': 2, 'HEALTHY': 1, 'UNKNOWN': 0 };
-                if (!clusterStatuses[cid] || (priority[status] || 0) > (priority[clusterStatuses[cid]] || 0)) {
-                    clusterStatuses[cid] = status;
+                const hasFail = (entry.health_checks || []).some(ch => ch.status === 'FAIL');
+                const hasWarn = (entry.health_checks || []).some(ch => ch.status === 'WARNING' || ch.status === 'WARN');
+                const entryStatus = entry.backplane_login?.status === 'FAILED' ? 'NO_ACCESS' :
+                                    hasFail ? 'CRITICAL' :
+                                    hasWarn ? 'WARNING' : 'HEALTHY';
+                if (!clusterStatuses[cid] || (priority[entryStatus] || 0) > (priority[clusterStatuses[cid]] || 0)) {
+                    clusterStatuses[cid] = entryStatus;
                 }
             });
 
+            // Count clusters by status — a cluster can appear in multiple categories
+            // (e.g., both critical AND warning if it has both FAIL and WARNING checks)
             let criticalCount = 0, warningCount = 0, healthyCount = 0, noAccessCount = 0;
-            Object.values(clusterStatuses).forEach(status => {
-                if (status === 'CRITICAL') criticalCount++;
-                else if (status === 'WARNING') warningCount++;
-                else if (status === 'HEALTHY') healthyCount++;
-                else if (status === 'NO_ACCESS') noAccessCount++;
+            const clusterCheckFlags = {};
+            healthData.forEach(entry => {
+                if (entry.operator_name === 'unknown') return;
+                const cid = entry.cluster_id || entry.cluster_name;
+                if (!clusterCheckFlags[cid]) clusterCheckFlags[cid] = { hasFail: false, hasWarn: false, noAccess: false };
+                if (entry.backplane_login?.status === 'FAILED') clusterCheckFlags[cid].noAccess = true;
+                (entry.health_checks || []).forEach(ch => {
+                    if (ch.status === 'FAIL') clusterCheckFlags[cid].hasFail = true;
+                    if (ch.status === 'WARNING' || ch.status === 'WARN') clusterCheckFlags[cid].hasWarn = true;
+                });
+            });
+            Object.values(clusterCheckFlags).forEach(flags => {
+                if (flags.noAccess) noAccessCount++;
+                if (flags.hasFail) criticalCount++;
+                if (flags.hasWarn) warningCount++;
+                if (!flags.hasFail && !flags.hasWarn && !flags.noAccess) healthyCount++;
             });
 
             const totalClusters = Object.keys(clusterStatuses).length;
@@ -1639,6 +1703,20 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             // Set to true to display CVE section in report (requires cveData above)
             const enableCVESection = false;
 
+            // Count API errors per operator (for summary display)
+            let apiErrorClusters = 0;
+            let totalApiErrors = 0;
+            const apiErrorsByOperator = {};
+            healthData.forEach(entry => {
+                const errs = (entry.api_errors || []).length;
+                if (errs > 0) {
+                    apiErrorClusters++;
+                    totalApiErrors += errs;
+                    const op = entry.operator_name || 'unknown';
+                    apiErrorsByOperator[op] = (apiErrorsByOperator[op] || 0) + errs;
+                }
+            });
+
             summaryEl.innerHTML = '<h2>📊 Summary Overview</h2>' +
                 '<div class="stats-grid">' +
                     '<div class="stat-card">' +
@@ -1646,25 +1724,31 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         '<div class="stat-number">' + totalClusters + '</div>' +
                     '</div>' +
                     '<div class="stat-card healthy">' +
-                        '<div class="stat-label">Healthy</div>' +
+                        '<div class="stat-label">Healthy Clusters</div>' +
                         '<div class="stat-number healthy">' + healthyCount + '</div>' +
                         '<div class="stat-label">' + ((healthyCount/totalClusters)*100).toFixed(1) + '%</div>' +
                     '</div>' +
                     '<div class="stat-card warning">' +
-                        '<div class="stat-label">Warnings</div>' +
+                        '<div class="stat-label">Clusters with Warnings</div>' +
                         '<div class="stat-number warning">' + warningCount + '</div>' +
                         '<div class="stat-label">' + ((warningCount/totalClusters)*100).toFixed(1) + '%</div>' +
                     '</div>' +
                     '<div class="stat-card critical">' +
-                        '<div class="stat-label">Critical</div>' +
+                        '<div class="stat-label">Clusters with Critical</div>' +
                         '<div class="stat-number critical">' + criticalCount + '</div>' +
                         '<div class="stat-label">' + ((criticalCount/totalClusters)*100).toFixed(1) + '%</div>' +
                     '</div>' +
                     '<div class="stat-card" style="border-color: var(--text-muted);">' +
-                        '<div class="stat-label">No Access</div>' +
+                        '<div class="stat-label">Clusters with No Access</div>' +
                         '<div class="stat-number" style="color: var(--text-muted);">' + noAccessCount + '</div>' +
                         '<div class="stat-label">' + ((noAccessCount/totalClusters)*100).toFixed(1) + '%</div>' +
                     '</div>' +
+                    (totalApiErrors > 0 ?
+                    '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);">' +
+                        '<div class="stat-label">Script/API Errors</div>' +
+                        '<div class="stat-number" style="color: #dc3545;">' + totalApiErrors + '</div>' +
+                        '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO') + ': ' + n).join(', ') + '</div>' +
+                    '</div>' : '') +
                 '</div>' +
                 // CVE Security Section (optional)
                 (enableCVESection && (cveData.image_tag || cveData.image_sha) ?
@@ -1907,17 +1991,22 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 const opData = sortClusters(operatorGroups[op]);
                 const shortName = op.replace(/-operator$/, '').replace(/configure-alertmanager/, 'CAMO').replace(/route-monitor/, 'RMO').replace(/osd-metrics-exporter/, 'OME');
 
-                // Count statuses for badge
-                const critCount = opData.filter(c => c.health_summary?.overall_status === 'CRITICAL').length;
-                const warnCount = opData.filter(c => c.health_summary?.overall_status === 'WARNING').length;
-                const badgeClass = critCount > 0 ? 'critical' : (warnCount > 0 ? 'warning' : 'healthy');
-                const badgeText = critCount > 0 ? `${critCount} crit` : (warnCount > 0 ? `${warnCount} warn` : `${opData.length} ok`);
+                // Count statuses for badge — non-exclusive, a cluster can be both crit and warn
+                let okCount = 0, warnCount = 0, critCount = 0;
+                opData.forEach(c => {
+                    const hasFail = (c.health_checks || []).some(ch => ch.status === 'FAIL');
+                    const hasWarn = (c.health_checks || []).some(ch => ch.status === 'WARNING' || ch.status === 'WARN');
+                    if (hasFail) critCount++;
+                    if (hasWarn) warnCount++;
+                    if (!hasFail && !hasWarn) okCount++;
+                });
 
-                // Tab button
+                // Tab button — show all 3 counts as colored numbers
                 const tab = document.createElement('button');
                 tab.className = `operator-tab${idx === 0 ? ' active' : ''}`;
                 tab.dataset.operator = op;
-                tab.innerHTML = `${shortName} <span class="tab-badge ${badgeClass}">${badgeText}</span>`;
+                const badgeHTML = `<span style="color:#5eecc0;">${okCount}</span> / <span style="color:#fdd76b;">${warnCount}</span> / <span style="color:#ff8a8a;">${critCount}</span>`;
+                tab.innerHTML = `${shortName} <span class="tab-badge" style="background:rgba(255,255,255,0.08);">${badgeHTML}</span>`;
                 tab.onclick = () => switchTab(op);
                 tabsContainer.appendChild(tab);
 
