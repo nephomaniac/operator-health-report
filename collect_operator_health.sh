@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="76be8b1"
+SCRIPT_VERSION="aae2e8d"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -1637,8 +1637,10 @@ if [ "$pod_count" -gt 0 ]; then
                 echo "    Peak:    ${peak_memory_mb} MB"
                 echo "    Change: ${memory_increase_percent}%"
 
-                # Evaluate memory trend
-                if (( $(echo "$memory_increase_percent > $MEMORY_LEAK_THRESHOLD_PERCENT" | bc -l) )); then
+                # Evaluate memory trend — only flag if percentage increase AND absolute value is meaningful
+                # A 50% increase from 10MB to 15MB is normal startup, not a leak
+                last_memory_mb_val=$(awk "BEGIN {printf \"%.1f\", ${last_memory:-0} / 1048576}")
+                if (( $(echo "$memory_increase_percent > $MEMORY_LEAK_THRESHOLD_PERCENT && $last_memory_mb_val > 20.0" | bc -l) )); then
                     memory_trend="increasing"
                     echo "  ⚠ Memory increased significantly"
                 else
@@ -1676,8 +1678,10 @@ if [ "$pod_count" -gt 0 ]; then
                 echo "    Peak:    ${peak_cpu_millicores}m"
                 echo "    Change: ${cpu_increase_percent}%"
 
-                # Evaluate CPU trend
-                if (( $(echo "$cpu_increase_percent > $MEMORY_LEAK_THRESHOLD_PERCENT" | bc -l) )); then
+                # Evaluate CPU trend — only flag if percentage increase AND absolute value is meaningful
+                # A 1000% increase from 0.0001 to 0.001 cores (0.1m to 1m) is noise, not a leak
+                last_cpu_mc_val=$(awk "BEGIN {printf \"%.1f\", ${last_cpu:-0} * 1000}")
+                if (( $(echo "$cpu_increase_percent > $MEMORY_LEAK_THRESHOLD_PERCENT && $last_cpu_mc_val > 1.0" | bc -l) )); then
                     cpu_trend="increasing"
                     echo "  ⚠ CPU increased significantly"
                 else
