@@ -1908,9 +1908,43 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 if (clusterShard !== currentShard) {
                     currentShard = clusterShard;
                     const shardClusters = operatorData.filter(c => (c.hive_shard || c.health_checks?.find(ch => ch.check === 'version_verification')?.details?.target_name || 'unknown') === clusterShard);
+
+                    // Collect all expected versions seen across clusters in this shard
+                    // SAAS targets can update mid-run, so different clusters may have different expected versions
+                    const versionGroups = {};
+                    let shardTarget = '';
+                    shardClusters.forEach(c => {
+                        const vc = (c.health_checks || []).find(ch => ch.check === 'version_verification');
+                        if (vc && vc.details) {
+                            const tag = vc.details.expected_image_tag || vc.details.expected_version || '';
+                            if (!shardTarget) shardTarget = vc.details.target_name || '';
+                            if (tag) {
+                                if (!versionGroups[tag]) versionGroups[tag] = 0;
+                                versionGroups[tag]++;
+                            }
+                        }
+                    });
+                    const versionEntries = Object.entries(versionGroups);
+
+                    let shardInfo = `Hive Shard: ${clusterShard} (${shardClusters.length} clusters)`;
+                    if (versionEntries.length === 1) {
+                        shardInfo += `<span style="margin-left:16px;font-weight:400;font-size:0.9em;">` +
+                            `Expected Version: <span style="color:#5eecc0;font-weight:600;">${versionEntries[0][0]}</span>` +
+                            (shardTarget ? ` <span style="color:var(--text-muted);font-size:0.85em;">(target: ${shardTarget})</span>` : '') +
+                            `</span>`;
+                    } else if (versionEntries.length > 1) {
+                        shardInfo += `<span style="margin-left:16px;font-weight:400;font-size:0.9em;">` +
+                            `Expected Versions: ` +
+                            versionEntries.map(([tag, count]) =>
+                                `<span style="color:#fdd76b;font-weight:600;">${tag}</span><span style="color:var(--text-muted);font-size:0.85em;"> (${count} clusters)</span>`
+                            ).join(', ') +
+                            ` <span style="color:#fdd76b;font-size:0.85em;">— SAAS target updated during run</span>` +
+                            `</span>`;
+                    }
+
                     const shardRow = document.createElement('tr');
                     shardRow.className = 'shard-group-header';
-                    shardRow.innerHTML = `<td colspan="${totalColumns}" style="padding: 8px 14px; font-weight: 600; letter-spacing: 0.04em;">Hive Shard: ${clusterShard} (${shardClusters.length} clusters)</td>`;
+                    shardRow.innerHTML = `<td colspan="${totalColumns}" style="padding: 8px 14px; font-weight: 600; letter-spacing: 0.04em;">${shardInfo}</td>`;
                     tableBody.appendChild(shardRow);
                 }
 

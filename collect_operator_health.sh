@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="aae2e8d"
+SCRIPT_VERSION="418d4c9"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -1075,12 +1075,47 @@ if [ -n "$canonical_version" ]; then
             echo "  ✓ Version matches expected $OCM_ENV target version"
         fi
     else
-        version_check_status="FAIL"
-        version_message="Version mismatch - may indicate installation error (expected: $canonical_version, got: $operator_version)"
-        warning_count=$((warning_count + 1))
-        echo "  ✗ Version does NOT match expected $OCM_ENV target version"
-        echo "    Current: $operator_version"
-        echo "    Expected: $canonical_version (target: $TARGET_NAME)"
+        # Version mismatch — check if deployed version is newer (SAAS target may have been updated)
+        # Re-fetch SAAS refs to see if the expected version changed
+        version_refreshed=false
+        if [ -n "$SAAS_REFS_SCRIPT" ] && [ -f "$SAAS_REFS_SCRIPT" ]; then
+            echo "  Version mismatch detected — re-checking SAAS target for updates..."
+            fresh_refs=$(bash "$SAAS_REFS_SCRIPT" "$SAAS_FILE" 2>/dev/null)
+            if [ -n "$fresh_refs" ]; then
+                fresh_line=$(echo "$fresh_refs" | grep "^$TARGET_NAME")
+                if [ -n "$fresh_line" ]; then
+                    fresh_ref=$(echo "$fresh_line" | awk '{print $2}')
+                    fresh_tag=$(echo "$fresh_line" | awk '{print $4}')
+                    if [ -n "$fresh_ref" ] && [ "$fresh_ref" != "$canonical_version" ]; then
+                        echo "  ℹ SAAS target updated during run: $canonical_version → $fresh_ref"
+                        # Check if deployed version matches the NEW expected version
+                        if [[ "$operator_version" == "$fresh_ref"* ]] || [[ "$fresh_ref" == "$operator_version"* ]] || [[ "$operator_image" == *"$fresh_ref"* ]]; then
+                            canonical_version="$fresh_ref"
+                            canonical_image_tag="$fresh_tag"
+                            version_match=true
+                            version_refreshed=true
+                            match_method="git_commit_substring_refreshed"
+                            version_check_status="PASS"
+                            version_message="Version matches updated $OCM_ENV target (SAAS updated during run: now $fresh_ref)"
+                            echo "  ✓ Version matches UPDATED target: $fresh_ref (tag: $fresh_tag)"
+                        else
+                            canonical_version="$fresh_ref"
+                            canonical_image_tag="$fresh_tag"
+                            echo "  ✗ Version still mismatches after SAAS refresh (expected: $fresh_ref, got: $operator_version)"
+                        fi
+                    fi
+                fi
+            fi
+        fi
+
+        if [ "$version_match" = false ]; then
+            version_check_status="FAIL"
+            version_message="Version mismatch (expected: $canonical_version, got: $operator_version)"
+            warning_count=$((warning_count + 1))
+            echo "  ✗ Version does NOT match expected $OCM_ENV target version"
+            echo "    Current: $operator_version"
+            echo "    Expected: $canonical_version (target: $TARGET_NAME)"
+        fi
     fi
 elif [ ${#expected_versions[@]} -eq 0 ]; then
     version_check_status="UNKNOWN"
