@@ -102,6 +102,14 @@ declare -A OPERATOR_CONFIGS
 OPERATOR_CONFIGS["camo"]="configure-alertmanager-operator:openshift-monitoring:configure-alertmanager-operator"
 OPERATOR_CONFIGS["rmo"]="route-monitor-operator:openshift-route-monitor-operator:route-monitor-operator-controller-manager"
 
+# SAAS file mappings per operator (PKO and OLM)
+declare -A OPERATOR_PKO_SAAS
+OPERATOR_PKO_SAAS["camo"]="saas-configure-alertmanager-operator-pko.yaml"
+OPERATOR_PKO_SAAS["rmo"]="saas-route-monitor-operator-pko.yaml"
+declare -A OPERATOR_OLM_SAAS
+OPERATOR_OLM_SAAS["camo"]="saas-configure-alertmanager-operator.yaml"
+OPERATOR_OLM_SAAS["rmo"]="saas-route-monitor-operator.yaml"
+
 # All supported operators (for default behavior)
 ALL_OPERATORS=("camo" "rmo")
 
@@ -650,6 +658,57 @@ else
     echo "operator,cluster_id,cluster_name,cluster_version,operator_version,namespace,deployment,replicas,requests_cpu,requests_memory,limits_cpu,limits_memory,current_cpu_cores,max_1h_cpu_cores,max_24h_cpu_cores,current_memory_bytes,max_1h_memory_bytes,max_24h_memory_bytes,timestamp" > "$OUTPUT_FILE"
 fi
 
+# Fetch SAAS targets for all operators and write as metadata
+if [ "$COMPREHENSIVE_HEALTH" = true ]; then
+    SAAS_REFS_SCRIPT=""
+    if [ -f "$SCRIPT_DIR/get_app_interface_saas_refs_with_images.sh" ]; then
+        SAAS_REFS_SCRIPT="$SCRIPT_DIR/get_app_interface_saas_refs_with_images.sh"
+    elif [ -f "$SCRIPT_DIR/get_app_interface_saas_refs.sh" ]; then
+        SAAS_REFS_SCRIPT="$SCRIPT_DIR/get_app_interface_saas_refs.sh"
+    fi
+
+    if [ -n "$SAAS_REFS_SCRIPT" ]; then
+        echo "Fetching SAAS targets from app-interface..."
+        for op in "${OPERATORS_TO_COLLECT[@]}"; do
+            IFS=':' read -r op_name _ _ <<< "${OPERATOR_CONFIGS[$op]}"
+            pko_saas="${OPERATOR_PKO_SAAS[$op]:-}"
+            olm_saas="${OPERATOR_OLM_SAAS[$op]:-}"
+            targets_json="[]"
+
+            # Fetch PKO targets
+            if [ -n "$pko_saas" ]; then
+                pko_refs=$(bash "$SAAS_REFS_SCRIPT" "$pko_saas" 2>/dev/null)
+                if [ -n "$pko_refs" ]; then
+                    pko_targets=$(echo "$pko_refs" | grep -v '^TARGET\|^----\|^$\|^Image\|^Quay\|^ *-' | awk '{print "{\"target\":\""$1"\",\"version\":\""$2"\",\"image_tag\":\""$4"\",\"saas_file\":\"'$pko_saas'\",\"method\":\"PKO\"}"}' | jq -s '.' 2>/dev/null || echo "[]")
+                    targets_json=$(echo "$targets_json $pko_targets" | jq -s 'add' 2>/dev/null || echo "$pko_targets")
+                fi
+            fi
+
+            # Fetch OLM targets (PKO and OLM targets have different names, concatenate both)
+            if [ -n "$olm_saas" ]; then
+                olm_refs=$(bash "$SAAS_REFS_SCRIPT" "$olm_saas" 2>/dev/null)
+                if [ -n "$olm_refs" ]; then
+                    olm_targets=$(echo "$olm_refs" | grep -v '^TARGET\|^----\|^$\|^Image\|^Quay\|^ *-' | awk '{print "{\"target\":\""$1"\",\"version\":\""$2"\",\"image_tag\":\""$4"\",\"saas_file\":\"'$olm_saas'\",\"method\":\"OLM\"}"}' | jq -s '.' 2>/dev/null || echo "[]")
+                    if [ "$targets_json" != "[]" ]; then
+                        targets_json=$(echo "$targets_json" | jq --argjson olm "$olm_targets" '. + $olm' 2>/dev/null || echo "$targets_json")
+                    else
+                        targets_json="$olm_targets"
+                    fi
+                fi
+            fi
+
+            target_count=$(echo "$targets_json" | jq 'length' 2>/dev/null || echo "0")
+            echo "  ${op^^}: $target_count active targets"
+
+            # Write metadata entry with OCM environment
+            cat >> "$OUTPUT_FILE" <<EOF
+{"type":"saas_targets","operator_name":"$op_name","ocm_environment":"${OCM_ENV_CACHE:-unknown}","targets":$targets_json}
+EOF
+        done
+        echo ""
+    fi
+fi
+
 # Process each cluster
 successful=0
 failed=0
@@ -955,9 +1014,12 @@ if [ "$COMPREHENSIVE_HEALTH" = true ] && [ "$successful" -gt 0 ]; then
     temp_file="${OUTPUT_FILE}.tmp"
     # The output file contains concatenated JSON objects (multi-line, not JSONL)
     # jq --slurp reads all top-level values and wraps them in an array
-    if jq -s '[.[] | select(type == "object" and .cluster_id != null)]' "$OUTPUT_FILE" > "$temp_file" 2>/dev/null && [ -s "$temp_file" ]; then
+    if jq -s '{
+        saas_targets: [.[] | select(type == "object" and .type == "saas_targets")],
+        clusters: [.[] | select(type == "object" and .cluster_id != null)]
+    } | .saas_targets as $meta | .clusters + $meta' "$OUTPUT_FILE" > "$temp_file" 2>/dev/null && [ -s "$temp_file" ]; then
         mv "$temp_file" "$OUTPUT_FILE"
-        entry_count=$(jq 'length' "$OUTPUT_FILE")
+        entry_count=$(jq '[.[] | select(.cluster_id != null)] | length' "$OUTPUT_FILE")
         echo "✓ Converted to JSON array format ($entry_count entries)"
     else
         echo "✗ JSON conversion failed — output may need manual cleanup"

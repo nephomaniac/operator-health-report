@@ -544,6 +544,15 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             healthData = healthDataRaw[0];
         }
 
+        // Separate SAAS target metadata from cluster data
+        const saasTargets = {};
+        if (Array.isArray(healthData)) {
+            healthData.filter(e => e.type === 'saas_targets').forEach(meta => {
+                saasTargets[meta.operator_name] = meta.targets || [];
+            });
+            healthData = healthData.filter(e => e.type !== 'saas_targets');
+        }
+
         // Extract and display script version from first cluster's data
         if (healthData && healthData.length > 0 && healthData[0].script_version) {
             document.getElementById('scriptVersion').textContent = healthData[0].script_version;
@@ -841,7 +850,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'rmo_hcp_coverage': 'HCP Coverage',
                 'rmo_hcp_probe_coverage': 'HCP Probes',
                 'rmo_hcp_state': 'HCP State',
-                'rmo_limited_support_disagreement': 'LS Mismatch',
+                'rmo_limited_support_disagreement': 'LS Detection',
                 'rmo_rhobs_api_health': 'RHOBS API',
                 'rmo_rhobs_integration': 'RHOBS Config',
                 'log_error_analysis': 'Log Analysis'
@@ -2048,7 +2057,54 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 const content = document.createElement('div');
                 content.id = `tab-${op}`;
                 content.className = `tab-content${idx === 0 ? ' active' : ''}`;
-                content.innerHTML = `<div class="content"><div class="clusters-table-wrapper"><table class="clusters-table"><thead id="header-${op}"></thead><tbody id="body-${op}"></tbody></table></div></div>`;
+                // Build SAAS target summary if metadata is available
+                const saasMetaEntry = healthDataRaw && Array.isArray(healthDataRaw) ?
+                    (Array.isArray(healthDataRaw[0]) ? healthDataRaw[0] : healthDataRaw).find(e => e.type === 'saas_targets' && e.operator_name === op) : null;
+                const targets = saasTargets[op] || [];
+                const testedEnv = saasMetaEntry?.ocm_environment || '';
+                let targetSummaryHTML = '';
+                if (targets.length > 0) {
+                    // Classify each target by environment based on naming convention
+                    const classifyEnv = (name) => {
+                        if (/integration/i.test(name)) return 'integration';
+                        if (/stage|hives0[0-9]/i.test(name)) return 'stage';
+                        if (/hivep|prod/i.test(name)) return 'production';
+                        return 'unknown';
+                    };
+                    const targetRows = targets.map(t => {
+                        const targetEnv = classifyEnv(t.target);
+                        const isTested = targetEnv === testedEnv;
+                        const clusterCount = opData.filter(c => {
+                            const vc = (c.health_checks || []).find(ch => ch.check === 'version_verification');
+                            return vc && vc.details && vc.details.target_name === t.target;
+                        }).length;
+                        const methodColor = t.method === 'PKO' ? '#5eecc0' : '#fdd76b';
+                        const rowOpacity = isTested ? '1' : '0.4';
+                        const countDisplay = isTested ? (clusterCount + (clusterCount === 0 ? ' ⚠' : '')) : '—';
+                        const countStyle = isTested && clusterCount === 0 ? 'color:#ff8a8a;font-weight:600;' : 'color:var(--text-primary);';
+                        const envBadge = '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;margin-left:4px;background:rgba(255,255,255,0.06);color:var(--text-muted);">' + targetEnv + '</span>';
+                        return '<tr style="opacity:' + rowOpacity + ';">' +
+                            '<td style="padding:4px 10px;">' + (t.target || '') + envBadge + '</td>' +
+                            '<td style="padding:4px 10px;"><span style="display:inline-block;background:' + methodColor + ';color:#111;font-size:0.75em;padding:1px 6px;border-radius:3px;font-weight:600;">' + (t.method || '?') + '</span></td>' +
+                            '<td style="padding:4px 10px;font-family:var(--font-mono);font-size:0.85em;">' + (t.image_tag || t.version || '') + '</td>' +
+                            '<td style="padding:4px 10px;text-align:center;' + countStyle + '">' + countDisplay + '</td>' +
+                        '</tr>';
+                    }).join('');
+                    targetSummaryHTML = '<div style="margin:0 0 16px;padding:12px 14px;background:var(--bg-card);border:1px solid var(--border-light);border-radius:6px;">' +
+                        '<div style="font-weight:600;font-size:0.9em;margin-bottom:8px;color:var(--text-secondary);">SAAS Targets (app-interface)</div>' +
+                        '<table style="width:100%;border-collapse:collapse;font-size:0.85em;">' +
+                            '<thead><tr style="color:var(--text-muted);border-bottom:1px solid var(--border-light);">' +
+                                '<th style="padding:4px 10px;text-align:left;">Target</th>' +
+                                '<th style="padding:4px 10px;text-align:left;">Method</th>' +
+                                '<th style="padding:4px 10px;text-align:left;">Version</th>' +
+                                '<th style="padding:4px 10px;text-align:center;">Clusters</th>' +
+                            '</tr></thead>' +
+                            '<tbody>' + targetRows + '</tbody>' +
+                        '</table>' +
+                    '</div>';
+                }
+
+                content.innerHTML = `<div class="content">${targetSummaryHTML}<div class="clusters-table-wrapper"><table class="clusters-table"><thead id="header-${op}"></thead><tbody id="body-${op}"></tbody></table></div></div>`;
                 contentsContainer.appendChild(content);
 
                 renderOperatorTable(opData, document.getElementById(`header-${op}`), document.getElementById(`body-${op}`), op);

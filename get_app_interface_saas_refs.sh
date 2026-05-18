@@ -48,5 +48,5 @@ fi
 # Derive operator name from saas filename: saas-<operator-name>[-pko].yaml -> <operator-name>
 operator_name=$(echo "$saas_file" | sed 's/^saas-//;s/-pko\.yaml$/.yaml/;s/\.yaml$//')
 
-curl -s https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data/services/osd-operators/cicd/saas/${saas_file}\?ref_type\=heads |  yq "[[ \"TARGET\", \"REF\", \"SOAKDAYS\"], [\"-----------\",\"-----------\", \"-----------\"],(.resourceTemplates[] | select(.name == \"${operator_name}\") | .targets[] | [.name, .ref, .promotion.soakDays])] | @tsv" | column -ts $'\t'
+curl -s https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data/services/osd-operators/cicd/saas/${saas_file}\?ref_type\=heads |  yq "[[ \"TARGET\", \"REF\", \"SOAKDAYS\"], [\"-----------\",\"-----------\", \"-----------\"],(.resourceTemplates[] | select(.name == \"${operator_name}\") | .targets[] | select(.delete != true) | [.name, .ref, .promotion.soakDays])] | @tsv" | column -ts $'\t'
 

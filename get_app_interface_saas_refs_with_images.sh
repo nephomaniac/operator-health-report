@@ -29,10 +29,11 @@ printf "%-30s %-12s %-10s %-25s %-20s\n" "------" "-------" "---------" "-------
 
 # Parse and display
 echo "$saas_data" | yq -r '
-  .resourceTemplates[] | 
+  .resourceTemplates[] |
   select(.name | test("'"${quay_repo}"'")) |
-  .targets[] | 
-  [.name, .ref, (.promotion.soakDays // "null")] | 
+  .targets[] |
+  select(.delete != true) |
+  [.name, .ref, (.promotion.soakDays // "null")] |
   @tsv
 ' | while IFS=$'\t' read -r target ref soakdays; do
   
