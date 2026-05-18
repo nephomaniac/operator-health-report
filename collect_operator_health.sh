@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="f7c8cae"
+SCRIPT_VERSION="588427e"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -974,6 +974,43 @@ else
     fi
 fi
 
+# Fetch commit messages for deployed and expected versions (for display)
+deployed_commit_msg=""
+expected_commit_msg=""
+github_repo="${github_repo:-}"
+
+# Resolve GitHub repo if not already done (branch ref path sets it, commit hash path doesn't)
+if [ -z "$github_repo" ] && [ -n "$canonical_version" ] && [ -n "$SAAS_REFS_SCRIPT" ]; then
+    _run_oc_optional "Fetch SAAS file for repo URL" curl -s "https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data/services/osd-operators/cicd/saas/${SAAS_FILE}?ref_type=heads"
+    if [ -n "$__oc_out" ]; then
+        github_repo_url=$(echo "$__oc_out" | yq -r ".resourceTemplates[] | select(.name | test(\"${OPERATOR_NAME}\")) | .url" 2>/dev/null)
+        [ -n "$github_repo_url" ] && github_repo=$(echo "$github_repo_url" | sed -E 's|https://github.com/||' | sed 's|\.git$||')
+    fi
+fi
+
+if [ -n "$github_repo" ]; then
+    # Fetch expected version commit message
+    if [ -n "$canonical_version" ] && [[ "$canonical_version" =~ ^[0-9a-f]{7,40}$ ]]; then
+        _run_oc_optional "Get commit message for expected version" curl -s "https://api.github.com/repos/${github_repo}/commits/${canonical_version}"
+        if [ -n "$__oc_out" ]; then
+            expected_commit_msg=$(echo "$__oc_out" | jq -r '.commit.message // "" | split("\n")[0] | .[0:80]' 2>/dev/null)
+        fi
+    fi
+
+    # Fetch deployed version commit message
+    if [ -n "$git_commit" ] && [[ "$git_commit" =~ ^[0-9a-f]{7,40}$ ]] && [ "$git_commit" != "$canonical_version" ]; then
+        _run_oc_optional "Get commit message for deployed version" curl -s "https://api.github.com/repos/${github_repo}/commits/${git_commit}"
+        if [ -n "$__oc_out" ]; then
+            deployed_commit_msg=$(echo "$__oc_out" | jq -r '.commit.message // "" | split("\n")[0] | .[0:80]' 2>/dev/null)
+        fi
+    elif [ "$git_commit" = "$canonical_version" ] || [[ "$canonical_version" == "$git_commit"* ]]; then
+        deployed_commit_msg="$expected_commit_msg"
+    fi
+
+    [ -n "$expected_commit_msg" ] && echo "  Expected: ${canonical_version:0:12} — $expected_commit_msg"
+    [ -n "$deployed_commit_msg" ] && [ -n "$git_commit" ] && echo "  Deployed:  ${git_commit:0:12} — $deployed_commit_msg"
+fi
+
 # Compare operator version against canonical expected version
 if [ -n "$canonical_version" ]; then
     version_match=false
@@ -1147,6 +1184,9 @@ health_checks+=("$(cat <<EOF
     "current_image_sha": "${current_image_sha_short:-unknown}",
     "expected_version": "$canonical_version",
     "expected_image_tag": "${canonical_image_tag:-unknown}",
+    "expected_commit_message": "$(echo "${expected_commit_msg:-}" | sed 's/"/\\"/g')",
+    "deployed_commit_message": "$(echo "${deployed_commit_msg:-}" | sed 's/"/\\"/g')",
+    "github_repo": "${github_repo:-}",
     "match_method": "${match_method:-none}"
   }
 }
