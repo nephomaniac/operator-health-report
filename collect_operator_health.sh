@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="588427e"
+SCRIPT_VERSION="3107c4e"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -184,6 +184,7 @@ resolve_saas_target() {
         local pko_refs
         pko_refs=$(bash "$SAAS_REFS_SCRIPT" "$pko_saas" 2>/dev/null)
         if [ -n "$pko_refs" ]; then
+            # Try exact name derivations first
             local simplified
             simplified=$(echo "$hive_cluster" | sed 's/^hive-//')
             local pko_target="${target_prefix}-pko-${simplified}"
@@ -191,14 +192,43 @@ resolve_saas_target() {
                 echo "${pko_target}|${pko_saas}"
                 return 0
             fi
+            # Try with full hive name
+            if echo "$pko_refs" | grep -q "^${target_prefix}-pko-${hive_cluster}"; then
+                echo "${target_prefix}-pko-${hive_cluster}|${pko_saas}"
+                return 0
+            fi
             if echo "$pko_refs" | grep -q "^${target_prefix}-${hive_cluster}"; then
                 echo "${target_prefix}-${hive_cluster}|${pko_saas}"
                 return 0
+            fi
+            # Fuzzy match: hive shard names don't always map predictably to SAAS target names
+            # (e.g., hives02ue1 → camo-pko-stage-02). Try matching by shard number.
+            local shard_num
+            shard_num=$(echo "$hive_cluster" | grep -oE '[0-9]+' | head -1)
+            if [ -n "$shard_num" ]; then
+                local fuzzy_match
+                fuzzy_match=$(echo "$pko_refs" | grep "^${target_prefix}-pko-" | grep -E "[-_]0*${shard_num}($|[^0-9])" | head -1 | awk '{print $1}')
+                if [ -n "$fuzzy_match" ]; then
+                    echo "${fuzzy_match}|${pko_saas}"
+                    return 0
+                fi
             fi
         fi
     fi
 
     # Fall back to OLM SAAS file
+    # Check OLM refs for a matching target
+    if [ -n "$SAAS_REFS_SCRIPT" ] && [ -f "$SAAS_REFS_SCRIPT" ]; then
+        local olm_refs
+        olm_refs=$(bash "$SAAS_REFS_SCRIPT" "$olm_saas" 2>/dev/null)
+        if [ -n "$olm_refs" ]; then
+            if echo "$olm_refs" | grep -q "^${target_prefix}-${hive_cluster}"; then
+                echo "${target_prefix}-${hive_cluster}|${olm_saas}"
+                return 0
+            fi
+        fi
+    fi
+
     echo "${target_prefix}-${hive_cluster}|${olm_saas}"
     return 0
 }
@@ -4706,9 +4736,9 @@ EOF
 
             if [ "$ls_disagree_count" -gt 0 ]; then
                 ls_status="FAIL"
-                ls_message="${ls_disagree_count} HCP(s) disagree between label (what RMO uses) and Prometheus metric (what dashboards show): ${ls_disagreements}"
+                ls_message="Limited support detection mismatch: ${ls_disagree_count} HCP(s) where RMO label and OCM state disagree — ${ls_disagreements}"
                 critical_count=$((critical_count + 1))
-                echo "  ✗ CRITICAL: ${ls_disagree_count} limited support disagreement(s) — probe lifecycle incorrect"
+                echo "  ✗ CRITICAL: ${ls_disagree_count} limited support detection mismatch(es)"
                 echo "    $ls_disagreements"
             else
                 ls_message="All HCPs agree: label api.openshift.com/limited-support matches Prometheus hypershift_cluster_limited_support_enabled"
