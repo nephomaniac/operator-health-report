@@ -2074,9 +2074,26 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     const targetRows = targets.map(t => {
                         const targetEnv = classifyEnv(t.target);
                         const isTested = targetEnv === testedEnv;
+                        // Count clusters per target by hive shard mapping
+                        // Use shard-based counting to handle target resolution mismatches
                         const clusterCount = opData.filter(c => {
+                            const shard = c.hive_shard || '';
                             const vc = (c.health_checks || []).find(ch => ch.check === 'version_verification');
-                            return vc && vc.details && vc.details.target_name === t.target;
+                            const resolvedTarget = vc?.details?.target_name || '';
+                            // Exact match on resolved target name
+                            if (resolvedTarget === t.target) return true;
+                            // Shard-based match: target name contains shard name or shares shard number
+                            if (shard && t.target.includes(shard)) return true;
+                            if (shard) {
+                                const targetNum = t.target.match(/(\d+)/);
+                                const shardNum = shard.match(/(\d+)/);
+                                if (targetNum && shardNum && targetNum[1] === shardNum[1] && classifyEnv(t.target) === classifyEnv(shard)) {
+                                    // Only match if no other target in the same env has the exact shard name
+                                    const exactShardTarget = targets.find(other => other.target.includes(shard) && other !== t);
+                                    if (!exactShardTarget) return true;
+                                }
+                            }
+                            return false;
                         }).length;
                         const methodColor = t.method === 'PKO' ? '#5eecc0' : '#fdd76b';
                         const rowOpacity = isTested ? '1' : '0.4';

@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="d156ae2"
+SCRIPT_VERSION="f97a3b2"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -1278,7 +1278,8 @@ if [ $pods_fetch_exit_code -ne 0 ]; then
 fi
 rm -f "$pods_fetch_error"
 
-pod_count=$(echo "$pods_json" | jq -r '.items | length' 2>/dev/null || echo "0")
+pod_count=$(echo "$pods_json" | jq -r '.items | length' 2>/dev/null | head -1 | tr -d '[:space:]')
+[ -z "$pod_count" ] && pod_count=0
 pod_name=""
 
 total_restarts=0
@@ -2126,7 +2127,8 @@ if [[ "$OPERATOR_NAME" == *"configure-alertmanager"* ]]; then
     # Check 1: Alertmanager pods status and restarts
     _run_oc "Get AlertManager pods" oc get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=alertmanager" -o json
     alertmanager_pods="$__oc_out"
-    alertmanager_pod_count=$(echo "$alertmanager_pods" | jq -r '.items | length' 2>/dev/null || echo "0")
+    alertmanager_pod_count=$(echo "$alertmanager_pods" | jq -r '.items | length' 2>/dev/null | head -1 | tr -d '[:space:]')
+[ -z "$alertmanager_pod_count" ] && alertmanager_pod_count=0
 
     alertmanager_pods_status="SKIP"
     alertmanager_pods_message="No alertmanager pods found"
@@ -3616,7 +3618,8 @@ if [[ "$OPERATOR_NAME" == *"route-monitor"* ]]; then
     rmo_cm_message=""
     _run_oc "Get RMO controller-manager pods" oc get pods -n "$NAMESPACE" -l control-plane=controller-manager -o json
     rmo_cm_pods="$__oc_out"
-    rmo_cm_pod_count=$(echo "$rmo_cm_pods" | jq '.items | length' 2>/dev/null || echo "0")
+    rmo_cm_pod_count=$(echo "$rmo_cm_pods" | jq '.items | length' 2>/dev/null | head -1 | tr -d '[:space:]')
+[ -z "$rmo_cm_pod_count" ] && rmo_cm_pod_count=0
     rmo_cm_restarts=0
     rmo_cm_termination_reason=""
     rmo_cm_blackbox_image=""
@@ -5049,7 +5052,8 @@ _run_oc "Get ReplicaSets for version history" oc get replicasets -n "$NAMESPACE"
 replicasets="${__oc_out:-{\"items\":[]}}"
 
 # Fallback: try owner-based lookup if label selector found nothing
-rs_count=$(echo "$replicasets" | jq '.items | length' 2>/dev/null || echo "0")
+rs_count=$(echo "$replicasets" | jq '.items | length' 2>/dev/null | head -1 | tr -d '[:space:]')
+[ -z "$rs_count" ] && rs_count=0
 if [ "$rs_count" -eq 0 ]; then
     _run_oc "Get ReplicaSets (owner-based fallback)" oc get replicasets -n "$NAMESPACE" -o json
     replicasets=$(echo "$__oc_out" | jq "{items: [.items[] | select(.metadata.ownerReferences[]? | select(.name == \"$DEPLOYMENT\"))]}" 2>/dev/null || echo '{"items":[]}')
