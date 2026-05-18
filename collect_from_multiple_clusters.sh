@@ -26,6 +26,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Note: NOT using set -e (exit on error) to allow graceful error handling per cluster
 
+# Isolate kubeconfig — create a per-run temp file so other terminals
+# logging into clusters won't clobber our active context
+_ISOLATED_KUBECONFIG=$(mktemp "${TMPDIR:-/tmp}/health-check-kubeconfig.XXXXXX")
+export KUBECONFIG="$_ISOLATED_KUBECONFIG"
+echo "Using isolated kubeconfig: $KUBECONFIG"
+
 # Flag to track if script should exit
 INTERRUPTED=false
 
@@ -52,6 +58,12 @@ cleanup() {
     fi
     echo "Cleaning up: logging out from backplane..."
     ocm backplane logout &> /dev/null || true
+
+    # Clean up isolated kubeconfig
+    if [ -n "${_ISOLATED_KUBECONFIG:-}" ] && [ -f "$_ISOLATED_KUBECONFIG" ]; then
+        rm -f "$_ISOLATED_KUBECONFIG"
+        echo "Removed isolated kubeconfig: $_ISOLATED_KUBECONFIG"
+    fi
 
     # Clean up cache if it was initialized
     if [ "$COMPREHENSIVE_HEALTH" = true ] && type cleanup_cache &>/dev/null; then
