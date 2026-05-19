@@ -679,7 +679,7 @@ if [ "$COMPREHENSIVE_HEALTH" = true ]; then
             if [ -n "$pko_saas" ]; then
                 pko_refs=$(bash "$SAAS_REFS_SCRIPT" "$pko_saas" 2>/dev/null)
                 if [ -n "$pko_refs" ]; then
-                    pko_targets=$(echo "$pko_refs" | grep -v '^TARGET\|^----\|^$\|^Image\|^Quay\|^ *-' | awk '{print "{\"target\":\""$1"\",\"version\":\""$2"\",\"image_tag\":\""$4"\",\"saas_file\":\"'$pko_saas'\",\"method\":\"PKO\"}"}' | jq -s '.' 2>/dev/null || echo "[]")
+                    pko_targets=$(echo "$pko_refs" | grep -v '^TARGET\|^----\|^$\|^Image\|^Quay\|^ *-' | awk 'NF >= 2 && $1 != "" {print "{\"target\":\""$1"\",\"version\":\""$2"\",\"image_tag\":\""$4"\",\"saas_file\":\"'$pko_saas'\",\"method\":\"PKO\"}"}' | jq -s '.' 2>/dev/null || echo "[]")
                     targets_json=$(echo "$targets_json $pko_targets" | jq -s 'add' 2>/dev/null || echo "$pko_targets")
                 fi
             fi
@@ -688,7 +688,7 @@ if [ "$COMPREHENSIVE_HEALTH" = true ]; then
             if [ -n "$olm_saas" ]; then
                 olm_refs=$(bash "$SAAS_REFS_SCRIPT" "$olm_saas" 2>/dev/null)
                 if [ -n "$olm_refs" ]; then
-                    olm_targets=$(echo "$olm_refs" | grep -v '^TARGET\|^----\|^$\|^Image\|^Quay\|^ *-' | awk '{print "{\"target\":\""$1"\",\"version\":\""$2"\",\"image_tag\":\""$4"\",\"saas_file\":\"'$olm_saas'\",\"method\":\"OLM\"}"}' | jq -s '.' 2>/dev/null || echo "[]")
+                    olm_targets=$(echo "$olm_refs" | grep -v '^TARGET\|^----\|^$\|^Image\|^Quay\|^ *-' | awk 'NF >= 2 && $1 != "" {print "{\"target\":\""$1"\",\"version\":\""$2"\",\"image_tag\":\""$4"\",\"saas_file\":\"'$olm_saas'\",\"method\":\"OLM\"}"}' | jq -s '.' 2>/dev/null || echo "[]")
                     if [ "$targets_json" != "[]" ]; then
                         targets_json=$(echo "$targets_json" | jq --argjson olm "$olm_targets" '. + $olm' 2>/dev/null || echo "$targets_json")
                     else

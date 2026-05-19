@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="c652519"
+SCRIPT_VERSION="111e8a2"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -73,6 +73,8 @@ CLUSTER_NAME=""
 CLUSTER_VERSION=""
 REASON=""
 OPERATOR_NAME=""
+OC_CACHE_DIR=""    # --cache-dir: save raw oc outputs to this dir for replay
+OC_REPLAY=false    # --replay: read from cache instead of running commands
 
 # Cache for image tag to SHA resolution (to avoid repeated registry queries)
 declare -A image_sha_cache
@@ -316,10 +318,21 @@ while [[ $# -gt 0 ]]; do
         --saas-file) SAAS_FILE="$2"; shift 2 ;;
         --target-name) TARGET_NAME="$2"; shift 2 ;;
         --secrets) CHECK_SECRETS=true; shift ;;
+        --cache-dir) OC_CACHE_DIR="$2"; shift 2 ;;
+        --replay) OC_REPLAY=true; shift ;;
         --help|-h) usage ;;
         *) echo "Error: Unknown option: $1" >&2; usage ;;
     esac
 done
+
+# Initialize cache directory for oc output caching/replay
+if [ -n "$OC_CACHE_DIR" ]; then
+    mkdir -p "$OC_CACHE_DIR"
+    echo "OC cache dir: $OC_CACHE_DIR (mode: $([ "$OC_REPLAY" = true ] && echo "replay" || echo "collect"))" >&2
+elif [ "$OC_REPLAY" = true ]; then
+    echo "Error: --replay requires --cache-dir" >&2
+    exit 1
+fi
 
 # Default operator name to deployment name if not specified
 if [ -z "$OPERATOR_NAME" ]; then
@@ -423,11 +436,78 @@ EOF
     debug_log "Added API error entry #${#api_errors[@]} (check: ${CURRENT_CHECK:-unknown})"
 }
 
+# Internal: execute command or replay from cache.
+# Sets __oc_out, __oc_rc, __oc_err.
+_exec_or_replay() {
+    local _desc="$1"
+    shift
+    local _cmd="$*"
+
+    # Generate a cache key from description (filesystem-safe)
+    local _cache_key=""
+    if [ -n "$OC_CACHE_DIR" ]; then
+        _cache_key=$(echo "$_desc" | sed 's/[^a-zA-Z0-9_-]/_/g' | cut -c1-80)
+        # Append a counter to handle duplicate descriptions
+        local _seq=0
+        while [ -f "$OC_CACHE_DIR/${_cache_key}_${_seq}.out" ] && [ "$OC_REPLAY" != true ]; do
+            _seq=$((_seq + 1))
+        done
+        # In replay mode, find the matching file
+        if [ "$OC_REPLAY" = true ]; then
+            _seq=0
+            # Track which cache files have been consumed
+            while [ -f "$OC_CACHE_DIR/${_cache_key}_${_seq}.consumed" ]; do
+                _seq=$((_seq + 1))
+            done
+        fi
+        _cache_key="${_cache_key}_${_seq}"
+    fi
+
+    if [ "$OC_REPLAY" = true ] && [ -n "$_cache_key" ]; then
+        # Replay mode: read from cache
+        if [ -f "$OC_CACHE_DIR/${_cache_key}.out" ]; then
+            __oc_out=$(cat "$OC_CACHE_DIR/${_cache_key}.out")
+            __oc_rc=$(cat "$OC_CACHE_DIR/${_cache_key}.rc" 2>/dev/null || echo "0")
+            __oc_err=$(cat "$OC_CACHE_DIR/${_cache_key}.err" 2>/dev/null || echo "")
+            touch "$OC_CACHE_DIR/${_cache_key}.consumed"
+            return $__oc_rc
+        else
+            echo "  [REPLAY] Cache miss: $_desc" >&2
+            __oc_out=""
+            __oc_rc=1
+            __oc_err="Cache miss: no cached output for $_desc"
+            return 1
+        fi
+    fi
+
+    # Live mode: execute the command
+    local _ef
+    _ef=$(mktemp)
+    __oc_out=$("$@" 2>"$_ef")
+    __oc_rc=$?
+    __oc_err=""
+    if [ $__oc_rc -ne 0 ]; then
+        __oc_err=$(head -1 "$_ef")
+    fi
+    rm -f "$_ef"
+
+    # Cache the output if cache dir is set
+    if [ -n "$_cache_key" ]; then
+        echo "$__oc_out" > "$OC_CACHE_DIR/${_cache_key}.out"
+        echo "$__oc_rc" > "$OC_CACHE_DIR/${_cache_key}.rc"
+        echo "$__oc_err" > "$OC_CACHE_DIR/${_cache_key}.err"
+        echo "$_cmd" > "$OC_CACHE_DIR/${_cache_key}.cmd"
+    fi
+
+    return $__oc_rc
+}
+
 # Run an oc/ocm command with error capture and reporting.
 # Sets global variables instead of using subshell capture, so api_errors is updated.
 #   __oc_out  — stdout of the command (empty on failure)
 #   __oc_rc   — exit code
 #   __oc_err  — first line of stderr (empty on success)
+# Supports --cache-dir (save outputs) and --replay (read from cache).
 # Usage:
 #   _run_oc "Get RouteMonitor CRs" ocm backplane elevate "$REASON" -- get routemonitor -A -o json
 #   routemonitors="$__oc_out"
@@ -436,36 +516,23 @@ _run_oc() {
     local _desc="$1"
     shift
     local _cmd="$*"
-    local _ef
-    _ef=$(mktemp)
-    __oc_out=$("$@" 2>"$_ef")
-    __oc_rc=$?
+    _exec_or_replay "$_desc" "$@"
     if [ $__oc_rc -ne 0 ]; then
-        __oc_err=$(head -1 "$_ef")
-        rm -f "$_ef"
         log_api_error "$_desc" "$__oc_err" "$__oc_rc" "$_cmd"
         __oc_out=""
         return $__oc_rc
     fi
     __oc_err=""
-    rm -f "$_ef"
     return 0
 }
 
 # Like _run_oc but treats "not found" as an expected result, not an error.
-# Use for existence checks where absence is a valid outcome (e.g., OLM subscription on PKO cluster).
-# Still sets __oc_out/__oc_rc/__oc_err; only logs to api_errors if error is NOT "not found".
 _run_oc_optional() {
     local _desc="$1"
     shift
     local _cmd="$*"
-    local _ef
-    _ef=$(mktemp)
-    __oc_out=$("$@" 2>"$_ef")
-    __oc_rc=$?
+    _exec_or_replay "$_desc" "$@"
     if [ $__oc_rc -ne 0 ]; then
-        __oc_err=$(head -1 "$_ef")
-        rm -f "$_ef"
         if ! echo "$__oc_err" | grep -qi "not found"; then
             log_api_error "$_desc" "$__oc_err" "$__oc_rc" "$_cmd"
         fi
@@ -473,7 +540,6 @@ _run_oc_optional() {
         return $__oc_rc
     fi
     __oc_err=""
-    rm -f "$_ef"
     return 0
 }
 
@@ -1620,29 +1686,25 @@ if [ "$pod_count" -gt 0 ]; then
         memory_query="container_memory_working_set_bytes{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}"
         memory_query_encoded=$(printf '%s' "$memory_query" | jq -sRr @uri)
 
-        memory_err=$(mktemp)
-        memory_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>"$memory_err")
-        if [ $? -ne 0 ]; then
-            mem_err_msg=$(cat "$memory_err" 2>/dev/null | head -1)
-            query_errors="${query_errors}memory query failed${mem_err_msg:+ ($mem_err_msg)}, "
-            echo "  ⚠ Memory query failed: ${mem_err_msg:-timeout or connection error}"
+        _exec_or_replay "Memory timeseries query" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${memory_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}"
+        memory_data="$__oc_out"
+        if [ $__oc_rc -ne 0 ]; then
+            query_errors="${query_errors}memory query failed${__oc_err:+ ($__oc_err)}, "
+            echo "  ⚠ Memory query failed: ${__oc_err:-timeout or connection error}"
         fi
-        rm -f "$memory_err"
 
         # CPU query (rate over 5m)
         cpu_query="rate(container_cpu_usage_seconds_total{namespace=\"$NAMESPACE\",${pod_query_selector},container=\"$container_name\"}[5m])"
         cpu_query_encoded=$(printf '%s' "$cpu_query" | jq -sRr @uri)
 
-        cpu_err=$(mktemp)
-        cpu_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${cpu_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>"$cpu_err")
-        if [ $? -ne 0 ]; then
-            cpu_err_msg=$(cat "$cpu_err" 2>/dev/null | head -1)
-            query_errors="${query_errors}CPU query failed${cpu_err_msg:+ ($cpu_err_msg)}, "
-            echo "  ⚠ CPU query failed: ${cpu_err_msg:-timeout or connection error}"
+        _exec_or_replay "CPU timeseries query" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${cpu_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}"
+        cpu_data="$__oc_out"
+        if [ $__oc_rc -ne 0 ]; then
+            query_errors="${query_errors}CPU query failed${__oc_err:+ ($__oc_err)}, "
+            echo "  ⚠ CPU query failed: ${__oc_err:-timeout or connection error}"
         fi
-        rm -f "$cpu_err"
 
         # Compute peaks client-side from timeseries data (avoids 2 extra Thanos queries)
         peak_memory_bytes=0
@@ -1662,14 +1724,13 @@ if [ "$pod_count" -gt 0 ]; then
             # Per-probe success rate over time (each probe gets its own line)
             probe_query="probe_success{namespace=\"openshift-route-monitor-operator\"}"
             probe_query_encoded=$(printf '%s' "$probe_query" | jq -sRr @uri)
-            probe_ts_err=$(mktemp)
-            probe_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>"$probe_ts_err")
-            if [ $? -ne 0 ]; then
-                probe_ts_err_msg=$(head -1 "$probe_ts_err")
-                query_errors="${query_errors}probe success query failed${probe_ts_err_msg:+ ($probe_ts_err_msg)}, "
-                log_api_error "Local probe success rate query" "${probe_ts_err_msg:-timeout or connection error}" "$?"
-                echo "  ⚠ Probe success query failed: ${probe_ts_err_msg:-timeout or connection error}"
+            _exec_or_replay "Probe success timeseries" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${probe_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}"
+            probe_ts_data="$__oc_out"
+            if [ $__oc_rc -ne 0 ]; then
+                query_errors="${query_errors}probe success query failed${__oc_err:+ ($__oc_err)}, "
+                log_api_error "Local probe success rate query" "${__oc_err:-timeout or connection error}" "$__oc_rc"
+                echo "  ⚠ Probe success query failed: ${__oc_err:-timeout or connection error}"
             elif [ -n "$probe_ts_data" ] && echo "$probe_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
                 # Extract per-probe timeseries with labels derived from probe_url
                 probe_timeseries=$(echo "$probe_ts_data" | jq -c '[.data.result[] | {
@@ -1687,19 +1748,17 @@ if [ "$pod_count" -gt 0 ]; then
             else
                 echo "  ℹ Probe success: no data returned (probes may not be active)"
             fi
-            rm -f "$probe_ts_err"
 
             # Per-probe duration (latency) over time
             duration_query="probe_duration_seconds{namespace=\"openshift-route-monitor-operator\"}"
             duration_query_encoded=$(printf '%s' "$duration_query" | jq -sRr @uri)
-            duration_ts_err=$(mktemp)
-            duration_ts_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${duration_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}" 2>"$duration_ts_err")
-            if [ $? -ne 0 ]; then
-                dur_err_msg=$(head -1 "$duration_ts_err")
-                query_errors="${query_errors}probe duration query failed${dur_err_msg:+ ($dur_err_msg)}, "
-                log_api_error "Local probe duration query" "${dur_err_msg:-timeout or connection error}" "$?"
-                echo "  ⚠ Probe duration query failed: ${dur_err_msg:-timeout or connection error}"
+            _exec_or_replay "Probe duration timeseries" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+                wget -q -T 30 -O- "http://localhost:9090/api/v1/query_range?query=${duration_query_encoded}&start=${start_time}&end=${end_time}&step=${query_step}"
+            duration_ts_data="$__oc_out"
+            if [ $__oc_rc -ne 0 ]; then
+                query_errors="${query_errors}probe duration query failed${__oc_err:+ ($__oc_err)}, "
+                log_api_error "Local probe duration query" "${__oc_err:-timeout or connection error}" "$__oc_rc"
+                echo "  ⚠ Probe duration query failed: ${__oc_err:-timeout or connection error}"
             elif [ -n "$duration_ts_data" ] && echo "$duration_ts_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
                 probe_duration_timeseries=$(echo "$duration_ts_data" | jq -c '[.data.result[] | {
                     label: (if .metric.probe_url then
@@ -1714,7 +1773,6 @@ if [ "$pod_count" -gt 0 ]; then
             else
                 echo "  ℹ Probe duration: no data returned"
             fi
-            rm -f "$duration_ts_err"
         fi
 
         # Process memory data
@@ -2535,17 +2593,14 @@ EOF
         local query="${metric_name}{namespace=\"$NAMESPACE\"}"
         local query_encoded=$(printf '%s' "$query" | jq -sRr @uri)
 
-        local _qef
-        _qef=$(mktemp)
-        local data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>"$_qef")
-        local _qrc=$?
+        _exec_or_replay "Thanos CAMO: $metric_name" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}"
+        local _qrc=$__oc_rc
+        local data="$__oc_out"
         if [ $_qrc -ne 0 ]; then
-            local _qerr=$(head -1 "$_qef")
-            log_api_error "Prometheus query: $metric_name" "${_qerr:-timeout or connection error}" "$_qrc"
-            echo "  ⚠ $metric_name query failed: ${_qerr:-timeout or connection error}" >&2
+            log_api_error "Prometheus query: $metric_name" "${__oc_err:-timeout or connection error}" "$_qrc"
+            echo "  ⚠ $metric_name query failed: ${__oc_err:-timeout or connection error}" >&2
         fi
-        rm -f "$_qef"
 
         if [ $_qrc -eq 0 ] && [ -n "$data" ] && echo "$data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
             echo "$data" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null
@@ -3578,24 +3633,20 @@ query_rhobs_prometheus() {
     local _desc="$1"
     local _query="$2"
     local _qenc=$(printf '%s' "$_query" | jq -sRr @uri)
-    local _qerr=$(mktemp)
-    local _qout
-    _qout=$(ocm backplane elevate "${REASON}" -- exec -n openshift-observability-operator \
+    _exec_or_replay "RHOBS: $_desc" ocm backplane elevate "${REASON}" -- exec -n openshift-observability-operator \
         statefulset/prometheus-rhobs-hypershift-monitoring-stack -c prometheus -- \
-        curl -sf --max-time 30 "http://localhost:9090/api/v1/query?query=${_qenc}" 2>"$_qerr")
-    __rhobs_rc=$?
+        curl -sf --max-time 30 "http://localhost:9090/api/v1/query?query=${_qenc}"
+    __rhobs_rc=$__oc_rc
     if [ $__rhobs_rc -ne 0 ]; then
-        __rhobs_err=$(head -1 "$_qerr")
+        __rhobs_err="$__oc_err"
         log_api_error "$_desc" "$__rhobs_err" "$__rhobs_rc" "exec prometheus-rhobs-hypershift-monitoring-stack: query=$_query"
         echo "  ⚠ RHOBS query failed: $_desc: ${__rhobs_err:-timeout}" >&2
-        rm -f "$_qerr"
         echo ""
         return $__rhobs_rc
     fi
     __rhobs_err=""
-    rm -f "$_qerr"
-    if [ -n "$_qout" ] && echo "$_qout" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-        echo "$_qout"
+    if [ -n "$__oc_out" ] && echo "$__oc_out" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+        echo "$__oc_out"
     else
         echo ""
     fi
@@ -4040,16 +4091,14 @@ EOF
 
     if [ "$total_crd_count" -gt 0 ]; then
         echo "  Querying probe_success metrics from Thanos..."
-        probe_err=$(mktemp)
-        probe_data=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}' | jq -sRr @uri)" 2>"$probe_err")
-        probe_data_rc=$?
+        _exec_or_replay "Probe success instant query" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}' | jq -sRr @uri)"
+        probe_data="$__oc_out"
+        probe_data_rc=$__oc_rc
         if [ $probe_data_rc -ne 0 ]; then
-            probe_err_msg=$(head -1 "$probe_err")
-            log_api_error "Probe success instant query" "${probe_err_msg:-timeout or connection error}" "$probe_data_rc"
-            echo "  ⚠ Probe success query failed: ${probe_err_msg:-timeout or connection error}"
+            log_api_error "Probe success instant query" "${__oc_err:-timeout or connection error}" "$probe_data_rc"
+            echo "  ⚠ Probe success query failed: ${__oc_err:-timeout or connection error}"
         fi
-        rm -f "$probe_err"
 
         if [ $probe_data_rc -eq 0 ] && [ -n "$probe_data" ] && echo "$probe_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
             rmo_probe_total=$(echo "$probe_data" | jq '.data.result | length' 2>/dev/null || echo "0")
@@ -4302,19 +4351,14 @@ EOF
         local metric_name="$1"
         local query="${metric_name}{namespace=\"$NAMESPACE\"}"
         local query_encoded=$(printf '%s' "$query" | jq -sRr @uri)
-        local _mef
-        _mef=$(mktemp)
-        local _mout
-        _mout=$(ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
-            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}" 2>"$_mef")
-        local _mrc=$?
+        _exec_or_replay "Thanos: $metric_name" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=${query_encoded}"
+        local _mrc=$__oc_rc
         if [ $_mrc -ne 0 ]; then
-            local _merr=$(head -1 "$_mef")
-            log_api_error "Prometheus query: $metric_name" "${_merr:-timeout or connection error}" "$_mrc"
-            echo "  ⚠ $metric_name query failed: ${_merr:-timeout or connection error}" >&2
+            log_api_error "Prometheus query: $metric_name" "${__oc_err:-timeout or connection error}" "$_mrc"
+            echo "  ⚠ $metric_name query failed: ${__oc_err:-timeout or connection error}" >&2
         fi
-        rm -f "$_mef"
-        echo "$_mout"
+        echo "$__oc_out"
         return $_mrc
     }
 
