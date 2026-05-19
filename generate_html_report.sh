@@ -1120,31 +1120,43 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             const probeData = data.probe_timeseries || [];
             if (probeData.length === 0) return;
 
-            const timestamps = probeData.map(point => point[0] * 1000);
-            const values = probeData.map(point => parseFloat(point[1]) * 100);
+            const probeColors = ['#28a745', '#667eea', '#f5c542', '#e74c3c', '#17a2b8', '#6f42c1'];
             const annotations = {};
-            const minTs = Math.min(...timestamps);
-            const maxTs = Math.max(...timestamps);
-            addEventAnnotations(annotations, versionEvents, restartEvents, minTs, maxTs);
+            let datasets = [];
 
-            const chartData = timestamps.map((time, idx) => ({ x: time, y: values[idx] }));
+            // Handle both formats: per-probe objects [{label, values}, ...] or flat [[ts, val], ...]
+            if (probeData[0] && probeData[0].label) {
+                // Per-probe format
+                probeData.forEach((probe, i) => {
+                    const color = probeColors[i % probeColors.length];
+                    const chartData = (probe.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * 100 }));
+                    datasets.push({
+                        label: probe.label + ' (%)',
+                        data: chartData,
+                        borderColor: color,
+                        backgroundColor: color + '1a',
+                        tension: 0.4, fill: false, pointRadius: 1, pointHoverRadius: 4, borderWidth: 2
+                    });
+                });
+                const allTs = probeData.flatMap(p => (p.values || []).map(v => v[0] * 1000));
+                addEventAnnotations(annotations, versionEvents, restartEvents, Math.min(...allTs), Math.max(...allTs));
+            } else {
+                // Legacy flat format
+                const timestamps = probeData.map(p => p[0] * 1000);
+                const values = probeData.map(p => parseFloat(p[1]) * 100);
+                addEventAnnotations(annotations, versionEvents, restartEvents, Math.min(...timestamps), Math.max(...timestamps));
+                datasets.push({
+                    label: 'Probe Success Rate (%)',
+                    data: timestamps.map((t, i) => ({ x: t, y: values[i] })),
+                    borderColor: '#28a745', backgroundColor: 'rgba(40,167,69,0.1)',
+                    tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 4
+                });
+            }
+            datasets.push({ label: '--- Version Update', data: [], borderColor: '#ff6384', borderDash: [5,5], pointRadius: 0 });
+
             new Chart(ctx, {
                 type: 'line',
-                data: {
-                    datasets: [{
-                        label: 'Probe Success Rate (%)',
-                        data: chartData,
-                        borderColor: '#28a745',
-                        backgroundColor: 'rgba(40, 167, 69, 0.1)',
-                        tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 4
-                    }, {
-                        label: '--- Version Update (pod restart)',
-                        data: [],
-                        borderColor: '#ff6384',
-                        borderDash: [5, 5],
-                        pointRadius: 0
-                    }]
-                },
+                data: { datasets },
                 options: {
                     responsive: true, maintainAspectRatio: true,
                     plugins: {
@@ -1153,7 +1165,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             mode: 'index', intersect: false,
                             callbacks: {
                                 title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
-                                label: ctx => `Success: ${ctx.parsed.y.toFixed(1)}%`
+                                label: ctx => ctx.dataset.label.replace(' (%)', '') + ': ' + ctx.parsed.y.toFixed(1) + '%'
                             }
                         },
                         annotation: { annotations }
@@ -1172,31 +1184,39 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             const durationData = data.probe_duration_timeseries || [];
             if (durationData.length === 0) return;
 
-            const timestamps = durationData.map(point => point[0] * 1000);
-            const values = durationData.map(point => parseFloat(point[1]) * 1000);
+            const durationColors = ['#e67e22', '#667eea', '#28a745', '#e74c3c', '#17a2b8', '#6f42c1'];
             const annotations = {};
-            const minTs = Math.min(...timestamps);
-            const maxTs = Math.max(...timestamps);
-            addEventAnnotations(annotations, versionEvents, restartEvents, minTs, maxTs);
+            let datasets = [];
 
-            const chartData = timestamps.map((time, idx) => ({ x: time, y: values[idx] }));
+            if (durationData[0] && durationData[0].label) {
+                durationData.forEach((probe, i) => {
+                    const color = durationColors[i % durationColors.length];
+                    const chartData = (probe.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * 1000 }));
+                    datasets.push({
+                        label: probe.label + ' (ms)',
+                        data: chartData,
+                        borderColor: color, backgroundColor: color + '1a',
+                        tension: 0.4, fill: false, pointRadius: 1, pointHoverRadius: 4, borderWidth: 2
+                    });
+                });
+                const allTs = durationData.flatMap(p => (p.values || []).map(v => v[0] * 1000));
+                addEventAnnotations(annotations, versionEvents, restartEvents, Math.min(...allTs), Math.max(...allTs));
+            } else {
+                const timestamps = durationData.map(p => p[0] * 1000);
+                const values = durationData.map(p => parseFloat(p[1]) * 1000);
+                addEventAnnotations(annotations, versionEvents, restartEvents, Math.min(...timestamps), Math.max(...timestamps));
+                datasets.push({
+                    label: 'Avg Probe Duration (ms)',
+                    data: timestamps.map((t, i) => ({ x: t, y: values[i] })),
+                    borderColor: '#e67e22', backgroundColor: 'rgba(230,126,34,0.1)',
+                    tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 4
+                });
+            }
+            datasets.push({ label: '--- Version Update', data: [], borderColor: '#ff6384', borderDash: [5,5], pointRadius: 0 });
+
             new Chart(ctx, {
                 type: 'line',
-                data: {
-                    datasets: [{
-                        label: 'Avg Probe Duration (ms)',
-                        data: chartData,
-                        borderColor: '#e67e22',
-                        backgroundColor: 'rgba(230, 126, 34, 0.1)',
-                        tension: 0.4, fill: true, pointRadius: 2, pointHoverRadius: 4
-                    }, {
-                        label: '--- Version Update (pod restart)',
-                        data: [],
-                        borderColor: '#ff6384',
-                        borderDash: [5, 5],
-                        pointRadius: 0
-                    }]
-                },
+                data: { datasets },
                 options: {
                     responsive: true, maintainAspectRatio: true,
                     plugins: {
@@ -1205,7 +1225,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             mode: 'index', intersect: false,
                             callbacks: {
                                 title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
-                                label: ctx => `Duration: ${ctx.parsed.y.toFixed(1)} ms`
+                                label: ctx => ctx.dataset.label.replace(' (ms)', '') + ': ' + ctx.parsed.y.toFixed(1) + ' ms'
                             }
                         },
                         annotation: { annotations }
@@ -1442,11 +1462,13 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 }
 
                 if (details.probe_timeseries && details.probe_timeseries.length > 0) {
-                    const targetCount = details.probe_target_count || 0;
+                    const probeNames = Array.isArray(details.probe_timeseries) && details.probe_timeseries[0]?.label
+                        ? details.probe_timeseries.map(p => p.label).join(', ')
+                        : (details.probe_target_count || 0) + ' target(s)';
                     const probeChartDiv = document.createElement('div');
                     probeChartDiv.className = 'chart-wrapper';
                     probeChartDiv.innerHTML = `
-                        <h3>Endpoint Availability — Probe Success Rate (${targetCount} active targets)</h3>
+                        <h3>Local Endpoint Availability — ${probeNames}</h3>
                         <canvas id="probe-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="probe"
                             data-chart-data='${JSON.stringify(details).replace(/'/g, "&#39;")}'
@@ -1470,7 +1492,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     const durationChartDiv = document.createElement('div');
                     durationChartDiv.className = 'chart-wrapper';
                     durationChartDiv.innerHTML = `
-                        <h3>Endpoint Latency — Avg Probe Duration</h3>
+                        <h3>Local Endpoint Latency — Probe Duration</h3>
                         <canvas id="duration-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="duration"
                             data-chart-data='${JSON.stringify(details).replace(/'/g, "&#39;")}'
