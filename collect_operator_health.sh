@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="f97a3b2"
+SCRIPT_VERSION="3d84e6c"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -4753,6 +4753,10 @@ EOF
             echo "  ⚠ Cannot check: HCP list not available"
         fi
 
+        label_ls_count=$(echo "${hcp_ls_data:-}" | grep -c '|true|' 2>/dev/null || echo "0")
+        label_ls_count=$(echo "$label_ls_count" | head -1 | tr -d '[:space:]')
+        [ -z "$label_ls_count" ] && label_ls_count=0
+
         health_checks+=("$(cat <<EOF
 {
   "check": "rmo_limited_support_disagreement",
@@ -4765,7 +4769,7 @@ EOF
     "rmo_source": "HCP label api.openshift.com/limited-support",
     "dashboard_source": "Prometheus metric hypershift_cluster_limited_support_enabled",
     "prom_limited_count": ${hcp_prom_limited:-0},
-    "label_limited_count": $(echo "$hcp_ls_data" | grep -c '|true|' 2>/dev/null || echo "0")
+    "label_limited_count": ${label_ls_count:-0}
   }
 }
 EOF
