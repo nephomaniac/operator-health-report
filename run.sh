@@ -225,17 +225,18 @@ RUNEOF
     echo ""
     echo "Merging results..."
     merged_json="$RESULTS_DIR/health_merged.json"
-    cat "$RESULTS_DIR"/worker_*/health_*.json 2>/dev/null | jq -s '{
-        saas_targets: [.[][] | select(type == "object" and .type == "saas_targets")],
-        clusters: [.[][] | select(type == "object" and .cluster_id != null)]
-    } | .saas_targets as $meta | .clusters + $meta' > "$merged_json" 2>/dev/null
+    # Worker JSONs may be arrays or raw JSONL — flatten everything into one array
+    cat "$RESULTS_DIR"/worker_*/health_*.json 2>/dev/null | jq -s '[
+        .[] | if type == "array" then .[] else . end |
+        select(type == "object")
+    ] | [.[] | select(.cluster_id != null or .type == "saas_targets")]' > "$merged_json" 2>/dev/null
 
     entry_count=$(jq '[.[] | select(.cluster_id != null)] | length' "$merged_json" 2>/dev/null || echo "0")
     echo "Merged: $entry_count cluster entries"
 
     # Generate HTML
     echo "Generating HTML report..."
-    bash "$SCRIPT_DIR/generate_html_report.sh" "$merged_json" "$RESULTS_DIR/health_report.html" 2>&1
+    bash "$SCRIPT_DIR/lib/generate_html_report.sh" "$merged_json" "$RESULTS_DIR/health_report.html" 2>&1
 
     # Cleanup split files
     rm -f "$RESULTS_DIR"/split_*
