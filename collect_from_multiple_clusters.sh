@@ -904,18 +904,22 @@ EOF
 
     # Collect from each operator
     collection_status=0
-    for op in "${OPERATORS_TO_COLLECT[@]}"; do
-        # Parse operator configuration (format: name:namespace:deployment)
-        IFS=':' read -r op_name op_namespace op_deployment <<< "${OPERATOR_CONFIGS[$op]}"
 
-        # Set display label
-        op_label="${op^^}"  # Convert to uppercase for display
+    if [ "$COMPREHENSIVE_HEALTH" = true ] && [ ${#OPERATORS_TO_COLLECT[@]} -gt 1 ]; then
+        # Run operators in parallel — each writes to a temp file, merged after
+        declare -a op_pids=()
+        declare -A op_tmpfiles=()
+        declare -A op_logfiles=()
 
-        echo ""
-        echo "Collecting data for $op_label..."
+        for op in "${OPERATORS_TO_COLLECT[@]}"; do
+            IFS=':' read -r op_name op_namespace op_deployment <<< "${OPERATOR_CONFIGS[$op]}"
+            op_label="${op^^}"
 
-        if [ "$COMPREHENSIVE_HEALTH" = true ]; then
-            # Perform comprehensive health check
+            op_tmp=$(mktemp)
+            op_log=$(mktemp)
+            op_tmpfiles[$op]="$op_tmp"
+            op_logfiles[$op]="$op_log"
+
             health_cmd="\"$SCRIPT_DIR/collect_operator_health.sh\" \
                 --namespace \"$op_namespace\" \
                 --deployment \"$op_deployment\" \
@@ -925,65 +929,65 @@ EOF
                 --reason \"$REASON\" \
                 --operator-name \"$op_name\""
 
-            # Pass cached Hive target to avoid re-discovery
             if [ -n "${hive_target_cache[$cluster_id]:-}" ]; then
                 health_cmd="$health_cmd --target-name \"${hive_target_cache[$cluster_id]}\""
             fi
-
-            # Add --secrets flag if enabled
             if [ "$CHECK_SECRETS" = true ]; then
                 health_cmd="$health_cmd --secrets"
             fi
 
-            eval "$health_cmd" >> "$OUTPUT_FILE"
-        elif [ "$METRICS_CHECK" = true ]; then
-            # Collect Prometheus metrics (CAMO only)
-            if [ "$op" = "camo" ]; then
-                "$SCRIPT_DIR/collect_camo_metrics.sh" \
-                    --namespace "$op_namespace" \
-                    --deployment "$op_deployment" \
-                    --cluster-id "$cluster_id" \
-                    --cluster-name "$cluster_name" \
-                    --cluster-version "$cluster_version" \
-                    --reason "$REASON" \
-                    --format csv >> "$OUTPUT_FILE"
+            eval "$health_cmd" > "$op_tmp" 2>"$op_log" &
+            op_pids+=($!)
+            echo "  Started $op_label (PID $!)"
+        done
+
+        # Wait for all operators to complete
+        all_ok=true
+        for i in "${!OPERATORS_TO_COLLECT[@]}"; do
+            op="${OPERATORS_TO_COLLECT[$i]}"
+            op_label="${op^^}"
+            pid="${op_pids[$i]}"
+            if wait "$pid"; then
+                cat "${op_tmpfiles[$op]}" >> "$OUTPUT_FILE"
+                echo "  ✓ $op_label completed"
             else
-                echo "  ℹ Metrics collection not available for $op_label (CAMO only)"
+                echo "  ✗ $op_label failed (exit code: $?)"
+                all_ok=false
             fi
-        elif [ "$VERSION_COMPARE" = true ]; then
-            # Collect version comparison metrics with debug logging
-            "$SCRIPT_DIR/collect_versioned_metrics.sh" \
-                --namespace "$op_namespace" \
-                --deployment "$op_deployment" \
-                --cluster-id "$cluster_id" \
-                --cluster-name "$cluster_name" \
-                --cluster-version "$cluster_version" \
-                --reason "$REASON" \
-                --operator-name "$op_name" \
-                --format csv \
-                --debug >> "$OUTPUT_FILE"
-        elif [ "$OP_VER_ONLY" = true ]; then
-            "$SCRIPT_DIR/collect_pod_resource_usage.sh" \
-                --namespace "$op_namespace" \
-                --deployment "$op_deployment" \
-                --cluster-id "$cluster_id" \
-                --cluster-name "$cluster_name" \
-                --cluster-version "$cluster_version" \
-                --reason "$REASON" \
-                --format csv \
-                --operator-name "$op_name" \
-                --op-ver-only >> "$OUTPUT_FILE"
-        else
-            "$SCRIPT_DIR/collect_pod_resource_usage.sh" \
-                --namespace "$op_namespace" \
-                --deployment "$op_deployment" \
-                --cluster-id "$cluster_id" \
-                --cluster-name "$cluster_name" \
-                --cluster-version "$cluster_version" \
-                --reason "$REASON" \
-                --format csv \
-                --operator-name "$op_name" >> "$OUTPUT_FILE"
+            # Show stderr (check progress)
+            if [ -s "${op_logfiles[$op]}" ]; then
+                cat "${op_logfiles[$op]}" >&2
+            fi
+            rm -f "${op_tmpfiles[$op]}" "${op_logfiles[$op]}"
+        done
+        unset op_pids op_tmpfiles op_logfiles
+
+    elif [ "$COMPREHENSIVE_HEALTH" = true ]; then
+        # Single operator — run directly (no parallelism overhead)
+        op="${OPERATORS_TO_COLLECT[0]}"
+        IFS=':' read -r op_name op_namespace op_deployment <<< "${OPERATOR_CONFIGS[$op]}"
+        op_label="${op^^}"
+
+        echo ""
+        echo "Collecting data for $op_label..."
+
+        health_cmd="\"$SCRIPT_DIR/collect_operator_health.sh\" \
+            --namespace \"$op_namespace\" \
+            --deployment \"$op_deployment\" \
+            --cluster-id \"$cluster_id\" \
+            --cluster-name \"$cluster_name\" \
+            --cluster-version \"$cluster_version\" \
+            --reason \"$REASON\" \
+            --operator-name \"$op_name\""
+
+        if [ -n "${hive_target_cache[$cluster_id]:-}" ]; then
+            health_cmd="$health_cmd --target-name \"${hive_target_cache[$cluster_id]}\""
         fi
+        if [ "$CHECK_SECRETS" = true ]; then
+            health_cmd="$health_cmd --secrets"
+        fi
+
+        eval "$health_cmd" >> "$OUTPUT_FILE"
 
         if [ $? -ne 0 ]; then
             collection_status=1
@@ -991,7 +995,70 @@ EOF
         else
             echo "✓ Successfully collected data for $op_label"
         fi
-    done
+
+    else
+        # Non-comprehensive modes — sequential per operator
+        for op in "${OPERATORS_TO_COLLECT[@]}"; do
+            IFS=':' read -r op_name op_namespace op_deployment <<< "${OPERATOR_CONFIGS[$op]}"
+            op_label="${op^^}"
+            echo ""
+            echo "Collecting data for $op_label..."
+
+            if [ "$METRICS_CHECK" = true ]; then
+                if [ "$op" = "camo" ]; then
+                    "$SCRIPT_DIR/collect_camo_metrics.sh" \
+                        --namespace "$op_namespace" \
+                        --deployment "$op_deployment" \
+                        --cluster-id "$cluster_id" \
+                        --cluster-name "$cluster_name" \
+                        --cluster-version "$cluster_version" \
+                        --reason "$REASON" \
+                        --format csv >> "$OUTPUT_FILE"
+                else
+                    echo "  ℹ Metrics collection not available for $op_label (CAMO only)"
+                fi
+            elif [ "$VERSION_COMPARE" = true ]; then
+                "$SCRIPT_DIR/collect_versioned_metrics.sh" \
+                    --namespace "$op_namespace" \
+                    --deployment "$op_deployment" \
+                    --cluster-id "$cluster_id" \
+                    --cluster-name "$cluster_name" \
+                    --cluster-version "$cluster_version" \
+                    --reason "$REASON" \
+                    --operator-name "$op_name" \
+                    --format csv \
+                    --debug >> "$OUTPUT_FILE"
+            elif [ "$OP_VER_ONLY" = true ]; then
+                "$SCRIPT_DIR/collect_pod_resource_usage.sh" \
+                    --namespace "$op_namespace" \
+                    --deployment "$op_deployment" \
+                    --cluster-id "$cluster_id" \
+                    --cluster-name "$cluster_name" \
+                    --cluster-version "$cluster_version" \
+                    --reason "$REASON" \
+                    --format csv \
+                    --operator-name "$op_name" \
+                    --op-ver-only >> "$OUTPUT_FILE"
+            else
+                "$SCRIPT_DIR/collect_pod_resource_usage.sh" \
+                    --namespace "$op_namespace" \
+                    --deployment "$op_deployment" \
+                    --cluster-id "$cluster_id" \
+                    --cluster-name "$cluster_name" \
+                    --cluster-version "$cluster_version" \
+                    --reason "$REASON" \
+                    --format csv \
+                    --operator-name "$op_name" >> "$OUTPUT_FILE"
+            fi
+
+            if [ $? -ne 0 ]; then
+                collection_status=1
+                echo "✗ Failed to collect data for $op_label"
+            else
+                echo "✓ Successfully collected data for $op_label"
+            fi
+        done
+    fi
 
     set -e  # Re-enable if needed
 
