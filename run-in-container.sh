@@ -58,7 +58,7 @@ echo "Container engine: $ENGINE"
 image_exists=$($ENGINE images -q "$IMAGE_NAME" 2>/dev/null | head -1)
 if [ -z "$image_exists" ] || [ "$FORCE_BUILD" = true ]; then
     echo "Building container image: $IMAGE_NAME"
-    $ENGINE build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+    $ENGINE build --platform linux/amd64 -t "$IMAGE_NAME" "$SCRIPT_DIR"
 else
     echo "Using existing image: $IMAGE_NAME"
 fi

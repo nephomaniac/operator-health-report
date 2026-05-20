@@ -1,4 +1,4 @@
-FROM quay.io/app-sre/ocm-container:latest
+FROM --platform=linux/amd64 quay.io/app-sre/ocm-container:latest
 
 # Add tools not included in ocm-container
 RUN dnf --assumeyes --nodocs install skopeo wget && dnf clean all
