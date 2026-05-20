@@ -713,7 +713,12 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'rmo_hcp_state',
                 'rmo_limited_support_disagreement',
                 'rmo_rhobs_api_health',
-                'rmo_rhobs_integration'
+                'rmo_rhobs_integration',
+                'ome_metrics_health',
+                'ome_pull_secret_health',
+                'ome_proxy_ca_health',
+                'ome_servicemonitor_health',
+                'ome_identity_providers'
             ];
 
             const checksArray = Array.from(checkTypes);
@@ -853,6 +858,11 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'rmo_limited_support_disagreement': 'LS Detection',
                 'rmo_rhobs_api_health': 'RHOBS API',
                 'rmo_rhobs_integration': 'RHOBS Config',
+                'ome_metrics_health': 'OME Metrics',
+                'ome_pull_secret_health': 'Pull Secret',
+                'ome_proxy_ca_health': 'Proxy CA',
+                'ome_servicemonitor_health': 'OME SvcMon',
+                'ome_identity_providers': 'IDPs',
                 'log_error_analysis': 'Log Analysis'
             };
 

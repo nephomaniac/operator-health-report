@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="111e8a2"
+SCRIPT_VERSION="522390b"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -5051,6 +5051,249 @@ EOF
 EOF
 )")
     }
+
+fi
+
+# OME-specific checks
+if [[ "$OPERATOR_NAME" == *"osd-metrics-exporter"* ]]; then
+    echo "Running OME-specific health checks..."
+
+    CURRENT_CHECK="ome_metrics_health"
+    # OME Check 1: Verify Prometheus is scraping OME and expected metrics exist
+    ome_metrics_status="PASS"
+    ome_metrics_message=""
+    ome_up=0
+    ome_metrics_found=0
+    ome_metrics_missing=""
+    ome_expected_metrics="identity_provider cluster_admin_enabled limited_support_enabled cluster_proxy cluster_proxy_ca_expiry_timestamp cluster_proxy_ca_valid cluster_id cpms_enabled pull_secret_valid"
+
+    # Check if Prometheus is scraping OME
+    _exec_or_replay "Thanos OME: up" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+        wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'up{job="osd-metrics-exporter"}' | jq -sRr @uri)"
+    if [ $__oc_rc -eq 0 ] && [ -n "$__oc_out" ]; then
+        ome_up=$(echo "$__oc_out" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null | tr -d '[:space:]')
+    fi
+    [ -z "$ome_up" ] && ome_up=0
+
+    if [ "$ome_up" = "1" ]; then
+        echo "  ✓ Prometheus is scraping OME (up=1)"
+
+        # Check each expected metric
+        for metric in $ome_expected_metrics; do
+            _exec_or_replay "Thanos OME: $metric" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+                wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf '%s{name="osd_exporter"}' "$metric" | jq -sRr @uri)"
+            if [ $__oc_rc -eq 0 ] && [ -n "$__oc_out" ] && echo "$__oc_out" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+                ome_metrics_found=$((ome_metrics_found + 1))
+            else
+                ome_metrics_missing="${ome_metrics_missing}${metric}, "
+            fi
+        done
+        ome_metrics_missing="${ome_metrics_missing%, }"
+
+        total_expected=$(echo "$ome_expected_metrics" | wc -w | tr -d ' ')
+        if [ "$ome_metrics_found" -eq "$total_expected" ]; then
+            ome_metrics_message="All $total_expected OME metrics present and being scraped"
+            echo "  ✓ All $total_expected metrics found"
+        else
+            ome_metrics_status="WARNING"
+            ome_metrics_message="${ome_metrics_found}/${total_expected} metrics found — missing: ${ome_metrics_missing}"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ ${ome_metrics_found}/${total_expected} metrics found, missing: ${ome_metrics_missing}"
+        fi
+    else
+        ome_metrics_status="FAIL"
+        ome_metrics_message="Prometheus is NOT scraping OME (up metric missing or 0) — ServiceMonitor may be missing or misconfigured"
+        critical_count=$((critical_count + 1))
+        echo "  ✗ CRITICAL: Prometheus not scraping OME"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "ome_metrics_health",
+  "status": "$ome_metrics_status",
+  "severity": "$([ "$ome_metrics_status" = "FAIL" ] && echo "critical" || echo "warning")",
+  "message": "$ome_metrics_message",
+  "details": {
+    "prometheus_scraping": $([ "$ome_up" = "1" ] && echo "true" || echo "false"),
+    "metrics_found": $ome_metrics_found,
+    "metrics_missing": "$(echo "${ome_metrics_missing:-none}" | sed 's/"/\\"/g')"
+  }
+}
+EOF
+)")
+
+    CURRENT_CHECK="ome_pull_secret_health"
+    # OME Check 2: Pull secret validation
+    ome_ps_status="PASS"
+    ome_ps_message=""
+    ome_ps_valid=0
+    ome_ps_reason=""
+
+    _exec_or_replay "Thanos OME: pull_secret_valid" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+        wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'pull_secret_valid{name="osd_exporter"}' | jq -sRr @uri)"
+    if [ $__oc_rc -eq 0 ] && [ -n "$__oc_out" ] && echo "$__oc_out" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+        ome_ps_valid=$(echo "$__oc_out" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null | tr -d '[:space:]')
+        ome_ps_reason=$(echo "$__oc_out" | jq -r '.data.result[0].metric.reason // "unknown"' 2>/dev/null)
+
+        if [ "$ome_ps_valid" = "1" ] && [ "$ome_ps_reason" = "Valid" ]; then
+            ome_ps_message="Pull secret is valid"
+            echo "  ✓ Pull secret valid"
+        else
+            ome_ps_status="WARNING"
+            ome_ps_message="Pull secret issue: reason=${ome_ps_reason} (value=${ome_ps_valid})"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ Pull secret issue: reason=${ome_ps_reason}"
+        fi
+    else
+        ome_ps_status="SKIP"
+        ome_ps_message="pull_secret_valid metric not found"
+        echo "  ℹ Pull secret metric not available"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "ome_pull_secret_health",
+  "status": "$ome_ps_status",
+  "severity": "warning",
+  "message": "$ome_ps_message",
+  "details": {
+    "valid": $ome_ps_valid,
+    "reason": "${ome_ps_reason:-unknown}"
+  }
+}
+EOF
+)")
+
+    CURRENT_CHECK="ome_proxy_ca_health"
+    # OME Check 3: Proxy CA certificate validity
+    ome_ca_status="PASS"
+    ome_ca_message=""
+    ome_ca_valid=0
+    ome_ca_expiry=0
+
+    _exec_or_replay "Thanos OME: cluster_proxy_ca_valid" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+        wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'cluster_proxy_ca_valid{name="osd_exporter"}' | jq -sRr @uri)"
+    if [ $__oc_rc -eq 0 ] && [ -n "$__oc_out" ] && echo "$__oc_out" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+        ome_ca_valid=$(echo "$__oc_out" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null | tr -d '[:space:]')
+
+        # Get expiry timestamp
+        _exec_or_replay "Thanos OME: cluster_proxy_ca_expiry_timestamp" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+            wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'cluster_proxy_ca_expiry_timestamp{name="osd_exporter"}' | jq -sRr @uri)"
+        if [ $__oc_rc -eq 0 ] && [ -n "$__oc_out" ]; then
+            ome_ca_expiry=$(echo "$__oc_out" | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null | tr -d '[:space:]')
+        fi
+
+        if [ "$ome_ca_valid" = "1" ]; then
+            current_epoch=$(date +%s)
+            days_until_expiry=0
+            if [ "${ome_ca_expiry:-0}" -gt 0 ] 2>/dev/null; then
+                days_until_expiry=$(( (ome_ca_expiry - current_epoch) / 86400 ))
+            fi
+
+            if [ "$days_until_expiry" -gt 0 ] && [ "$days_until_expiry" -lt 30 ]; then
+                ome_ca_status="WARNING"
+                ome_ca_message="Proxy CA valid but expiring in ${days_until_expiry} days"
+                warning_count=$((warning_count + 1))
+                echo "  ⚠ Proxy CA expiring in ${days_until_expiry} days"
+            else
+                ome_ca_message="Proxy CA valid${days_until_expiry:+ (expires in ${days_until_expiry} days)}"
+                echo "  ✓ Proxy CA valid"
+            fi
+        else
+            ome_ca_status="FAIL"
+            ome_ca_message="Proxy CA certificate is INVALID"
+            critical_count=$((critical_count + 1))
+            echo "  ✗ CRITICAL: Proxy CA invalid"
+        fi
+    else
+        ome_ca_status="INFO"
+        ome_ca_message="No proxy CA configured (metric not present)"
+        echo "  ℹ No proxy CA configured"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "ome_proxy_ca_health",
+  "status": "$ome_ca_status",
+  "severity": "$([ "$ome_ca_status" = "FAIL" ] && echo "critical" || echo "warning")",
+  "message": "$ome_ca_message",
+  "details": {
+    "ca_valid": $ome_ca_valid,
+    "ca_expiry_epoch": ${ome_ca_expiry:-0}
+  }
+}
+EOF
+)")
+
+    CURRENT_CHECK="ome_servicemonitor_health"
+    # OME Check 4: ServiceMonitor exists (dynamically created by operator-custom-metrics library)
+    ome_sm_status="PASS"
+    ome_sm_message=""
+
+    _run_oc_optional "Get OME ServiceMonitor" ocm backplane elevate "${REASON}" -- get servicemonitor osd-metrics-exporter -n "$NAMESPACE"
+    if [ $__oc_rc -eq 0 ] && [ -n "$__oc_out" ]; then
+        if [ "$ome_up" = "1" ]; then
+            ome_sm_message="ServiceMonitor exists and Prometheus is scraping"
+            echo "  ✓ ServiceMonitor present, Prometheus scraping"
+        else
+            ome_sm_status="WARNING"
+            ome_sm_message="ServiceMonitor exists but Prometheus is NOT scraping (check ServiceMonitor selector and labels)"
+            warning_count=$((warning_count + 1))
+            echo "  ⚠ ServiceMonitor present but Prometheus not scraping"
+        fi
+    else
+        ome_sm_status="FAIL"
+        ome_sm_message="ServiceMonitor missing — metrics will not be collected. OME creates it dynamically via operator-custom-metrics library; pod may need restart."
+        critical_count=$((critical_count + 1))
+        echo "  ✗ CRITICAL: ServiceMonitor missing"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "ome_servicemonitor_health",
+  "status": "$ome_sm_status",
+  "severity": "$([ "$ome_sm_status" = "FAIL" ] && echo "critical" || echo "warning")",
+  "message": "$ome_sm_message",
+  "details": {
+    "servicemonitor_exists": $([ $__oc_rc -eq 0 ] && echo "true" || echo "false"),
+    "prometheus_scraping": $([ "$ome_up" = "1" ] && echo "true" || echo "false")
+  }
+}
+EOF
+)")
+
+    CURRENT_CHECK="ome_identity_providers"
+    # OME Check 5: Identity provider configuration (informational)
+    ome_idp_message=""
+    ome_idp_count=0
+    ome_idp_types=""
+
+    _exec_or_replay "Thanos OME: identity_provider" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
+        wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'identity_provider{name="osd_exporter"}' | jq -sRr @uri)"
+    if [ $__oc_rc -eq 0 ] && [ -n "$__oc_out" ] && echo "$__oc_out" | jq -e '.data.result[0]' >/dev/null 2>&1; then
+        ome_idp_types=$(echo "$__oc_out" | jq -r '[.data.result[] | select(.value[1] != "0") | .metric.provider + "=" + .value[1]] | join(", ")' 2>/dev/null)
+        ome_idp_count=$(echo "$__oc_out" | jq '[.data.result[] | select(.value[1] != "0")] | length' 2>/dev/null | tr -d '[:space:]')
+        [ -z "$ome_idp_count" ] && ome_idp_count=0
+        ome_idp_message="${ome_idp_count} identity provider type(s) configured: ${ome_idp_types}"
+        echo "  ℹ IDPs: $ome_idp_types"
+    else
+        ome_idp_message="Identity provider metric not available"
+        echo "  ℹ IDP metric not available"
+    fi
+
+    health_checks+=("$(cat <<EOF
+{
+  "check": "ome_identity_providers",
+  "status": "INFO",
+  "severity": "info",
+  "message": "$ome_idp_message",
+  "details": {
+    "provider_count": ${ome_idp_count:-0},
+    "providers": "$(echo "${ome_idp_types:-none}" | sed 's/"/\\"/g')"
+  }
+}
+EOF
+)")
 
 fi
 
