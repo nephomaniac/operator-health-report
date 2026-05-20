@@ -118,6 +118,45 @@ lib/
   get_app_interface_saas_refs_with_images.sh  # SAAS targets with image tags
 ```
 
+## Container Image
+
+The container image is built from `Containerfile` using `ocm-container` as base, adding `yq`, `skopeo`, and `wget`.
+
+```bash
+# First run — image builds automatically
+./run.sh -- --cluster-list clusters.list --reason "test" --oper rmo
+
+# Force rebuild (after code changes to lib/ scripts)
+./run.sh --build -- --cluster-list clusters.list --reason "test" --oper rmo
+
+# Manual build
+podman build --platform linux/amd64 -t operator-health-report:latest .
+```
+
+**When to rebuild:**
+- After modifying any script in `lib/` — the container copies scripts at build time
+- After updating `Containerfile` (new dependencies, base image)
+- NOT needed for changes to `run.sh`, cluster lists, or `generate_html_report.sh` (HTML generation runs locally after container completes)
+
+**Tip for development:** Use `--local` mode to skip containers entirely while iterating on script changes. No rebuild needed.
+
+## Production Safety
+
+The script auto-detects the OCM environment. In **production**:
+
+```bash
+# Default: elevation disabled automatically (safe checks only)
+./run.sh -- --cluster-list prod_clusters.list --reason "SREP-1234" --oper camo
+
+# Explicit: skip elevation (same effect, explicit intent)
+./run.sh -- --cluster-list prod_clusters.list --reason "SREP-1234" --oper camo --no-elevate
+
+# Override: acknowledge elevation in production (use with caution)
+./run.sh -- --cluster-list prod_clusters.list --reason "SREP-1234" --oper camo --prod-elevate
+```
+
+Without elevation, these checks still run: namespace status, version verification, pod/deployment health, PKO/OLM status, log analysis, events. Prometheus queries and custom resource checks are skipped.
+
 ## Configuration
 
 ### run.sh Options (before `--`)
