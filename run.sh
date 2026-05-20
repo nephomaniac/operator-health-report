@@ -11,6 +11,8 @@
 #   --parallel N         Run N clusters concurrently in separate containers (default: 1)
 #   --engine ENGINE      Container engine: podman or docker (auto-detected)
 #   --image IMAGE        Container image (default: operator-health-report:latest)
+#   --ocm-config FILE    Path to OCM config (default: $OCM_CONFIG or ~/.config/ocm/ocm.json)
+#   --bp-config FILE     Path to backplane config (default: ~/.config/backplane/config.json)
 #
 # Everything after -- is passed to collect_from_multiple_clusters.sh
 #
@@ -49,6 +51,8 @@ while [[ $# -gt 0 ]]; do
         --parallel) PARALLEL="$2"; shift 2 ;;
         --engine) ENGINE="$2"; shift 2 ;;
         --image) IMAGE_NAME="$2"; shift 2 ;;
+        --ocm-config) OCM_CONFIG="$2"; shift 2 ;;
+        --bp-config) BACKPLANE_CONFIG="$2"; shift 2 ;;
         --) shift; HEALTH_ARGS=("$@"); break ;;
         *) echo "Unknown option: $1 (use -- to separate from health check options)" >&2; exit 1 ;;
     esac
@@ -91,15 +95,30 @@ if [ ! -f "$OCM_CONFIG" ]; then
 fi
 
 if [ ! -f "$OCM_CONFIG" ]; then
-    echo "Error: OCM config not found. Set OCM_CONFIG or run 'ocm login' first." >&2
+    echo "" >&2
+    echo "Error: OCM config not found at: $OCM_CONFIG" >&2
+    echo "" >&2
+    echo "To fix this, either:" >&2
+    echo "  1. Run 'ocm login --url=staging' (or --url=production)" >&2
+    echo "  2. Set OCM_CONFIG to your config file: export OCM_CONFIG=<path-to-your-ocm-config>" >&2
+    echo "  3. Pass it as a flag: ./run.sh --ocm-config ~/.config/ocm/ocm.stg.json -- ..." >&2
+    echo "" >&2
+    echo "Common locations:" >&2
+    for cfg in "$HOME/.config/ocm/ocm.json" "$HOME/.config/ocm/ocm.stg.json" "$HOME/.config/ocm/ocm.staging.json" "$HOME/.config/ocm/ocm.prod.json" "$HOME/.ocm.json"; do
+        [ -f "$cfg" ] && echo "  ✓ $cfg (exists)" >&2 || echo "  ✗ $cfg" >&2
+    done
     exit 1
 fi
 echo "OCM config: $OCM_CONFIG"
 
-# Detect backplane config
+# Detect backplane config (required for VPN proxy settings)
 BACKPLANE_CONFIG="${BACKPLANE_CONFIG:-$HOME/.config/backplane/config.json}"
 if [ ! -f "$BACKPLANE_CONFIG" ]; then
-    echo "Warning: Backplane config not found at $BACKPLANE_CONFIG — proxy settings may be missing" >&2
+    echo "" >&2
+    echo "Warning: Backplane config not found at: $BACKPLANE_CONFIG" >&2
+    echo "The backplane CLI needs proxy settings to connect through VPN." >&2
+    echo "To fix: set BACKPLANE_CONFIG or pass --bp-config <path>" >&2
+    echo "" >&2
 fi
 
 # Create results directory
