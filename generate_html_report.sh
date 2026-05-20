@@ -1553,6 +1553,45 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
                                 if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples')) return '';
+
+                                // Custom rendering for OME per-metric table
+                                if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {
+                                    return '<div class="detail-item" style="grid-column: 1/-1;"><span class="detail-label">Metrics Detail</span><div>' +
+                                        '<table style="width:100%;border-collapse:collapse;font-size:0.85em;margin-top:4px;">' +
+                                        '<thead><tr style="border-bottom:1px solid #ddd;">' +
+                                        '<th style="text-align:left;padding:3px 6px;">Metric</th>' +
+                                        '<th style="text-align:left;padding:3px 6px;">Type</th>' +
+                                        '<th style="text-align:left;padding:3px 6px;">Status</th>' +
+                                        '<th style="text-align:left;padding:3px 6px;">Value</th>' +
+                                        '<th style="text-align:left;padding:3px 6px;">Condition</th>' +
+                                        '</tr></thead><tbody>' +
+                                        value.map(m => {
+                                            const statusIcon = m.status === 'found' ? '✓' : m.status === 'absent_expected' ? 'ℹ' : '✗';
+                                            const statusColor = m.status === 'found' ? '#28a745' : m.status === 'absent_expected' ? '#6c757d' : '#dc3545';
+                                            const typeColor = m.type === 'required' ? '#667eea' : '#f5c542';
+                                            const condText = m.type === 'required' ? '—' : (m.condition_met === 'true' ? m.condition + ' ✓' : m.condition + ' ✗');
+                                            return '<tr style="border-bottom:1px solid #f0f0f0;">' +
+                                                '<td style="padding:3px 6px;font-family:var(--font-mono);">' + m.name + '</td>' +
+                                                '<td style="padding:3px 6px;"><span style="color:' + typeColor + ';font-size:0.85em;">' + m.type + '</span></td>' +
+                                                '<td style="padding:3px 6px;color:' + statusColor + ';">' + statusIcon + ' ' + m.status + '</td>' +
+                                                '<td style="padding:3px 6px;font-family:var(--font-mono);">' + (m.value || '—') + '</td>' +
+                                                '<td style="padding:3px 6px;font-size:0.85em;color:#666;">' + condText + '</td>' +
+                                            '</tr>';
+                                        }).join('') +
+                                        '</tbody></table></div></div>';
+                                }
+
+                                // Custom rendering for preconditions
+                                if (key === 'preconditions' && typeof value === 'object') {
+                                    return '<div class="detail-item" style="grid-column: 1/-1;"><span class="detail-label">Preconditions</span><div>' +
+                                        Object.entries(value).map(([k, v]) => {
+                                            const icon = v === true ? '✓' : '✗';
+                                            const color = v === true ? '#28a745' : '#6c757d';
+                                            return '<span style="margin-right:12px;color:' + color + ';">' + icon + ' ' + k.replace(/_/g, ' ') + '</span>';
+                                        }).join('') +
+                                    '</div></div>';
+                                }
+
                                 let displayValue = value;
                                 let valueClass = '';
 
