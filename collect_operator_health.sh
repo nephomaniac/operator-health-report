@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="caf9c91"
+SCRIPT_VERSION="5f4c254"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -4767,9 +4767,10 @@ EOF
         # Get limited-support labels from HCP CRs (reuse hcp_list from HCP coverage check)
         if [ -n "${hcp_list:-}" ] && echo "$hcp_list" | jq -e '.items[0]' >/dev/null 2>&1; then
             # Build lookup: clusterID -> label value, name
-            hcp_ls_data=$(echo "$hcp_list" | jq -r '.items[] | "\(.spec.clusterID // "unknown")|\(.metadata.labels["api.openshift.com/limited-support"] // "not-set")|\(.metadata.name)"' 2>/dev/null)
+            # Include available condition and deletionTimestamp for context
+            hcp_ls_data=$(echo "$hcp_list" | jq -r '.items[] | "\(.spec.clusterID // "unknown")|\(.metadata.labels["api.openshift.com/limited-support"] // "not-set")|\(.metadata.name)|\([.status.conditions[]? | select(.type == "Available") | .status] | first // "Unknown")|\(.metadata.deletionTimestamp // "none")"' 2>/dev/null)
 
-            while IFS='|' read -r cid label_val hcp_name; do
+            while IFS='|' read -r cid label_val hcp_name hcp_available hcp_deleting; do
                 [ -z "$cid" ] || [ "$cid" = "unknown" ] && continue
                 label_is_ls=false
                 [ "$label_val" = "true" ] && label_is_ls=true
@@ -4780,26 +4781,101 @@ EOF
                 fi
 
                 if [ "$label_is_ls" != "$prom_is_ls" ]; then
+                    # Add context about HCP state
+                    hcp_context=""
+                    if [ "$hcp_deleting" != "none" ] && [ -n "$hcp_deleting" ]; then
+                        hcp_context=" [HCP deleting since $hcp_deleting — may be transient]"
+                    elif [ "$hcp_available" != "True" ]; then
+                        hcp_context=" [HCP not available (${hcp_available}) — may be provisioning or unhealthy]"
+                    fi
+
                     ls_disagree_count=$((ls_disagree_count + 1))
                     if [ "$label_is_ls" = false ] && [ "$prom_is_ls" = true ]; then
-                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): cluster is in limited support but RMO still has probes active — may cause false SLO burn alerts; "
+                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): cluster is in limited support but RMO still has probes active — may cause false SLO burn alerts${hcp_context}; "
                     else
-                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): RMO thinks cluster is limited support but it is not — probes were deleted, creating a monitoring gap; "
+                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): RMO thinks cluster is limited support but it is not — probes were deleted, creating a monitoring gap${hcp_context}; "
                     fi
                 fi
             done <<< "$hcp_ls_data"
 
             ls_disagreements="${ls_disagreements%; }"
 
+            # Check for stale Prometheus entries — cluster IDs in Prometheus that no longer have an HCP
+            ls_stale_count=0
+            ls_stale_ids=""
+            if [ -n "$prom_ls_ids" ]; then
+                hcp_cids=$(echo "$hcp_ls_data" | cut -d'|' -f1 | sort -u)
+                while IFS= read -r prom_cid; do
+                    [ -z "$prom_cid" ] && continue
+                    if ! echo "$hcp_cids" | grep -q "^${prom_cid}$" 2>/dev/null; then
+                        ls_stale_count=$((ls_stale_count + 1))
+                        ls_stale_ids="${ls_stale_ids}${prom_cid:0:12}, "
+                    fi
+                done <<< "$(echo "$prom_ls_ids" | sort -u)"
+                ls_stale_ids="${ls_stale_ids%, }"
+            fi
+
+            if [ "$ls_disagree_count" -gt 0 ]; then
+                # Retry after 15s delay — disagreements may be transient (race during HCP state changes)
+                echo "  ⚠ Found ${ls_disagree_count} disagreement(s) — retrying in 15s to confirm..."
+                sleep 15
+
+                # Re-query both sources
+                ls_retry_count=0
+                ls_prom_raw_retry=$(query_rhobs_prometheus "Limited support retry" 'hypershift_cluster_limited_support_enabled == 1')
+                prom_ls_ids_retry=""
+                [ -n "$ls_prom_raw_retry" ] && prom_ls_ids_retry=$(echo "$ls_prom_raw_retry" | jq -r '[.data.result[] | .metric._id] | unique | .[]' 2>/dev/null)
+
+                _run_oc "Get HCP labels (retry)" ocm backplane elevate "${REASON}" -- get hostedcontrolplane -A -o json
+                hcp_ls_retry=$(echo "$__oc_out" | jq -r '.items[] | "\(.spec.clusterID // "unknown")|\(.metadata.labels["api.openshift.com/limited-support"] // "not-set")"' 2>/dev/null)
+
+                ls_disagreements=""
+                ls_disagree_count=0
+                while IFS='|' read -r cid label_val hcp_name hcp_available hcp_deleting; do
+                    [ -z "$cid" ] || [ "$cid" = "unknown" ] && continue
+                    label_is_ls=false; [ "$label_val" = "true" ] && label_is_ls=true
+                    prom_is_ls=false
+                    echo "$prom_ls_ids_retry" | grep -q "^${cid}$" 2>/dev/null && prom_is_ls=true
+                    # Also check retry HCP data for label changes
+                    retry_label=$(echo "$hcp_ls_retry" | grep "^${cid}|" | head -1 | cut -d'|' -f2)
+                    [ "$retry_label" = "true" ] && label_is_ls=true
+                    [ "$retry_label" = "false" ] || [ "$retry_label" = "not-set" ] && label_is_ls=false
+
+                    if [ "$label_is_ls" != "$prom_is_ls" ]; then
+                        hcp_context=""
+                        [ "$hcp_deleting" != "none" ] && [ -n "$hcp_deleting" ] && hcp_context=" [HCP deleting]"
+                        [ "$hcp_available" != "True" ] && [ -z "$hcp_context" ] && hcp_context=" [HCP not available]"
+                        ls_disagree_count=$((ls_disagree_count + 1))
+                        if [ "$label_is_ls" = false ] && [ "$prom_is_ls" = true ]; then
+                            ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): cluster is in limited support but RMO still has probes active — may cause false SLO burn alerts${hcp_context}; "
+                        else
+                            ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): RMO thinks cluster is limited support but it is not — probes were deleted, creating a monitoring gap${hcp_context}; "
+                        fi
+                    fi
+                done <<< "$hcp_ls_data"
+                ls_disagreements="${ls_disagreements%; }"
+
+                if [ "$ls_disagree_count" -gt 0 ]; then
+                    echo "  ✗ Confirmed after retry: ${ls_disagree_count} persistent disagreement(s)"
+                else
+                    echo "  ✓ Disagreements resolved on retry (transient race condition)"
+                fi
+            fi
+
             if [ "$ls_disagree_count" -gt 0 ]; then
                 ls_status="FAIL"
-                ls_message="${ls_disagree_count} cluster(s) have inconsistent limited support state — probes may be incorrect: ${ls_disagreements}"
+                ls_message="${ls_disagree_count} cluster(s) have persistent inconsistent limited support state (confirmed after retry): ${ls_disagreements}"
                 critical_count=$((critical_count + 1))
                 echo "  ✗ CRITICAL: ${ls_disagree_count} cluster(s) with inconsistent limited support state"
                 echo "    $ls_disagreements"
             else
                 ls_message="All HCP clusters have consistent limited support state — probe lifecycle is correct"
                 echo "  ✓ Limited support state consistent across all HCPs"
+            fi
+
+            if [ "$ls_stale_count" -gt 0 ]; then
+                ls_message="${ls_message}. Note: ${ls_stale_count} cluster ID(s) in Prometheus limited-support metric have no matching HCP (deleted clusters, stale metric data): ${ls_stale_ids}"
+                echo "  ℹ ${ls_stale_count} stale Prometheus entries (deleted HCPs): ${ls_stale_ids}"
             fi
         else
             ls_status="UNKNOWN"
@@ -4824,7 +4900,9 @@ EOF
     "how_rmo_detects": "HCP label api.openshift.com/limited-support on HostedControlPlane CR",
     "how_dashboards_detect": "Prometheus metric hypershift_cluster_limited_support_enabled from hypershift operator",
     "prom_limited_count": ${hcp_prom_limited:-0},
-    "label_limited_count": ${label_ls_count:-0}
+    "label_limited_count": ${label_ls_count:-0},
+    "stale_prom_entries": ${ls_stale_count:-0},
+    "stale_prom_ids": "$(echo "${ls_stale_ids:-none}" | sed 's/"/\\"/g')"
   }
 }
 EOF
