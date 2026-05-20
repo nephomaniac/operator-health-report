@@ -79,6 +79,20 @@ When making changes:
 4. Verify HTML renders: `bash lib/generate_html_report.sh results.json report.html && open report.html`
 5. Check for bash errors: `bash -n lib/collect_operator_health.sh`
 
+## Production Safety — CRITICAL
+
+**NEVER run `ocm backplane elevate` commands against production clusters without explicit user authorization.**
+
+The script auto-detects the OCM environment. In production:
+- `--no-elevate` is applied automatically (safe subset of checks only)
+- `--prod-elevate` is required to explicitly acknowledge elevation in production
+- Claude should NEVER suggest or execute `--prod-elevate` — only the user can decide this
+
+When `NO_ELEVATE=true`:
+- All `ocm backplane elevate` commands are silently skipped (return empty, rc=0)
+- Checks that depend on elevated data report as SKIP or show empty results
+- Safe checks still run: namespace, version, deployment/pod health, PKO/OLM status, logs, events
+
 ## Known Patterns and Pitfalls
 
 - **Multiline jq output**: `jq '... | length'` can produce multiple values if input has multiple JSON objects. Always use `jq_int` for integer comparisons.

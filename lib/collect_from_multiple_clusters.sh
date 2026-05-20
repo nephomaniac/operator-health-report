@@ -94,6 +94,8 @@ CHECK_HCP_CONTROLLERS=false
 CHECK_SECRETS=false
 GENERATE_HTML=true
 HIVE_SHARD_FILTER=""
+NO_ELEVATE=false          # --no-elevate: skip all backplane elevation commands
+PROD_ELEVATE_ACK=false    # --prod-elevate: explicit acknowledgment to elevate in production
 OPERATORS_TO_COLLECT=()
 
 # Operator configurations
@@ -268,6 +270,8 @@ while [[ $# -gt 0 ]]; do
         --health|--comprehensive-health) COMPREHENSIVE_HEALTH=true; shift ;;
         --no-html) GENERATE_HTML=false; shift ;;
         --secrets) CHECK_SECRETS=true; shift ;;
+        --no-elevate) NO_ELEVATE=true; shift ;;
+        --prod-elevate) PROD_ELEVATE_ACK=true; shift ;;
         --metrics) METRICS_CHECK=true; shift ;;
         --version-compare) VERSION_COMPARE=true; shift ;;
         --check-hcp-controllers) CHECK_HCP_CONTROLLERS=true; shift ;;
@@ -389,6 +393,33 @@ if [ "$COMPREHENSIVE_HEALTH" = true ]; then
                 OCM_ENV_CACHE="unknown"
             fi
         fi
+
+        # Production safety check
+        if [ "$OCM_ENV_CACHE" = "production" ]; then
+            if [ "$NO_ELEVATE" = false ] && [ "$PROD_ELEVATE_ACK" = false ]; then
+                echo "" >&2
+                echo "================================================================================" >&2
+                echo "⚠  PRODUCTION ENVIRONMENT DETECTED" >&2
+                echo "================================================================================" >&2
+                echo "You are connected to the PRODUCTION OCM environment." >&2
+                echo "Running elevated commands (ocm backplane elevate) in production" >&2
+                echo "requires explicit acknowledgment." >&2
+                echo "" >&2
+                echo "Options:" >&2
+                echo "  --no-elevate     Run without elevation (safe: version, pod, PKO checks only)" >&2
+                echo "  --prod-elevate   Acknowledge and allow elevation in production" >&2
+                echo "" >&2
+                echo "Defaulting to --no-elevate for safety." >&2
+                echo "================================================================================" >&2
+                echo "" >&2
+                NO_ELEVATE=true
+            elif [ "$PROD_ELEVATE_ACK" = true ]; then
+                echo "⚠ PRODUCTION ELEVATION ACKNOWLEDGED — elevated commands will be run" >&2
+            fi
+        fi
+
+        # Export NO_ELEVATE so child scripts (collect_operator_health.sh) inherit it
+        export NO_ELEVATE
 
         # Pre-fetch and cache versions for all operators
         for op in "${OPERATORS_TO_COLLECT[@]}"; do

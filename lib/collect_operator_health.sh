@@ -443,6 +443,15 @@ _exec_or_replay() {
     shift
     local _cmd="$*"
 
+    # Production safety: skip elevated commands when NO_ELEVATE is set
+    if [ "${NO_ELEVATE:-false}" = "true" ] && echo "$_cmd" | grep -q "backplane elevate"; then
+        __oc_out=""
+        __oc_rc=0
+        __oc_err=""
+        echo "  [SKIPPED — no-elevate] $_desc" >&2
+        return 0
+    fi
+
     # Generate a cache key from description (filesystem-safe)
     local _cache_key=""
     if [ -n "$OC_CACHE_DIR" ]; then
