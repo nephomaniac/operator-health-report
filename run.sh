@@ -96,6 +96,12 @@ if [ ! -f "$OCM_CONFIG" ]; then
 fi
 echo "OCM config: $OCM_CONFIG"
 
+# Detect backplane config
+BACKPLANE_CONFIG="${BACKPLANE_CONFIG:-$HOME/.config/backplane/config.json}"
+if [ ! -f "$BACKPLANE_CONFIG" ]; then
+    echo "Warning: Backplane config not found at $BACKPLANE_CONFIG — proxy settings may be missing" >&2
+fi
+
 # Create results directory
 RESULTS_DIR="$SCRIPT_DIR/results_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
@@ -128,6 +134,7 @@ RUNEOF
 
     $ENGINE run --rm \
         -v "$OCM_CONFIG:/root/.config/ocm/ocm.json:ro" \
+        ${BACKPLANE_CONFIG:+-v "$BACKPLANE_CONFIG:/root/.config/backplane/config.json:ro"} \
         -v "$RESULTS_DIR:/results" \
         ${CLUSTER_LIST:+-v "$CLUSTER_LIST:/data/$(basename "$CLUSTER_LIST"):ro"} \
         -v "$RESULTS_DIR/run.sh:/data/run.sh:ro" \
@@ -197,6 +204,7 @@ RUNEOF
         echo "  Worker $worker_idx: $count clusters"
         $ENGINE run --rm \
             -v "$OCM_CONFIG:/root/.config/ocm/ocm.json:ro" \
+        ${BACKPLANE_CONFIG:+-v "$BACKPLANE_CONFIG:/root/.config/backplane/config.json:ro"} \
             -v "$worker_dir:/results" \
             -v "$split_file:/data/clusters.list:ro" \
             -v "$worker_dir/run.sh:/data/run.sh:ro" \
