@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="9544c3d"
+SCRIPT_VERSION="caf9c91"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -4736,12 +4736,22 @@ EOF
 )")
 
         CURRENT_CHECK="rmo_limited_support_disagreement"
-        # RMO Check 8d: Limited Support Label vs Metric Disagreement
-        # RMO uses HCP label api.openshift.com/limited-support to decide probe lifecycle.
-        # Prometheus metric hypershift_cluster_limited_support_enabled comes from hypershift operator.
-        # If they disagree, RMO may keep probes on limited-support clusters (false SLO alerts)
-        # or delete probes on non-limited clusters (monitoring gap).
-        echo "  Cross-referencing limited support: HCP labels vs RHOBS Prometheus metrics..."
+        # RMO Check 8d: Limited Support — HCP monitoring consistency
+        #
+        # When a customer cluster enters "limited support" (e.g., unpaid, policy violation),
+        # SRE monitoring probes should be removed so they don't generate false SLO alerts.
+        #
+        # Two systems track limited support state independently:
+        #   1. HCP label (api.openshift.com/limited-support) — what RMO reads to decide
+        #      whether to create or delete synthetic monitoring probes
+        #   2. Prometheus metric (hypershift_cluster_limited_support_enabled) — what
+        #      Grafana dashboards and alerts use to filter SLO calculations
+        #
+        # If these disagree, one of two problems occurs:
+        #   - Probes exist on a limited-support cluster → false SLO burn alerts
+        #   - Probes were deleted on a non-limited cluster → monitoring gap, no alerting
+        #
+        echo "  Checking limited support consistency: HCP labels vs monitoring state..."
         ls_status="PASS"
         ls_message=""
         ls_disagreements=""
@@ -4772,9 +4782,9 @@ EOF
                 if [ "$label_is_ls" != "$prom_is_ls" ]; then
                     ls_disagree_count=$((ls_disagree_count + 1))
                     if [ "$label_is_ls" = false ] && [ "$prom_is_ls" = true ]; then
-                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): Prometheus=limited but label=${label_val} — RMO will NOT delete probe (false SLO alerts possible); "
+                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): cluster is in limited support but RMO still has probes active — may cause false SLO burn alerts; "
                     else
-                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): label=limited but Prometheus=not-limited — RMO deleted probe but cluster may not be limited (monitoring gap); "
+                        ls_disagreements="${ls_disagreements}${hcp_name} (${cid:0:12}): RMO thinks cluster is limited support but it is not — probes were deleted, creating a monitoring gap; "
                     fi
                 fi
             done <<< "$hcp_ls_data"
@@ -4783,13 +4793,13 @@ EOF
 
             if [ "$ls_disagree_count" -gt 0 ]; then
                 ls_status="FAIL"
-                ls_message="Limited support detection mismatch: ${ls_disagree_count} HCP(s) where RMO label and OCM state disagree — ${ls_disagreements}"
+                ls_message="${ls_disagree_count} cluster(s) have inconsistent limited support state — probes may be incorrect: ${ls_disagreements}"
                 critical_count=$((critical_count + 1))
-                echo "  ✗ CRITICAL: ${ls_disagree_count} limited support detection mismatch(es)"
+                echo "  ✗ CRITICAL: ${ls_disagree_count} cluster(s) with inconsistent limited support state"
                 echo "    $ls_disagreements"
             else
-                ls_message="All HCPs agree: label api.openshift.com/limited-support matches Prometheus hypershift_cluster_limited_support_enabled"
-                echo "  ✓ Limited support labels and metrics agree"
+                ls_message="All HCP clusters have consistent limited support state — probe lifecycle is correct"
+                echo "  ✓ Limited support state consistent across all HCPs"
             fi
         else
             ls_status="UNKNOWN"
@@ -4808,10 +4818,11 @@ EOF
   "severity": "critical",
   "message": "$(echo "$ls_message" | sed 's/"/\\"/g')",
   "details": {
+    "description": "Checks whether RMO's view of limited support (HCP label) matches the monitoring system's view (Prometheus metric). When they disagree, probes are either incorrectly active (causing false SLO alerts) or incorrectly deleted (creating monitoring gaps).",
     "disagreement_count": $ls_disagree_count,
     "disagreements": "$(echo "${ls_disagreements:-none}" | sed 's/"/\\"/g')",
-    "rmo_source": "HCP label api.openshift.com/limited-support",
-    "dashboard_source": "Prometheus metric hypershift_cluster_limited_support_enabled",
+    "how_rmo_detects": "HCP label api.openshift.com/limited-support on HostedControlPlane CR",
+    "how_dashboards_detect": "Prometheus metric hypershift_cluster_limited_support_enabled from hypershift operator",
     "prom_limited_count": ${hcp_prom_limited:-0},
     "label_limited_count": ${label_ls_count:-0}
   }

@@ -855,7 +855,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'rmo_hcp_coverage': 'HCP Coverage',
                 'rmo_hcp_probe_coverage': 'HCP Probes',
                 'rmo_hcp_state': 'HCP State',
-                'rmo_limited_support_disagreement': 'LS Detection',
+                'rmo_limited_support_disagreement': 'Limited Support',
                 'rmo_rhobs_api_health': 'RHOBS API',
                 'rmo_rhobs_integration': 'RHOBS Config',
                 'ome_metrics_health': 'OME Metrics',
@@ -1542,6 +1542,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     </div>
                     <div class="check-details" id="check-details-${checkId}">
                         ${check.message ? `<div class="check-message">${check.message}</div>` : ''}
+                        ${check.details?.description ? `<div style="margin:4px 0 8px;padding:8px 10px;background:rgba(102,126,234,0.08);border-left:3px solid #667eea;border-radius:3px;font-size:0.85em;color:#555;">${check.details.description}</div>` : ''}
                         ${(() => {
                             const checkErrors = (cluster.api_errors || []).filter(e => e.check === check.check);
                             if (checkErrors.length === 0) return '';
