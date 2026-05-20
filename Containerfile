@@ -9,11 +9,7 @@ RUN curl -sL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq
     chmod +x /usr/local/bin/yq
 
 # Copy health check scripts
-COPY collect_operator_health.sh /opt/health-report/
-COPY collect_from_multiple_clusters.sh /opt/health-report/
-COPY generate_html_report.sh /opt/health-report/
-COPY get_app_interface_saas_refs.sh /opt/health-report/
-COPY get_app_interface_saas_refs_with_images.sh /opt/health-report/
+COPY lib/ /opt/health-report/
 
 WORKDIR /opt/health-report
 

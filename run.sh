@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 #
-# Run operator health checks inside a container for isolation.
+# Run operator health checks — containerized by default for isolation.
 #
 # Usage:
-#   ./run-in-container.sh [OPTIONS] -- [HEALTH CHECK OPTIONS]
+#   ./run.sh [OPTIONS] -- [HEALTH CHECK OPTIONS]
 #
-# Container options (before --):
+# Run options (before --):
+#   --local              Run locally without a container (uses host oc/ocm/jq)
 #   --build              Force rebuild the container image
-#   --parallel N         Run N clusters concurrently (default: 1)
+#   --parallel N         Run N clusters concurrently in separate containers (default: 1)
 #   --engine ENGINE      Container engine: podman or docker (auto-detected)
 #   --image IMAGE        Container image (default: operator-health-report:latest)
 #
 # Everything after -- is passed to collect_from_multiple_clusters.sh
 #
 # Examples:
-#   ./run-in-container.sh -- --cluster-list stage_clusters.list --oper camo --oper rmo
-#   ./run-in-container.sh --parallel 4 -- --cluster-list stage_clusters.list --oper camo --oper rmo --oper ome
-#   ./run-in-container.sh --build -- --cluster-list test.list --oper rmo
+#   ./run.sh -- --cluster-list stage_clusters.list --oper camo --oper rmo --oper ome
+#   ./run.sh --parallel 4 -- --cluster-list stage_clusters.list --oper camo --oper rmo --oper ome
+#   ./run.sh --local -- --cluster-list test.list --oper rmo
+#   ./run.sh --build -- --cluster-list stage_clusters.list --reason "SREP-1234"
 
 set -euo pipefail
 
@@ -24,6 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE_NAME="operator-health-report:latest"
 PARALLEL=1
 FORCE_BUILD=false
+LOCAL_MODE=false
 ENGINE=""
 
 # Auto-detect container engine
@@ -33,25 +36,37 @@ detect_engine() {
     elif command -v docker &>/dev/null; then
         echo "docker"
     else
-        echo "Error: No container engine found. Install podman or docker." >&2
-        exit 1
+        echo ""
     fi
 }
 
-# Parse container options (before --)
+# Parse run options (before --)
 HEALTH_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --local) LOCAL_MODE=true; shift ;;
         --build) FORCE_BUILD=true; shift ;;
         --parallel) PARALLEL="$2"; shift 2 ;;
         --engine) ENGINE="$2"; shift 2 ;;
         --image) IMAGE_NAME="$2"; shift 2 ;;
         --) shift; HEALTH_ARGS=("$@"); break ;;
-        *) echo "Unknown container option: $1 (use -- to separate from health check options)" >&2; exit 1 ;;
+        *) echo "Unknown option: $1 (use -- to separate from health check options)" >&2; exit 1 ;;
     esac
 done
 
+# Local mode — run directly without container
+if [ "$LOCAL_MODE" = true ]; then
+    echo "Running locally (no container)"
+    exec bash "$SCRIPT_DIR/lib/collect_from_multiple_clusters.sh" "${HEALTH_ARGS[@]}"
+fi
+
+# Container mode
 [ -z "$ENGINE" ] && ENGINE=$(detect_engine)
+if [ -z "$ENGINE" ]; then
+    echo "No container engine found. Falling back to local mode."
+    echo "Install podman or docker for containerized runs, or use --local explicitly."
+    exec bash "$SCRIPT_DIR/lib/collect_from_multiple_clusters.sh" "${HEALTH_ARGS[@]}"
+fi
 echo "Container engine: $ENGINE"
 
 # Build image if needed
@@ -102,13 +117,24 @@ if [ "$PARALLEL" -le 1 ]; then
     # Single container run
     echo ""
     echo "Running health checks in container..."
+    # Write command to script to preserve arg quoting
+    cat > "$RESULTS_DIR/run.sh" <<RUNEOF
+#!/bin/bash
+cd /opt/health-report
+bash collect_from_multiple_clusters.sh $(printf "'%s' " "${HEALTH_ARGS[@]}")
+cp -v health_*.json health_*.html /results/ 2>/dev/null || true
+RUNEOF
+    chmod +x "$RESULTS_DIR/run.sh"
+
     $ENGINE run --rm \
         -v "$OCM_CONFIG:/root/.config/ocm/ocm.json:ro" \
         -v "$RESULTS_DIR:/results" \
         ${CLUSTER_LIST:+-v "$CLUSTER_LIST:/data/$(basename "$CLUSTER_LIST"):ro"} \
+        -v "$RESULTS_DIR/run.sh:/data/run.sh:ro" \
         -e "OCM_CONFIG=/root/.config/ocm/ocm.json" \
         "$IMAGE_NAME" \
-        -c "cd /opt/health-report && bash collect_from_multiple_clusters.sh ${HEALTH_ARGS[*]} && cp -v health_*.json health_*.html /results/ 2>/dev/null || true"
+        -c "bash /data/run.sh"
+    rm -f "$RESULTS_DIR/run.sh"
 
     echo ""
     echo "Results saved to: $RESULTS_DIR"
@@ -119,7 +145,7 @@ if [ "$PARALLEL" -le 1 ]; then
     if [ -n "$json_file" ]; then
         echo ""
         echo "Generating HTML report locally..."
-        bash "$SCRIPT_DIR/generate_html_report.sh" "$json_file" "$RESULTS_DIR/health_report.html" 2>&1
+        bash "$SCRIPT_DIR/lib/generate_html_report.sh" "$json_file" "$RESULTS_DIR/health_report.html" 2>&1
     fi
 else
     # Parallel: split cluster list and run N containers
@@ -133,6 +159,21 @@ else
     echo ""
     echo "Parallel mode: $PARALLEL workers, $total_clusters clusters, ~$per_worker per worker"
 
+    # Build args without --cluster-list (we provide our own per worker)
+    FILTERED_ARGS=()
+    skip_next=false
+    for arg in "${HEALTH_ARGS[@]}"; do
+        if [ "$skip_next" = true ]; then
+            skip_next=false
+            continue
+        fi
+        if [ "$arg" = "--cluster-list" ] || [ "$arg" = "-c" ]; then
+            skip_next=true
+            continue
+        fi
+        FILTERED_ARGS+=("$arg")
+    done
+
     # Split cluster list
     split -l "$per_worker" -d -a 2 "$CLUSTER_LIST" "$RESULTS_DIR/split_"
 
@@ -142,17 +183,26 @@ else
     for split_file in "$RESULTS_DIR"/split_*; do
         worker_dir="$RESULTS_DIR/worker_${worker_idx}"
         mkdir -p "$worker_dir"
-        split_name=$(basename "$split_file")
         count=$(wc -l < "$split_file" | tr -d ' ')
+
+        # Write command to a script file to preserve arg quoting
+        cat > "$worker_dir/run.sh" <<RUNEOF
+#!/bin/bash
+cd /opt/health-report
+bash collect_from_multiple_clusters.sh --cluster-list /data/clusters.list $(printf "'%s' " "${FILTERED_ARGS[@]}")
+cp -v health_*.json health_*.html /results/ 2>/dev/null || true
+RUNEOF
+        chmod +x "$worker_dir/run.sh"
 
         echo "  Worker $worker_idx: $count clusters"
         $ENGINE run --rm \
             -v "$OCM_CONFIG:/root/.config/ocm/ocm.json:ro" \
             -v "$worker_dir:/results" \
             -v "$split_file:/data/clusters.list:ro" \
+            -v "$worker_dir/run.sh:/data/run.sh:ro" \
             -e "OCM_CONFIG=/root/.config/ocm/ocm.json" \
             "$IMAGE_NAME" \
-            -c "cd /opt/health-report && bash collect_from_multiple_clusters.sh --cluster-list /data/clusters.list ${HEALTH_ARGS[*]/--cluster-list*/} && cp -v health_*.json /results/ 2>/dev/null || true" \
+            -c "bash /data/run.sh" \
             > "$worker_dir/stdout.log" 2>&1 &
         worker_pids+=($!)
         worker_idx=$((worker_idx + 1))
