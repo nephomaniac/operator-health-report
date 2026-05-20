@@ -3225,23 +3225,38 @@ fi
                 _run_oc "Get ClusterPackage Available message" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Available")].message}'
                 failure_reason=$(echo "$__oc_out" | head -c 200)
                 pko_package_status="FAIL"
-                pko_package_message="PKO ClusterPackage not available: $failure_reason"
+                if echo "$failure_reason" | grep -q "refusing adoption\|not owned by previous revision" 2>/dev/null; then
+                    pko_package_message="PKO ClusterPackage not available: refusing to adopt pre-existing resource from OLM — $failure_reason"
+                    echo "  ✗ CRITICAL: PKO refusing adoption of OLM resource"
+                else
+                    pko_package_message="PKO ClusterPackage not available: $failure_reason"
+                    echo "  ✗ CRITICAL: PKO ClusterPackage not available"
+                fi
                 critical_count=$((critical_count + 1))
-                echo "  ✗ CRITICAL: PKO ClusterPackage not available"
                 echo "    Available: $cluster_package_available"
-                echo "    Reason: ${failure_reason:0:100}..."
+                echo "    Reason: ${failure_reason:0:200}"
             elif [ "$cluster_package_progressing" = "True" ]; then
                 _run_oc "Get ClusterPackage Progressing message" oc get clusterpackage "$PACKAGE_NAME" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].message}'
                 progressing_msg="$__oc_out"
                 if echo "$progressing_msg" | grep -q "immutable" 2>/dev/null; then
                     pko_package_status="FAIL"
-                    pko_package_message="PKO ClusterPackage stuck: spec.template field is immutable"
+                    pko_package_message="PKO ClusterPackage stuck: spec.template field is immutable — OLM-to-PKO migration Job name collision"
                     critical_count=$((critical_count + 1))
                     echo "  ✗ CRITICAL: ClusterPackage stuck with immutability error"
                     echo "    Message: ${progressing_msg:0:150}..."
+                elif echo "$progressing_msg" | grep -q "refusing adoption\|not owned by previous revision" 2>/dev/null; then
+                    pko_package_status="FAIL"
+                    # Extract the object that's blocking adoption
+                    blocking_obj=$(echo "$progressing_msg" | grep -oE '[^ ]+ not owned by previous revision' | head -1)
+                    [ -z "$blocking_obj" ] && blocking_obj=$(echo "$progressing_msg" | grep -oE 'refusing adoption, object [^ ]+' | head -1)
+                    pko_package_message="PKO ClusterPackage stuck: refusing to adopt pre-existing resource${blocking_obj:+ ($blocking_obj)} — object exists from OLM deployment but has no PKO revision annotation"
+                    critical_count=$((critical_count + 1))
+                    echo "  ✗ CRITICAL: ClusterPackage refusing adoption of pre-existing resource"
+                    echo "    Message: ${progressing_msg:0:200}"
+                    echo "    Fix: Add collision-protection annotation to the object, or delete and let PKO recreate it"
                 else
                     pko_package_status="WARN"
-                    pko_package_message="PKO ClusterPackage is progressing (update in progress)"
+                    pko_package_message="PKO ClusterPackage is progressing (update in progress): ${progressing_msg:0:100}"
                     warning_count=$((warning_count + 1))
                     echo "  ⚠ WARNING: PKO ClusterPackage update in progress"
                 fi
