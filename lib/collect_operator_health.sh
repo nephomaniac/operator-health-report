@@ -1535,7 +1535,7 @@ if [ -n "$lease_json" ] && echo "$lease_json" | jq -e '.metadata.name' >/dev/nul
     else
         # Check if holder matches a running pod
         holder_pod=$(echo "$lease_holder" | cut -d'_' -f1)
-        pod_exists=$(echo "$pods_json" | jq -r --arg pod "$holder_pod" '[.items[] | select(.metadata.name == $pod)] | length' 2>/dev/null)
+        pod_exists=$(echo "$pods_json" | jq -r --arg pod "$holder_pod" '[.items[] | select(.metadata.name == $pod)] | length' 2>/dev/null | head -1 | tr -d '[:space:]')
 
         if [ "${pod_exists:-0}" -eq 0 ]; then
             # Check if lease is old (>24h) — likely a remnant from when leader election was enabled
@@ -2198,7 +2198,7 @@ if [[ "$OPERATOR_NAME" == *"configure-alertmanager"* ]]; then
     alertmanager_restart_details="[]"
 
     if [ "$alertmanager_pod_count" -gt 0 ]; then
-        alertmanager_not_ready=$(echo "$alertmanager_pods" | jq -r '[.items[] | select(.status.phase != "Running" or ([.status.conditions[]? | select(.type == "Ready" and .status == "False")] | length > 0))] | length' 2>/dev/null)
+        alertmanager_not_ready=$(echo "$alertmanager_pods" | jq_int '[.items[] | select(.status.phase != "Running" or ([.status.conditions[]? | select(.type == "Ready" and .status == "False")] | length > 0))] | length' 2>/dev/null)
 
         # Calculate total restarts across all alertmanager pods
         alertmanager_total_restarts=$(echo "$alertmanager_pods" | jq -r '[.items[].status.containerStatuses[]?.restartCount // 0] | add // 0' 2>/dev/null)
@@ -2992,7 +2992,7 @@ EOF
             pod_events="$__oc_out"
 
             if [ -n "$pod_events" ]; then
-                warning_events=$(echo "$pod_events" | jq -r '[.items[] | select(.type == "Warning")] | length' 2>/dev/null || echo "0")
+                warning_events=$(echo "$pod_events" | jq_int '[.items[] | select(.type == "Warning")] | length')
                 alertmanager_warning_events=$((alertmanager_warning_events + warning_events))
 
                 # Collect event details
@@ -3054,7 +3054,7 @@ EOF
     camo_events="$__oc_out"
 
     if [ -n "$camo_events" ]; then
-        camo_warning_events=$(echo "$camo_events" | jq -r '[.items[] | select(.type == "Warning")] | length' 2>/dev/null || echo "0")
+        camo_warning_events=$(echo "$camo_events" | jq_int '[.items[] | select(.type == "Warning")] | length')
 
         camo_events_json=$(echo "$camo_events" | jq -c '[.items[] | select(.type == "Warning") | {
             reason: .reason,
@@ -3311,7 +3311,7 @@ fi
 
             # On PKO-only clusters, verify no orphaned CSVs remain from OLM migration
             _run_oc "Get CSVs in $NAMESPACE (leftover check)" oc get csv -n "$NAMESPACE" -o json
-            leftover_csvs=$(echo "$__oc_out" | jq -r "[.items[] | select(.metadata.name | test(\"$DEPLOYMENT\"))] | length" 2>/dev/null || echo "0")
+            leftover_csvs=$(echo "$__oc_out" | jq_int "[.items[] | select(.metadata.name | test(\"$DEPLOYMENT\"))] | length")
             if [ "$leftover_csvs" -gt 0 ]; then
                 leftover_csv_names=$(echo "$__oc_out" | jq -r "[.items[] | select(.metadata.name | test(\"$DEPLOYMENT\")) | .metadata.name]" 2>/dev/null || echo "[]")
                 orphaned_csvs=$leftover_csvs
@@ -3378,18 +3378,18 @@ EOF
     jobs_json="$__oc_out"
     if [ -n "$jobs_json" ]; then
         olm_cleanup_jobs=$(echo "$jobs_json" | jq '[.items[] | select(.metadata.name | startswith("olm-cleanup"))]' 2>/dev/null)
-        stale_job_count=$(echo "$olm_cleanup_jobs" | jq 'length' 2>/dev/null || echo "0")
+        stale_job_count=$(echo "$olm_cleanup_jobs" | jq_int 'length')
 
         if [ "$stale_job_count" -gt 0 ]; then
             current_epoch=$(date +%s)
-            hung_jobs=$(echo "$olm_cleanup_jobs" | jq --argjson now "$current_epoch" '[.[] | select(.status.active > 0) | select(($now - (.metadata.creationTimestamp | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)) > 300)] | length' 2>/dev/null || echo "0")
-            failed_jobs=$(echo "$olm_cleanup_jobs" | jq '[.[] | select(.status.failed > 0)] | length' 2>/dev/null || echo "0")
+            hung_jobs=$(echo "$olm_cleanup_jobs" | jq --argjson now "$current_epoch" -r '[.[] | select(.status.active > 0) | select(($now - (.metadata.creationTimestamp | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)) > 300)] | length' 2>/dev/null || echo "0")
+            failed_jobs=$(echo "$olm_cleanup_jobs" | jq_int '[.[] | select(.status.failed > 0)] | length')
 
             echo "  OLM cleanup jobs: $stale_job_count total, $hung_jobs hung, $failed_jobs failed"
 
             # Check for orphaned pods
             _run_oc "Get pods in $NAMESPACE for orphan check" oc get pods -n "$NAMESPACE" -o json
-            orphaned_pods=$(echo "$__oc_out" | jq '[.items[] | select(.metadata.name | startswith("olm-cleanup")) | select(.status.phase == "Running") | select(.metadata.ownerReferences == null)] | length' 2>/dev/null || echo "0")
+            orphaned_pods=$(echo "$__oc_out" | jq_int '[.items[] | select(.metadata.name | startswith("olm-cleanup")) | select(.status.phase == "Running") | select(.metadata.ownerReferences == null)] | length')
 
             issues=()
             [ "$hung_jobs" -gt 0 ] && issues+=("$hung_jobs hung job(s)")
@@ -3434,7 +3434,7 @@ EOF
     CURRENT_CHECK="image_pull_status"\n    # Check for ImagePullBackOff — indicates SAAS deployed before Konflux build completed
     image_pull_status="PASS"
     image_pull_message=""
-    waiting_pods=$(echo "${pods_json:-{}}" | jq -r '[.items[]? | select(.status.containerStatuses[]? | select(.state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")) | .metadata.name] | length' 2>/dev/null || echo "0")
+    waiting_pods=$(echo "${pods_json:-{}}" | jq_int '[.items[]? | select(.status.containerStatuses[]? | select(.state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull")) | .metadata.name] | length')
     waiting_pods=$(echo "$waiting_pods" | tr -d '[:space:]')
 
     if [ "${waiting_pods:-0}" -gt 0 ]; then
@@ -3672,6 +3672,13 @@ query_rhobs_prometheus() {
 # Usage: count=$(echo "$result" | prom_scalar)
 prom_scalar() {
     jq -r '.data.result[0].value[1] // "0"' 2>/dev/null | tr -d '[:space:]'
+}
+
+# Safely extract an integer from jq output — handles multiline, empty, or non-numeric results.
+# jq can produce multiple values if the input contains multiple JSON objects.
+# Usage: count=$(echo "$json" | jq_int '.items | length')
+jq_int() {
+    jq -r "$@" 2>/dev/null | head -1 | tr -d '[:space:]' | grep -E '^[0-9]+$' || echo "0"
 }
 
 # RMO-specific checks
@@ -4116,7 +4123,7 @@ EOF
         fi
 
         if [ $probe_data_rc -eq 0 ] && [ -n "$probe_data" ] && echo "$probe_data" | jq -e '.data.result[0]' >/dev/null 2>&1; then
-            rmo_probe_total=$(echo "$probe_data" | jq '.data.result | length' 2>/dev/null || echo "0")
+            rmo_probe_total=$(echo "$probe_data" | jq_int '.data.result | length')
             rmo_probe_total=$(echo "$rmo_probe_total" | tr -d '[:space:]')
 
             # Extract endpoint names from probe_url for display
@@ -4131,7 +4138,7 @@ EOF
             }] | map("\(.name)=\(.status)") | join(", ")' 2>/dev/null)
 
             # Find probes with success=0 (currently failing)
-            rmo_probe_failing=$(echo "$probe_data" | jq '[.data.result[] | select(.value[1] == "0")] | length' 2>/dev/null || echo "0")
+            rmo_probe_failing=$(echo "$probe_data" | jq_int '[.data.result[] | select(.value[1] == "0")] | length')
             rmo_probe_failing=$(echo "$rmo_probe_failing" | tr -d '[:space:]')
             rmo_probe_failing_targets=$(echo "$probe_data" | jq -r '[.data.result[] | select(.value[1] == "0") | if .metric.probe_url then (if (.metric.probe_url | test("console")) then "console" elif (.metric.probe_url | test("api|livez")) then "api" else .metric.probe_url end) else "unknown" end] | join(", ")' 2>/dev/null)
 
@@ -4296,13 +4303,13 @@ EOF
     pr_refs=""
     if [ "$rmo_pr_status" != "SKIP" ] && [ -n "${routemonitors:-}" ]; then
         pr_refs=$(echo "$routemonitors" | jq -r '.items[] | select(.spec.skipPrometheusRule != true) | select(.status.prometheusRuleRef.name != null and .status.prometheusRuleRef.name != "") | "\(.status.prometheusRuleRef.namespace)/\(.status.prometheusRuleRef.name)"' 2>/dev/null)
-        rmo_pr_expected=$(echo "$routemonitors" | jq '[.items[] | select(.spec.skipPrometheusRule != true)] | length' 2>/dev/null || echo "0")
+        rmo_pr_expected=$(echo "$routemonitors" | jq_int '[.items[] | select(.spec.skipPrometheusRule != true)] | length')
         rmo_pr_expected=$(echo "$rmo_pr_expected" | tr -d '[:space:]')
     fi
     if [ -n "${clusterurlmonitors:-}" ]; then
         cum_refs=$(echo "$clusterurlmonitors" | jq -r '.items[] | select(.spec.skipPrometheusRule != true) | select(.status.prometheusRuleRef.name != null and .status.prometheusRuleRef.name != "") | "\(.status.prometheusRuleRef.namespace)/\(.status.prometheusRuleRef.name)"' 2>/dev/null)
         [ -n "$cum_refs" ] && pr_refs="${pr_refs}${pr_refs:+$'\n'}${cum_refs}"
-        cum_expected=$(echo "$clusterurlmonitors" | jq '[.items[] | select(.spec.skipPrometheusRule != true)] | length' 2>/dev/null || echo "0")
+        cum_expected=$(echo "$clusterurlmonitors" | jq_int '[.items[] | select(.spec.skipPrometheusRule != true)] | length')
         cum_expected=$(echo "$cum_expected" | tr -d '[:space:]')
         rmo_pr_expected=$(( ${rmo_pr_expected:-0} + ${cum_expected:-0} ))
     fi
@@ -4500,7 +4507,7 @@ EOF
         _run_oc "Get HostedControlPlane CRs" oc get hostedcontrolplane -A -o json
         hcp_list="$__oc_out"
         if [ -n "$hcp_list" ] && echo "$hcp_list" | jq -e '.items[0]' >/dev/null 2>&1; then
-            hcp_count=$(echo "$hcp_list" | jq '.items | length' 2>/dev/null || echo "0")
+            hcp_count=$(echo "$hcp_list" | jq_int '.items | length')
             hcp_count=$(echo "$hcp_count" | tr -d '[:space:]')
 
             if [ "$hcp_count" -gt 0 ]; then
@@ -4570,7 +4577,7 @@ EOF
                 # Check for RouteMonitors with errors
                 rm_with_errors=0
                 if [ -n "${routemonitors:-}" ]; then
-                    rm_with_errors=$(echo "$routemonitors" | jq '[.items[] | select(.metadata.namespace != "openshift-route-monitor-operator") | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null || echo "0")
+                    rm_with_errors=$(echo "$routemonitors" | jq_int '[.items[] | select(.metadata.namespace != "openshift-route-monitor-operator") | select(.status.errorStatus != null and .status.errorStatus != "")] | length')
                     rm_with_errors=$(echo "$rm_with_errors" | tr -d '[:space:]')
                     if [ "${rm_with_errors:-0}" -gt 0 ]; then
                         echo "  ⚠ $rm_with_errors HCP RouteMonitor(s) have errors"
@@ -5518,7 +5525,7 @@ if [ -n "$pod_name" ]; then
         ] | sort_by(.timestamp)
     ' 2>/dev/null || echo "[]")
 
-    restart_count=$(echo "$restart_events" | jq 'length' 2>/dev/null || echo "0")
+    restart_count=$(echo "$restart_events" | jq_int 'length')
     echo "  Found $restart_count restart events"
 fi
 
@@ -5555,7 +5562,7 @@ version_events=$(echo "$replicasets" | jq -c '
     ] | sort_by(.timestamp)
 ' 2>/dev/null || echo "[]")
 
-version_count=$(echo "$version_events" | jq 'length' 2>/dev/null || echo "0")
+version_count=$(echo "$version_events" | jq_int 'length')
 echo "  Found $version_count version change events"
 
 echo ""
