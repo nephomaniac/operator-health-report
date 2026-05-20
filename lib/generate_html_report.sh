@@ -1561,30 +1561,36 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                                         '<table style="width:100%;border-collapse:collapse;font-size:0.85em;margin-top:4px;">' +
                                         '<thead><tr style="border-bottom:1px solid #ddd;">' +
                                         '<th style="text-align:left;padding:3px 6px;">Metric</th>' +
-                                        '<th style="text-align:left;padding:3px 6px;">Type</th>' +
                                         '<th style="text-align:left;padding:3px 6px;">Status</th>' +
                                         '<th style="text-align:left;padding:3px 6px;">Value</th>' +
-                                        '<th style="text-align:left;padding:3px 6px;">Condition</th>' +
+                                        '<th style="text-align:left;padding:3px 6px;">Trigger Resource</th>' +
+                                        '<th style="text-align:left;padding:3px 6px;">Assessment</th>' +
                                         '</tr></thead><tbody>' +
                                         value.map(m => {
                                             const statusIcon = m.status === 'found' ? '✓' : m.status === 'absent_expected' ? 'ℹ' : '✗';
                                             const statusColor = m.status === 'found' ? '#28a745' : m.status === 'absent_expected' ? '#6c757d' : '#dc3545';
-                                            const typeColor = m.type === 'required' ? '#667eea' : '#f5c542';
-                                            const condText = m.type === 'required' ? '—' : (m.condition_met === 'true' ? m.condition + ' ✓' : m.condition + ' ✗');
+                                            const triggerIcon = m.trigger_present === 'true' ? '✓' : '✗';
+                                            const triggerColor = m.trigger_present === 'true' ? '#28a745' : '#6c757d';
+                                            const trigger = m.trigger || m.condition || '—';
+                                            let assessment = '';
+                                            if (m.status === 'found') assessment = '<span style="color:#28a745;">Healthy</span>';
+                                            else if (m.status === 'absent_expected') assessment = '<span style="color:#6c757d;">Expected — trigger not present</span>';
+                                            else if (m.status === 'MISSING') assessment = '<span style="color:#dc3545;">OME error — trigger present but metric absent (controller may not have reconciled)</span>';
+                                            else assessment = '<span style="color:#f39c12;">Unknown</span>';
                                             return '<tr style="border-bottom:1px solid #f0f0f0;">' +
                                                 '<td style="padding:3px 6px;font-family:var(--font-mono);">' + m.name + '</td>' +
-                                                '<td style="padding:3px 6px;"><span style="color:' + typeColor + ';font-size:0.85em;">' + m.type + '</span></td>' +
                                                 '<td style="padding:3px 6px;color:' + statusColor + ';">' + statusIcon + ' ' + m.status + '</td>' +
                                                 '<td style="padding:3px 6px;font-family:var(--font-mono);">' + (m.value || '—') + '</td>' +
-                                                '<td style="padding:3px 6px;font-size:0.85em;color:#666;">' + condText + '</td>' +
+                                                '<td style="padding:3px 6px;font-size:0.85em;"><span style="color:' + triggerColor + ';">' + triggerIcon + '</span> ' + trigger + '</td>' +
+                                                '<td style="padding:3px 6px;font-size:0.85em;">' + assessment + '</td>' +
                                             '</tr>';
                                         }).join('') +
                                         '</tbody></table></div></div>';
                                 }
 
-                                // Custom rendering for preconditions
-                                if (key === 'preconditions' && typeof value === 'object') {
-                                    return '<div class="detail-item" style="grid-column: 1/-1;"><span class="detail-label">Preconditions</span><div>' +
+                                // Custom rendering for triggers (replaces preconditions)
+                                if ((key === 'triggers' || key === 'preconditions') && typeof value === 'object') {
+                                    return '<div class="detail-item" style="grid-column: 1/-1;"><span class="detail-label">Trigger Resources</span><div>' +
                                         Object.entries(value).map(([k, v]) => {
                                             const icon = v === true ? '✓' : '✗';
                                             const color = v === true ? '#28a745' : '#6c757d';

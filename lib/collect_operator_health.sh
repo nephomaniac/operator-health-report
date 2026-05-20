@@ -5196,7 +5196,17 @@ if [[ "$OPERATOR_NAME" == *"osd-metrics-exporter"* ]]; then
     if [ "$ome_up" = "1" ]; then
         echo "  ✓ Prometheus is scraping OME (up=1)"
 
-        # Check preconditions for conditional metrics
+        # Check trigger resource conditions for each metric
+        _run_oc_optional "Check Proxy CR" oc get proxy cluster
+        has_proxy=$([ $__oc_rc -eq 0 ] && echo "true" || echo "false")
+        _run_oc_optional "Check cluster-admins Group" oc get group cluster-admins
+        has_admin_group=$([ $__oc_rc -eq 0 ] && echo "true" || echo "false")
+        _run_oc_optional "Check pull-secret" oc get secret pull-secret -n openshift-config
+        has_pull_secret=$([ $__oc_rc -eq 0 ] && echo "true" || echo "false")
+        _run_oc_optional "Check limited-support ConfigMap" oc get configmap limited-support -n openshift-osd-metrics
+        has_limited_support_cm=$([ $__oc_rc -eq 0 ] && echo "true" || echo "false")
+        _run_oc_optional "Check OAuth CR" oc get oauth cluster
+        has_oauth=$([ $__oc_rc -eq 0 ] && echo "true" || echo "false")
         _run_oc_optional "Check user-ca-bundle ConfigMap" oc get configmap user-ca-bundle -n openshift-config
         has_ca_bundle=$([ $__oc_rc -eq 0 ] && echo "true" || echo "false")
         _run_oc_optional "Check CPMS CRD" oc get crd controlplanemachinesets.machine.openshift.io
@@ -5204,17 +5214,14 @@ if [[ "$OPERATOR_NAME" == *"osd-metrics-exporter"* ]]; then
 
         # Per-metric structured check
         declare -a ome_metric_results=()
-        ome_required_ok=0
-        ome_required_fail=0
-        ome_conditional_ok=0
-        ome_conditional_expected_absent=0
-        ome_conditional_unexpected=0
+        ome_metrics_ok=0
+        ome_metrics_fail=0
+        ome_metrics_expected_absent=0
 
         check_ome_metric() {
             local _name="$1"
-            local _type="$2"          # required | conditional
-            local _condition="$3"     # human-readable precondition
-            local _condition_met="$4" # true | false | n/a
+            local _condition="$2"     # human-readable trigger description
+            local _condition_met="$3" # true | false
 
             _exec_or_replay "Thanos OME: $_name" ocm backplane elevate "${REASON}" -- exec -n openshift-monitoring deployment/thanos-querier -c thanos-query -- \
                 wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf '%s{name="osd_exporter"}' "$_name" | jq -sRr @uri)"
@@ -5231,63 +5238,45 @@ if [[ "$OPERATOR_NAME" == *"osd-metrics-exporter"* ]]; then
                 _status="found"
             fi
 
-            # Determine outcome
-            if [ "$_type" = "required" ]; then
-                if [ "$_found" = true ]; then
-                    ome_required_ok=$((ome_required_ok + 1))
-                    echo "  ✓ $_name: $_value"
-                else
-                    ome_required_fail=$((ome_required_fail + 1))
-                    _status="MISSING"
-                    echo "  ✗ $_name: MISSING (required)"
-                fi
+            if [ "$_found" = true ]; then
+                ome_metrics_ok=$((ome_metrics_ok + 1))
+                echo "  ✓ $_name: $_value"
+            elif [ "$_condition_met" = "true" ]; then
+                ome_metrics_fail=$((ome_metrics_fail + 1))
+                _status="MISSING"
+                echo "  ✗ $_name: MISSING — trigger exists ($_condition) but metric absent"
             else
-                if [ "$_found" = true ]; then
-                    ome_conditional_ok=$((ome_conditional_ok + 1))
-                    echo "  ✓ $_name: $_value (conditional — $_condition)"
-                elif [ "$_condition_met" = "true" ]; then
-                    ome_conditional_unexpected=$((ome_conditional_unexpected + 1))
-                    _status="MISSING_UNEXPECTED"
-                    echo "  ✗ $_name: MISSING but condition met ($_condition) — OME should emit this"
-                else
-                    ome_conditional_expected_absent=$((ome_conditional_expected_absent + 1))
-                    _status="absent_expected"
-                    echo "  ℹ $_name: absent (${_condition} not met — expected)"
-                fi
+                ome_metrics_expected_absent=$((ome_metrics_expected_absent + 1))
+                _status="absent_expected"
+                echo "  ℹ $_name: absent — trigger not present ($_condition)"
             fi
 
-            ome_metric_results+=("{\"name\":\"$_name\",\"type\":\"$_type\",\"status\":\"$_status\",\"value\":\"$_value\",\"condition\":\"$(echo "$_condition" | sed 's/"/\\"/g')\",\"condition_met\":\"$_condition_met\",\"labels\":${_labels:-[]}}")
+            ome_metric_results+=("{\"name\":\"$_name\",\"status\":\"$_status\",\"value\":\"$_value\",\"trigger\":\"$(echo "$_condition" | sed 's/"/\\"/g')\",\"trigger_present\":\"$_condition_met\",\"labels\":${_labels:-[]}}")
         }
 
-        # Required metrics — always emitted
-        check_ome_metric "identity_provider" "required" "always" "n/a"
-        check_ome_metric "cluster_admin_enabled" "required" "always" "n/a"
-        check_ome_metric "limited_support_enabled" "required" "always" "n/a"
-        check_ome_metric "cluster_proxy" "required" "always" "n/a"
-        check_ome_metric "cluster_id" "required" "always" "n/a"
-        check_ome_metric "pull_secret_valid" "required" "always" "n/a"
-
-        # Conditional metrics — depend on cluster config
-        check_ome_metric "cluster_proxy_ca_valid" "conditional" "user-ca-bundle ConfigMap in openshift-config" "$has_ca_bundle"
-        check_ome_metric "cluster_proxy_ca_expiry_timestamp" "conditional" "user-ca-bundle ConfigMap in openshift-config" "$has_ca_bundle"
-        check_ome_metric "cpms_enabled" "conditional" "ControlPlaneMachineSet CRD exists" "$has_cpms_crd"
+        # Each metric with its trigger resource
+        check_ome_metric "identity_provider" "OAuth CR 'cluster'" "$has_oauth"
+        check_ome_metric "cluster_admin_enabled" "Group 'cluster-admins'" "$has_admin_group"
+        check_ome_metric "limited_support_enabled" "ConfigMap 'limited-support' in openshift-osd-metrics" "$has_limited_support_cm"
+        check_ome_metric "cluster_proxy" "Proxy CR 'cluster'" "$has_proxy"
+        check_ome_metric "cluster_id" "Proxy CR 'cluster' (set during proxy reconciliation)" "$has_proxy"
+        check_ome_metric "pull_secret_valid" "Secret 'pull-secret' in openshift-config" "$has_pull_secret"
+        check_ome_metric "cluster_proxy_ca_valid" "ConfigMap 'user-ca-bundle' in openshift-config" "$has_ca_bundle"
+        check_ome_metric "cluster_proxy_ca_expiry_timestamp" "ConfigMap 'user-ca-bundle' in openshift-config" "$has_ca_bundle"
+        check_ome_metric "cpms_enabled" "ControlPlaneMachineSet CRD" "$has_cpms_crd"
 
         # Build metrics JSON array
         ome_metrics_json=$(printf '%s\n' "${ome_metric_results[@]}" | jq -s '.' 2>/dev/null || echo "[]")
 
-        total_required=$(echo "$ome_required_metrics" | wc -w | tr -d ' ')
-        if [ "$ome_required_fail" -gt 0 ]; then
+        total_checked=$((ome_metrics_ok + ome_metrics_fail + ome_metrics_expected_absent))
+        if [ "$ome_metrics_fail" -gt 0 ]; then
             ome_metrics_status="WARNING"
-            ome_metrics_message="${ome_required_fail} required metric(s) missing"
-            warning_count=$((warning_count + 1))
-        elif [ "$ome_conditional_unexpected" -gt 0 ]; then
-            ome_metrics_status="WARNING"
-            ome_metrics_message="All required metrics present but ${ome_conditional_unexpected} conditional metric(s) missing despite conditions being met"
+            ome_metrics_message="${ome_metrics_fail} metric(s) missing despite trigger resource being present — OME controller may not have reconciled"
             warning_count=$((warning_count + 1))
         else
-            ome_metrics_message="All ${ome_required_ok} required metrics present, ${ome_conditional_ok} conditional active, ${ome_conditional_expected_absent} conditional absent (expected)"
+            ome_metrics_message="${ome_metrics_ok} metric(s) active, ${ome_metrics_expected_absent} absent (trigger not present — expected)"
         fi
-        ome_metrics_found=$((ome_required_ok + ome_conditional_ok))
+        ome_metrics_found=$ome_metrics_ok
     else
         ome_metrics_status="FAIL"
         ome_metrics_message="Prometheus is NOT scraping OME (up metric missing or 0) — ServiceMonitor may be missing or misconfigured"
@@ -5303,14 +5292,17 @@ if [[ "$OPERATOR_NAME" == *"osd-metrics-exporter"* ]]; then
   "message": "$ome_metrics_message",
   "details": {
     "prometheus_scraping": $([ "$ome_up" = "1" ] && echo "true" || echo "false"),
-    "required_found": ${ome_required_ok:-0},
-    "required_missing": ${ome_required_fail:-0},
-    "conditional_active": ${ome_conditional_ok:-0},
-    "conditional_expected_absent": ${ome_conditional_expected_absent:-0},
-    "conditional_unexpected_missing": ${ome_conditional_unexpected:-0},
-    "preconditions": {
-      "user_ca_bundle_exists": ${has_ca_bundle:-false},
-      "cpms_crd_exists": ${has_cpms_crd:-false}
+    "metrics_active": ${ome_metrics_ok:-0},
+    "metrics_missing_with_trigger": ${ome_metrics_fail:-0},
+    "metrics_absent_expected": ${ome_metrics_expected_absent:-0},
+    "triggers": {
+      "proxy_cr": ${has_proxy:-false},
+      "cluster_admins_group": ${has_admin_group:-false},
+      "pull_secret": ${has_pull_secret:-false},
+      "limited_support_cm": ${has_limited_support_cm:-false},
+      "oauth_cr": ${has_oauth:-false},
+      "user_ca_bundle": ${has_ca_bundle:-false},
+      "cpms_crd": ${has_cpms_crd:-false}
     },
     "metrics": ${ome_metrics_json:-[]}
   }
