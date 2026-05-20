@@ -780,7 +780,7 @@ for i in "${!clusters[@]}"; do
     set +e  # Temporarily disable exit on error for this command
     login_output=$(ocm backplane login "$cluster_id" 2>&1)
     login_status=$?
-    set -e  # Re-enable if needed (though we don't use -e globally anymore)
+    # Note: NOT re-enabling set -e — the script handles errors per-cluster gracefully
 
     # Display the login output
     echo "$login_output"
@@ -1060,7 +1060,7 @@ EOF
         done
     fi
 
-    set -e  # Re-enable if needed
+    # Note: NOT re-enabling set -e — the script handles errors per-cluster gracefully
 
     if [ $collection_status -eq 0 ]; then
         echo ""
