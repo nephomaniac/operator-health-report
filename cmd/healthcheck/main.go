@@ -167,7 +167,7 @@ func main() {
 
 	// Output file
 	if outputFile == "" {
-		outputFile = fmt.Sprintf("health_%s.json", time.Now().Format("20060102_150405"))
+		outputFile = fmt.Sprintf("health_report_%s.json", time.Now().Format("2006-01-02_1504"))
 	}
 
 	// Fetch SAAS targets for all operators (metadata for the HTML report)
