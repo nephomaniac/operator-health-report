@@ -22,15 +22,16 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 // Target represents a SAAS deployment target
 type Target struct {
-	Name      string   `json:"target"`
-	Version   string   `json:"version"`
-	ImageTag  string   `json:"image_tag"`
-	SaasFile  string   `json:"saas_file"`
-	Method    string   `json:"method"`    // PKO or OLM
-	Auto      bool     `json:"auto"`      // auto-promotion enabled
-	SoakDays  *int     `json:"soak_days"` // soak period before promotion
-	Publish   []string `json:"publish"`   // channels this target publishes to
-	Subscribe []string `json:"subscribe"` // channels this target subscribes to
+	Name        string   `json:"target"`
+	Version     string   `json:"version"`
+	ImageTag    string   `json:"image_tag"`
+	SaasFile    string   `json:"saas_file"`
+	Method      string   `json:"method"`       // PKO or OLM
+	Auto        bool     `json:"auto"`          // auto-promotion enabled
+	SoakDays    *int     `json:"soak_days"`     // soak period before promotion
+	Publish     []string `json:"publish"`       // channels this target publishes to
+	Subscribe   []string `json:"subscribe"`     // channels this target subscribes to
+	HiveCluster string   `json:"hive_cluster"`  // hive cluster name from namespace ref
 }
 
 // saasFile is the YAML structure of an app-interface SAAS file
@@ -51,6 +52,11 @@ type saasTarget struct {
 	Disable    bool              `yaml:"disable"`
 	Promotion  saasPromotion     `yaml:"promotion"`
 	Parameters map[string]string `yaml:"parameters"`
+	Namespace  saasNamespace     `yaml:"namespace"`
+}
+
+type saasNamespace struct {
+	Ref string `yaml:"$ref"`
 }
 
 type saasPromotion struct {
@@ -216,12 +222,13 @@ func fetchTargets(ctx context.Context, saasFileName string) ([]Target, error) {
 			}
 
 			t := Target{
-				Name:      st.Name,
-				Version:   st.Ref,
-				Auto:      st.Promotion.Auto,
-				SoakDays:  st.Promotion.SoakDays,
-				Publish:   st.Promotion.Publish,
-				Subscribe: st.Promotion.Subscribe,
+				Name:        st.Name,
+				Version:     st.Ref,
+				Auto:        st.Promotion.Auto,
+				SoakDays:    st.Promotion.SoakDays,
+				Publish:     st.Promotion.Publish,
+				Subscribe:   st.Promotion.Subscribe,
+				HiveCluster: extractHiveFromRef(st.Namespace.Ref),
 			}
 
 			// Resolve image tag from Quay
@@ -292,6 +299,21 @@ func resolveImageTag(ref string, tags []quayTag) string {
 	}
 
 	return "sha:" + shortCommit
+}
+
+// extractHiveFromRef extracts the hive cluster name from a namespace $ref path
+// e.g., "/services/osd-operators/namespaces/hives02ue1/cluster-scope.yml" → "hives02ue1"
+func extractHiveFromRef(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	parts := strings.Split(ref, "/")
+	for i, p := range parts {
+		if p == "namespaces" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 // extractNumber returns the first numeric sequence from a string

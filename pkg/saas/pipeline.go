@@ -13,19 +13,20 @@ import (
 
 // PipelineNode represents one target in the promotion chain
 type PipelineNode struct {
-	Name       string   `json:"name"`
-	Type       string   `json:"type"`       // "deploy" or "e2e"
-	Env        string   `json:"env"`        // "integration", "stage", "prod-canary", "prod-2", "prod-3"
-	Ref        string   `json:"ref"`
-	ImageTag   string   `json:"image_tag"`
-	Method     string   `json:"method"`     // PKO, OLM, or e2e
-	Auto       bool     `json:"auto"`
-	SoakDays   *int     `json:"soak_days"`
-	Publish    []string `json:"publish"`
-	Subscribe  []string `json:"subscribe"`
-	SaasFile   string   `json:"saas_file"`
-	TestImage  string   `json:"test_image,omitempty"`
-	TestConfig string   `json:"test_config,omitempty"`
+	Name        string   `json:"name"`
+	Type        string   `json:"type"`         // "deploy" or "e2e"
+	Env         string   `json:"env"`          // "integration", "stage", "prod-canary", "prod-2", "prod-3"
+	Ref         string   `json:"ref"`
+	ImageTag    string   `json:"image_tag"`
+	Method      string   `json:"method"`       // PKO, OLM, or e2e
+	Auto        bool     `json:"auto"`
+	SoakDays    *int     `json:"soak_days"`
+	Publish     []string `json:"publish"`
+	Subscribe   []string `json:"subscribe"`
+	SaasFile    string   `json:"saas_file"`
+	HiveCluster string   `json:"hive_cluster,omitempty"`
+	TestImage   string   `json:"test_image,omitempty"`
+	TestConfig  string   `json:"test_config,omitempty"`
 }
 
 // PipelineEdge represents a channel connection between two nodes
@@ -63,17 +64,18 @@ func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string) (
 		if err == nil {
 			for _, t := range targets {
 				p.Nodes = append(p.Nodes, PipelineNode{
-					Name:      t.Name,
-					Type:      "deploy",
-					Env:       classifyEnv(t.Name),
-					Ref:       t.Version,
-					ImageTag:  t.ImageTag,
-					Method:    "PKO",
-					Auto:      t.Auto,
-					SoakDays:  t.SoakDays,
-					Publish:   t.Publish,
-					Subscribe: t.Subscribe,
-					SaasFile:  pkoSaas,
+					Name:        t.Name,
+					Type:        "deploy",
+					Env:         classifyEnv(t.Name),
+					Ref:         t.Version,
+					ImageTag:    t.ImageTag,
+					Method:      "PKO",
+					Auto:        t.Auto,
+					SoakDays:    t.SoakDays,
+					Publish:     t.Publish,
+					Subscribe:   t.Subscribe,
+					SaasFile:    pkoSaas,
+					HiveCluster: t.HiveCluster,
 				})
 			}
 		}
@@ -84,17 +86,18 @@ func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string) (
 		if err == nil {
 			for _, t := range targets {
 				p.Nodes = append(p.Nodes, PipelineNode{
-					Name:      t.Name,
-					Type:      "deploy",
-					Env:       classifyEnv(t.Name),
-					Ref:       t.Version,
-					ImageTag:  t.ImageTag,
-					Method:    "OLM",
-					Auto:      t.Auto,
-					SoakDays:  t.SoakDays,
-					Publish:   t.Publish,
-					Subscribe: t.Subscribe,
-					SaasFile:  olmSaas,
+					Name:        t.Name,
+					Type:        "deploy",
+					Env:         classifyEnv(t.Name),
+					Ref:         t.Version,
+					ImageTag:    t.ImageTag,
+					Method:      "OLM",
+					Auto:        t.Auto,
+					SoakDays:    t.SoakDays,
+					Publish:     t.Publish,
+					Subscribe:   t.Subscribe,
+					SaasFile:    olmSaas,
+					HiveCluster: t.HiveCluster,
 				})
 			}
 		}

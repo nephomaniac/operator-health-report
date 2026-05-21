@@ -2186,7 +2186,8 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         const autoBadge = t.auto ? '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;background:#5eecc030;color:#5eecc0;">auto</span>' : '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;background:rgba(255,255,255,0.06);color:var(--text-muted);">manual</span>';
                         const channels = (t.subscribe && t.subscribe.length > 0) ? t.subscribe.map(ch => ch.replace(/.*channel-/, '')).join(', ') : '—';
 
-                        return '<tr style="opacity:' + rowOpacity + ';' + rowBg + '">' +
+                        const pipelineNodeId = 'pipeline-node-' + (t.target || '').replace(/[^a-z0-9]/gi, '-');
+                        return '<tr style="opacity:' + rowOpacity + ';' + rowBg + 'cursor:pointer;" onclick="var el=document.getElementById(\'' + pipelineNodeId + '\'); if(el){el.scrollIntoView({behavior:\'smooth\',block:\'center\'}); el.style.boxShadow=\'0 0 12px var(--accent)\'; setTimeout(function(){el.style.boxShadow=\'\';},2000); var d=document.getElementById(\'' + pipelineNodeId + '-detail\'); if(d) d.style.display=\'block\';}" title="Click to view in pipeline">' +
                             '<td style="padding:4px 10px;">' + (t.target || '') + envBadge + '</td>' +
                             '<td style="padding:4px 10px;"><span style="display:inline-block;background:' + methodColor + ';color:#111;font-size:0.75em;padding:1px 6px;border-radius:3px;font-weight:600;">' + (t.method || '?') + '</span></td>' +
                             '<td style="padding:4px 10px;font-family:var(--font-mono);font-size:0.85em;">' + (t.image_tag || t.version || '') + '</td>' +
@@ -2218,10 +2219,15 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     pipelineHTML = renderPipelineDiagram(pipeline, opData);
                 }
 
-                content.innerHTML = `<div class="content">${targetSummaryHTML}${pipelineHTML}<div class="clusters-table-wrapper"><table class="clusters-table"><thead id="header-${op}"></thead><tbody id="body-${op}"></tbody></table></div></div>`;
+                const clusterTableHTML = opData.length > 0
+                    ? `<div class="clusters-table-wrapper"><table class="clusters-table"><thead id="header-${op}"></thead><tbody id="body-${op}"></tbody></table></div>`
+                    : '';
+                content.innerHTML = `<div class="content">${targetSummaryHTML}${pipelineHTML}${clusterTableHTML}</div>`;
                 contentsContainer.appendChild(content);
 
-                renderOperatorTable(opData, document.getElementById(`header-${op}`), document.getElementById(`body-${op}`), op);
+                if (opData.length > 0) {
+                    renderOperatorTable(opData, document.getElementById(`header-${op}`), document.getElementById(`body-${op}`), op);
+                }
             });
         }
 
@@ -2314,6 +2320,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     const shortRef = fullRef.length > 12 ? fullRef.substring(0, 12) + '…' : fullRef;
                     html += `<div id="${nodeId}-detail" onclick="event.stopPropagation(); this.style.display='none'" style="display:none;position:relative;z-index:10;border:1px solid var(--accent);border-radius:8px;padding:10px;margin:4px -20px;background:var(--bg-primary);width:180px;font-size:0.72em;box-shadow:0 4px 20px rgba(0,0,0,0.5);cursor:pointer;" title="Click to close">`;
                     html += `<div style="font-weight:700;color:var(--accent);margin-bottom:6px;border-bottom:1px solid var(--border-light);padding-bottom:4px;">Target Details</div>`;
+                    if (node.hive_cluster) html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Hive:</span> <strong>${node.hive_cluster}</strong></div>`;
                     html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Ref:</span> <code style="font-size:0.9em;">${shortRef}</code></div>`;
                     if (node.image_tag) html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Image:</span> <code style="font-size:0.9em;">${node.image_tag}</code></div>`;
                     html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">SAAS:</span> ${node.saas_file || '—'}</div>`;
