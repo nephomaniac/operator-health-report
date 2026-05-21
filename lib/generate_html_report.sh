@@ -590,7 +590,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             healthData.filter(e => e.type === 'saas_targets').forEach(meta => {
                 saasTargets[meta.operator_name] = meta.targets || [];
             });
-            healthData = healthData.filter(e => e.type !== 'saas_targets');
+            healthData = healthData.filter(e => e.type !== 'saas_targets' && e.type !== 'skipped_cluster');
         }
 
         // Extract and display script version from first cluster's data

@@ -247,8 +247,18 @@ func main() {
 		})
 	}
 
+	// Track skipped and failed clusters for the summary
+	type skippedCluster struct {
+		Type      string `json:"type"`
+		ClusterID string `json:"cluster_id"`
+		Name      string `json:"cluster_name"`
+		Reason    string `json:"reason"`
+		Status    string `json:"skip_status"` // "limited_support", "not_ready", "connection_failed", "metadata_failed"
+	}
+
 	// Process clusters — concurrently up to --parallel limit
 	var allOutputs []checks.ClusterOutput
+	var skippedClusters []skippedCluster
 	var mu sync.Mutex
 	sem := make(chan struct{}, parallel)
 	var clusterWg sync.WaitGroup
@@ -267,15 +277,33 @@ func main() {
 			meta, metaErr := ocmClient.GetClusterMetadata(cid)
 			if metaErr != nil {
 				fmt.Fprintf(os.Stderr, "\n[%d/%d] ✗ %s: failed to fetch metadata: %v\n", idx+1, len(clusterIDs), cid, metaErr)
+				mu.Lock()
+				skippedClusters = append(skippedClusters, skippedCluster{
+					Type: "skipped_cluster", ClusterID: cid, Name: cid,
+					Reason: fmt.Sprintf("Failed to fetch metadata: %v", metaErr), Status: "metadata_failed",
+				})
+				mu.Unlock()
 				return
 			}
 
 			if meta.State != "ready" {
 				fmt.Fprintf(os.Stderr, "\n[%d/%d] ⏭ %s (%s): skipping — state is %s\n", idx+1, len(clusterIDs), meta.Name, cid, meta.State)
+				mu.Lock()
+				skippedClusters = append(skippedClusters, skippedCluster{
+					Type: "skipped_cluster", ClusterID: cid, Name: meta.Name,
+					Reason: "Cluster state: " + meta.State, Status: "not_ready",
+				})
+				mu.Unlock()
 				return
 			}
 			if meta.LimitedSupport {
 				fmt.Fprintf(os.Stderr, "\n[%d/%d] ⏭ %s (%s): skipping — limited support\n", idx+1, len(clusterIDs), meta.Name, cid)
+				mu.Lock()
+				skippedClusters = append(skippedClusters, skippedCluster{
+					Type: "skipped_cluster", ClusterID: cid, Name: meta.Name,
+					Reason: "Limited support", Status: "limited_support",
+				})
+				mu.Unlock()
 				return
 			}
 
@@ -284,6 +312,12 @@ func main() {
 			client, err := kube.ConnectToClusterWithConn(ctx, cid, reason, noElevate, ocmClient.Conn())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ Failed to connect to %s: %v\n", meta.Name, err)
+				mu.Lock()
+				skippedClusters = append(skippedClusters, skippedCluster{
+					Type: "skipped_cluster", ClusterID: cid, Name: meta.Name,
+					Reason: fmt.Sprintf("Connection failed: %v", err), Status: "connection_failed",
+				})
+				mu.Unlock()
 				return
 			}
 			defer client.Disconnect()
@@ -372,10 +406,13 @@ func main() {
 	}
 	clusterWg.Wait()
 
-	// Write JSON output — mixed array of saas_targets metadata + cluster data
+	// Write JSON output — mixed array of saas_targets metadata + skipped clusters + cluster data
 	var combined []any
 	for _, meta := range saasMetadata {
 		combined = append(combined, meta)
+	}
+	for _, sc := range skippedClusters {
+		combined = append(combined, sc)
 	}
 	for _, out := range allOutputs {
 		combined = append(combined, out)

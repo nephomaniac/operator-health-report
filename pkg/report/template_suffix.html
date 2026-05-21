@@ -11,7 +11,7 @@
             healthData.filter(e => e.type === 'saas_targets').forEach(meta => {
                 saasTargets[meta.operator_name] = meta.targets || [];
             });
-            healthData = healthData.filter(e => e.type !== 'saas_targets');
+            healthData = healthData.filter(e => e.type !== 'saas_targets' && e.type !== 'skipped_cluster');
         }
 
         // Extract and display script version from first cluster's data
@@ -1203,25 +1203,37 @@
             const summaryEl = document.getElementById('summaryOverview');
             if (!summaryEl || !healthData || healthData.length === 0) return;
 
+            // Count skipped clusters from the raw data
+            const allEntries = Array.isArray(healthDataRaw) ? (Array.isArray(healthDataRaw[0]) ? healthDataRaw[0] : healthDataRaw) : [];
+            let skippedLimitedSupport = 0, skippedNotReady = 0, skippedConnectionFailed = 0, skippedAccessDenied = 0;
+            allEntries.filter(e => e.type === 'skipped_cluster').forEach(s => {
+                switch (s.skip_status) {
+                    case 'limited_support': skippedLimitedSupport++; break;
+                    case 'not_ready': skippedNotReady++; break;
+                    case 'connection_failed': skippedConnectionFailed++; break;
+                    case 'metadata_failed': skippedConnectionFailed++; break;
+                }
+            });
+
             // Count unique clusters, aggregate worst status per cluster across operators
-            // Derive from actual check results — any FAIL check = CRITICAL, any WARNING = WARNING
             const clusterStatuses = {};
-            const priority = { 'CRITICAL': 4, 'NO_ACCESS': 3, 'WARNING': 2, 'HEALTHY': 1, 'UNKNOWN': 0 };
+            const priority = { 'CRITICAL': 4, 'NO_ACCESS': 3, 'ACCESS_DENIED': 3, 'WARNING': 2, 'HEALTHY': 1, 'UNKNOWN': 0 };
             healthData.forEach(entry => {
                 if (entry.operator_name === 'unknown') return;
                 const cid = entry.cluster_id || entry.cluster_name;
                 const hasFail = (entry.health_checks || []).some(ch => ch.status === 'FAIL');
                 const hasWarn = (entry.health_checks || []).some(ch => ch.status === 'WARNING' || ch.status === 'WARN');
+                const hasAccessDenied = (entry.health_checks || []).some(ch => ch.status === 'ACCESS_DENIED');
                 const entryStatus = entry.backplane_login?.status === 'FAILED' ? 'NO_ACCESS' :
                                     hasFail ? 'CRITICAL' :
                                     hasWarn ? 'WARNING' : 'HEALTHY';
                 if (!clusterStatuses[cid] || (priority[entryStatus] || 0) > (priority[clusterStatuses[cid]] || 0)) {
                     clusterStatuses[cid] = entryStatus;
                 }
+                if (hasAccessDenied) skippedAccessDenied++;
             });
 
-            // Count clusters by status — a cluster can appear in multiple categories
-            // (e.g., both critical AND warning if it has both FAIL and WARNING checks)
+            // Count clusters by status
             let criticalCount = 0, warningCount = 0, healthyCount = 0, noAccessCount = 0;
             const clusterCheckFlags = {};
             healthData.forEach(entry => {
@@ -1241,7 +1253,9 @@
                 if (!flags.hasFail && !flags.hasWarn && !flags.noAccess) healthyCount++;
             });
 
-            const totalClusters = Object.keys(clusterStatuses).length;
+            const checkedClusters = Object.keys(clusterStatuses).length;
+            const totalSkipped = skippedLimitedSupport + skippedNotReady + skippedConnectionFailed;
+            const totalClusters = checkedClusters + totalSkipped;
 
             // CVE data for the operator image (optional)
             // To enable CVE reporting, populate this object with scan results
@@ -1272,31 +1286,40 @@
                 }
             });
 
+            const pct = (n) => totalClusters > 0 ? ((n/totalClusters)*100).toFixed(1) + '%' : '0%';
+
             summaryEl.innerHTML = '<h2>📊 Summary Overview</h2>' +
                 '<div class="stats-grid">' +
                     '<div class="stat-card">' +
                         '<div class="stat-label">Total Clusters</div>' +
                         '<div class="stat-number">' + totalClusters + '</div>' +
+                        '<div class="stat-label">' + checkedClusters + ' checked, ' + totalSkipped + ' skipped</div>' +
                     '</div>' +
                     '<div class="stat-card healthy">' +
-                        '<div class="stat-label">Healthy Clusters</div>' +
+                        '<div class="stat-label">Healthy</div>' +
                         '<div class="stat-number healthy">' + healthyCount + '</div>' +
-                        '<div class="stat-label">' + ((healthyCount/totalClusters)*100).toFixed(1) + '%</div>' +
+                        '<div class="stat-label">' + pct(healthyCount) + '</div>' +
                     '</div>' +
                     '<div class="stat-card warning">' +
-                        '<div class="stat-label">Clusters with Warnings</div>' +
+                        '<div class="stat-label">Warnings</div>' +
                         '<div class="stat-number warning">' + warningCount + '</div>' +
-                        '<div class="stat-label">' + ((warningCount/totalClusters)*100).toFixed(1) + '%</div>' +
+                        '<div class="stat-label">' + pct(warningCount) + '</div>' +
                     '</div>' +
                     '<div class="stat-card critical">' +
-                        '<div class="stat-label">Clusters with Critical</div>' +
+                        '<div class="stat-label">Critical</div>' +
                         '<div class="stat-number critical">' + criticalCount + '</div>' +
-                        '<div class="stat-label">' + ((criticalCount/totalClusters)*100).toFixed(1) + '%</div>' +
+                        '<div class="stat-label">' + pct(criticalCount) + '</div>' +
                     '</div>' +
                     '<div class="stat-card" style="border-color: var(--text-muted);">' +
-                        '<div class="stat-label">Clusters with No Access</div>' +
-                        '<div class="stat-number" style="color: var(--text-muted);">' + noAccessCount + '</div>' +
-                        '<div class="stat-label">' + ((noAccessCount/totalClusters)*100).toFixed(1) + '%</div>' +
+                        '<div class="stat-label">Skipped / Unreachable</div>' +
+                        '<div class="stat-number" style="color: var(--text-muted);">' + (totalSkipped + noAccessCount) + '</div>' +
+                        '<div style="font-size:0.75em;color:var(--text-muted);line-height:1.6;margin-top:4px;">' +
+                            (skippedLimitedSupport > 0 ? '<div>🛡 Limited Support: ' + skippedLimitedSupport + '</div>' : '') +
+                            (skippedNotReady > 0 ? '<div>⏸ Not Ready: ' + skippedNotReady + '</div>' : '') +
+                            (skippedConnectionFailed > 0 ? '<div>🔌 Connection Failed: ' + skippedConnectionFailed + '</div>' : '') +
+                            (noAccessCount > 0 ? '<div>🔒 No Access: ' + noAccessCount + '</div>' : '') +
+                            (skippedAccessDenied > 0 ? '<div>🚫 Access Denied: ' + skippedAccessDenied + '</div>' : '') +
+                        '</div>' +
                     '</div>' +
                     (totalApiErrors > 0 ?
                     '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);">' +
