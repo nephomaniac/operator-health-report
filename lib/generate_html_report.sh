@@ -1672,7 +1672,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                                     <div style="background: #f8f9fa; padding: 10px; margin-bottom: 10px; border-radius: 4px; border-left: 3px solid #667eea;">
                                         <strong>${pod.pod_name}</strong>
                                         <div style="font-size: 0.85em; margin-top: 5px;">
-                                            ${pod.containers.map(c => `
+                                            ${(pod.containers || []).map(c => `
                                                 <div style="margin-left: 15px; padding: 5px 0;">
                                                     <strong>${c.name}:</strong> ${c.restart_count} restart(s)
                                                     ${c.last_restart !== "No recent restart data" ? `

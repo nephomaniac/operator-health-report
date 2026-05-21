@@ -72,7 +72,7 @@ func checkAlertmanagerPods(ctx context.Context, cc *checks.ClusterContext) {
 		}
 
 		// Group containers per pod to match bash output format
-		var containerDetails []map[string]any
+		containerDetails := []map[string]any{}
 		for _, cs := range pod.Status.ContainerStatuses {
 			restartCount := int(cs.RestartCount)
 			totalRestarts += restartCount
