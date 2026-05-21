@@ -39,16 +39,18 @@ type saasFile struct {
 }
 
 type resourceTemplate struct {
-	Name    string       `yaml:"name"`
-	Targets []saasTarget `yaml:"targets"`
+	Name       string            `yaml:"name"`
+	Targets    []saasTarget      `yaml:"targets"`
+	Parameters map[string]string `yaml:"parameters"`
 }
 
 type saasTarget struct {
-	Name      string        `yaml:"name"`
-	Ref       string        `yaml:"ref"`
-	Delete    bool          `yaml:"delete"`
-	Disable   bool          `yaml:"disable"`
-	Promotion saasPromotion `yaml:"promotion"`
+	Name       string            `yaml:"name"`
+	Ref        string            `yaml:"ref"`
+	Delete     bool              `yaml:"delete"`
+	Disable    bool              `yaml:"disable"`
+	Promotion  saasPromotion     `yaml:"promotion"`
+	Parameters map[string]string `yaml:"parameters"`
 }
 
 type saasPromotion struct {

@@ -170,12 +170,13 @@ func main() {
 		outputFile = fmt.Sprintf("health_report_%s.json", time.Now().Format("2006-01-02_1504"))
 	}
 
-	// Fetch SAAS targets for all operators (metadata for the HTML report)
+	// Fetch SAAS targets and build promotion pipeline for all operators
 	type saasTargetMeta struct {
-		Type         string        `json:"type"`
-		OperatorName string        `json:"operator_name"`
-		OCMEnv       string        `json:"ocm_environment"`
-		Targets      []saas.Target `json:"targets"`
+		Type         string         `json:"type"`
+		OperatorName string         `json:"operator_name"`
+		OCMEnv       string         `json:"ocm_environment"`
+		Targets      []saas.Target  `json:"targets"`
+		Pipeline     *saas.Pipeline `json:"pipeline,omitempty"`
 	}
 	var saasMetadata []saasTargetMeta
 	for _, op := range opConfigs {
@@ -184,11 +185,19 @@ func main() {
 		if err == nil && len(targets) > 0 {
 			fmt.Fprintf(os.Stderr, "SAAS targets: %s — %d active targets\n", strings.ToUpper(op.ShortName), len(targets))
 		}
+
+		pipeline, pipeErr := saas.BuildPipeline(ctx, op.Name, op.PKOSaas, op.OLMSaas)
+		if pipeErr == nil && pipeline != nil {
+			fmt.Fprintf(os.Stderr, "Pipeline: %s — %d nodes, %d edges, %d stages\n",
+				strings.ToUpper(op.ShortName), len(pipeline.Nodes), len(pipeline.Edges), len(pipeline.Stages))
+		}
+
 		saasMetadata = append(saasMetadata, saasTargetMeta{
 			Type:         "saas_targets",
 			OperatorName: op.Name,
 			OCMEnv:       ocmEnv,
 			Targets:      targets,
+			Pipeline:     pipeline,
 		})
 	}
 
