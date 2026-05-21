@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -39,9 +40,11 @@ func main() {
 		noHTML       bool
 		logLevel     string
 		logDir       string
-		ocmConfig    string
-		ocmURL       string
-		listClusters string
+		ocmConfig      string
+		ocmURL         string
+		listClusters   string
+		excludePattern string
+		includePattern string
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", "", "File with cluster IDs (one per line)")
@@ -55,7 +58,9 @@ func main() {
 	flag.StringVar(&logDir, "log-dir", "", "Directory for debug log file (captures all levels)")
 	flag.StringVar(&ocmConfig, "ocm-config", "", "Path to OCM config file (default: $OCM_CONFIG or ~/.config/ocm/ocm.json)")
 	flag.StringVar(&ocmURL, "ocm-url", "", "OCM API URL override (e.g., https://api.stage.openshift.com)")
-	flag.StringVar(&listClusters, "list-clusters", "", "List clusters and exit (all, rosa, osd, hypershift)")
+	flag.StringVar(&listClusters, "list-clusters", "", "List clusters and exit (all, rosa, osd, hypershift, or custom OCM search)")
+	flag.StringVar(&excludePattern, "exclude", "", "Regex to exclude clusters by name (e.g., 'osde2e|cse2e')")
+	flag.StringVar(&includePattern, "include", "", "Regex to include only clusters matching by name")
 	flag.Parse()
 
 	// Configure logging
@@ -80,7 +85,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer ocmClient.Close()
-		if err := runListClusters(ocmClient, listClusters); err != nil {
+		if err := runListClusters(ocmClient, listClusters, excludePattern, includePattern); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -349,7 +354,7 @@ func detectOperatorVersion(ctx context.Context, client *kube.ClusterClient, op c
 	return "unknown"
 }
 
-func runListClusters(ocmClient *ocm.Client, filter string) error {
+func runListClusters(ocmClient *ocm.Client, filter, exclude, include string) error {
 	var search string
 	switch filter {
 	case "all":
@@ -364,6 +369,22 @@ func runListClusters(ocmClient *ocm.Client, filter string) error {
 		search = filter
 	}
 
+	var excludeRe, includeRe *regexp.Regexp
+	if exclude != "" {
+		var err error
+		excludeRe, err = regexp.Compile(exclude)
+		if err != nil {
+			return fmt.Errorf("invalid --exclude regex %q: %w", exclude, err)
+		}
+	}
+	if include != "" {
+		var err error
+		includeRe, err = regexp.Compile(include)
+		if err != nil {
+			return fmt.Errorf("invalid --include regex %q: %w", include, err)
+		}
+	}
+
 	conn := ocmClient.Conn()
 	resp, err := conn.ClustersMgmt().V1().Clusters().List().
 		Search(search).
@@ -375,7 +396,21 @@ func runListClusters(ocmClient *ocm.Client, filter string) error {
 
 	fmt.Fprintf(os.Stderr, "Found %d clusters (%s)\n", resp.Total(), ocmClient.Environment())
 
+	printed := 0
+	excluded := 0
+
 	resp.Items().Each(func(cluster *cmv1.Cluster) bool {
+		name := cluster.Name()
+
+		if excludeRe != nil && excludeRe.MatchString(name) {
+			excluded++
+			return true
+		}
+		if includeRe != nil && !includeRe.MatchString(name) {
+			excluded++
+			return true
+		}
+
 		hcp := "false"
 		if cluster.Hypershift().Enabled() {
 			hcp = "true"
@@ -388,8 +423,11 @@ func runListClusters(ocmClient *ocm.Client, filter string) error {
 			hcp,
 			cluster.CreationTimestamp().Format("2006-01-02T15:04:05Z"),
 		)
+		printed++
 		return true
 	})
+
+	fmt.Fprintf(os.Stderr, "Listed %d clusters (%d filtered out)\n", printed, excluded)
 
 	return nil
 }
