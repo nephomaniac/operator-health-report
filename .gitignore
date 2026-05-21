@@ -1,52 +1,99 @@
-# Operator Health Report - Git Ignore
-# Project: operator_health_report
+# Build artifacts
+/healthcheck
+*.exe
 
-# Generated output files
-*.json
-*.html
+# Go
+/vendor/
+
+# Results and test output
+results_*/
+health_*.json
+health_*.html
+*.out
 *.log
-*.csv
-*.txt
 
-# Except documentation files
-!README*.md
-!*_GUIDE.md
-!*_FIXES.md
-!VERSION_*.md
-
-# Cluster lists (may contain sensitive IDs)
-*.list
-clusters*.txt
-test*.txt
-
-# Cache and temporary files
-.health_check_cache.sh
-*_cache_*
+# Cache and temporary
+*_cache_*/
 *.tmp
 *.bak
-*.backup
-*.out
 
-# Debug files
-debug_*.log
-debug_*.html
+# Cluster lists (may contain cluster IDs)
+*.list
 
-# Test output directories
-junk/
-resource_stats/
-prod/
+# Investigation output
+*.jsonl
+*.csv
 
-# Environment configuration
-config.env
-.env
-*.local.sh
+# Symlinks to other repos
+/rhobs-synthetics-agent
+/rhobs-synthetics-api
+/route-monitor-operator
 
-# macOS
+# Scratch — one-off investigation scripts not part of the tool
+/scratch/
+/analyze_*.sh
+/check_*.sh
+/collect_ebs_*.sh
+/debug_*.sh
+/filter_*.sh
+/find_*.sh
+/get_*.sh
+!/lib/get_app_interface_saas_refs.sh
+!/lib/get_app_interface_saas_refs_with_images.sh
+/investigate_*.sh
+/map_*.sh
+/run_*.sh
+!/run.sh
+/simple_*.sh
+/test_*.sh
+/verify_*.sh
+/get-*.sh
+
+# Scratch — one-off investigation docs
+/ALERT_*.md
+/ANALYSIS_*.md
+/ARCHITECTURE.md
+/CACHING_*.md
+/CHART_*.md
+/CLUSTER_*.md
+/COMMIT_*.md
+/DEPLOYMENT_*.md
+/EBS_*.md
+/ENVIRONMENT_*.md
+/FINAL_*.md
+/FIXES.md
+/HYPERSHIFT_*.md
+/INVESTIGATION_*.md
+/KUBERNETES_*.md
+/METRICS_*.md
+/PROMETHEUS_*.md
+/PROPOSED_*.md
+/RECOMMENDED_*.md
+/RUN_ON_*.md
+
+# Scratch — one-off YAML/data artifacts
+/100-*.yaml
+/camo_*.yaml
+/cluster_*.md
+/dynatrace_*.md
+/mount_*.md
+/operator_*.md
+/canary_orgs
+/cluster_camo_list
+/*.txt
+
+# OS
 .DS_Store
 
 # IDE
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
+
+# Claude skills (user-specific)
+.claude/skills/
+
+# Environment config
+.env
+*.local.sh
+config.env
