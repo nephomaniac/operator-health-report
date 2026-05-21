@@ -2271,7 +2271,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     }).join('');
                     targetSummaryHTML = '<div style="margin:0 0 16px;padding:12px 14px;background:var(--bg-card);border:1px solid var(--border-light);border-radius:6px;">' +
                         '<div style="font-weight:600;font-size:0.9em;margin-bottom:8px;color:var(--text-secondary);">SAAS Targets (app-interface)</div>' +
-                        '<table style="width:100%;border-collapse:collapse;font-size:0.85em;">' +
+                        '<table style="width:100%;border-collapse:collapse;font-size:0.85em;table-layout:auto;">' +
                             '<thead><tr style="color:var(--text-muted);border-bottom:1px solid var(--border-light);">' +
                                 '<th style="padding:4px 10px;text-align:left;">Target</th>' +
                                 '<th style="padding:4px 10px;text-align:left;">Method</th>' +
