@@ -12,7 +12,7 @@ import (
 func CheckNamespace(ctx context.Context, cc *ClusterContext) {
 	cc.CurrentCheck = "namespace_status"
 
-	result := cc.Client.RunOC(ctx, "Get namespace phase",
+	result := cc.Client.ExecOC(ctx, "Get namespace phase",
 		"get", "namespace", cc.Operator.Namespace, "-o", "jsonpath={.status.phase}")
 	cc.RunAndRecord("Get namespace phase", result)
 
@@ -46,7 +46,7 @@ func CheckNamespace(ctx context.Context, cc *ClusterContext) {
 func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 	cc.CurrentCheck = "pod_status_and_restarts"
 
-	result := cc.Client.RunOC(ctx, "Get deployment status",
+	result := cc.Client.ExecOC(ctx, "Get deployment status",
 		"get", "deployment", "-n", cc.Operator.Namespace, cc.Operator.Deployment, "-o", "json")
 	cc.RunAndRecord("Get deployment status", result)
 
@@ -99,7 +99,7 @@ func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 	}
 
 	// Get pods
-	podResult := cc.Client.RunOC(ctx, "Get operator pods",
+	podResult := cc.Client.ExecOC(ctx, "Get operator pods",
 		"get", "pods", "-n", cc.Operator.Namespace, "-l", selector, "-o", "json")
 	cc.RunAndRecord("Get operator pods", podResult)
 
@@ -164,7 +164,7 @@ func CheckPKOHealth(ctx context.Context, cc *ClusterContext) {
 		packageName = strings.TrimSuffix(packageName, "-controller-manager")
 	}
 
-	result := cc.Client.RunOC(ctx, "Check ClusterPackage",
+	result := cc.Client.ExecOC(ctx, "Check ClusterPackage",
 		"get", "clusterpackage", packageName, "-o", "json")
 
 	r := Result{
@@ -237,7 +237,7 @@ func CheckPKOHealth(ctx context.Context, cc *ClusterContext) {
 func checkOLMSubscription(ctx context.Context, cc *ClusterContext, packageName string) {
 	cc.CurrentCheck = "olm_subscription_health"
 
-	result := cc.Client.RunOC(ctx, "Check OLM subscription",
+	result := cc.Client.ExecOC(ctx, "Check OLM subscription",
 		"get", "subscription.operators.coreos.com", packageName, "-n", cc.Operator.Namespace)
 
 	r := Result{
@@ -261,7 +261,7 @@ func checkOLMSubscription(ctx context.Context, cc *ClusterContext, packageName s
 func CheckLogErrors(ctx context.Context, cc *ClusterContext) {
 	cc.CurrentCheck = "log_error_analysis"
 
-	result := cc.Client.RunOC(ctx, "Get operator logs",
+	result := cc.Client.ExecOC(ctx, "Get operator logs",
 		"logs", "-n", cc.Operator.Namespace, fmt.Sprintf("deployment/%s", cc.Operator.Deployment), "--tail=500")
 	cc.RunAndRecord("Get operator logs", result)
 

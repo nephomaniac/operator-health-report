@@ -97,7 +97,7 @@ type ClusterContext struct {
 	HiveShard      string
 	OCMEnv         string
 
-	Client   *kube.Client
+	Client   *kube.ClientConfig
 	Operator OperatorConfig
 
 	CurrentCheck  string
@@ -119,7 +119,7 @@ func (cc *ClusterContext) AddResult(r Result) {
 }
 
 // RunAndRecord executes a kube command and records any error
-func (cc *ClusterContext) RunAndRecord(description string, result *kube.Result) {
+func (cc *ClusterContext) RunAndRecord(description string, result *kube.ExecResult) {
 	if result.ExitCode != 0 {
 		errType := "api_error"
 		lower := strings.ToLower(result.Stderr)

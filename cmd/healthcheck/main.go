@@ -118,7 +118,7 @@ func main() {
 			go func(op checks.OperatorConfig) {
 				defer wg.Done()
 
-				client := kube.NewClient(reason)
+				client := kube.NewClientConfig(reason)
 				client.NoElevate = noElevate
 				client.CacheDir = cacheDir
 				client.Replay = replay
@@ -168,8 +168,8 @@ func main() {
 	// Generate HTML using the bash script (reuse existing HTML generation)
 	if !noHTML {
 		htmlFile := strings.TrimSuffix(outputFile, ".json") + ".html"
-		htmlClient := kube.NewClient("")
-		htmlResult := htmlClient.Run(context.Background(), "Generate HTML report",
+		htmlClient := kube.NewClientConfig("")
+		htmlResult := htmlClient.ExecCommand(context.Background(), "Generate HTML report",
 			"bash", "lib/generate_html_report.sh", outputFile, htmlFile)
 		if htmlResult.ExitCode == 0 {
 			fmt.Fprintf(os.Stderr, "HTML report: %s\n", htmlFile)
@@ -213,14 +213,14 @@ func detectOCMEnv() string {
 }
 
 func loginToCluster(clusterID string) *kube.Result {
-	client := kube.NewClient("")
-	return client.Run(context.Background(), "backplane login",
+	client := kube.NewClientConfig("")
+	return client.ExecCommand(context.Background(), "backplane login",
 		"ocm", "backplane", "login", clusterID)
 }
 
 func logoutFromCluster() {
-	client := kube.NewClient("")
-	client.Run(context.Background(), "backplane logout", "ocm", "backplane", "logout")
+	client := kube.NewClientConfig("")
+	client.ExecCommand(context.Background(), "backplane logout", "ocm", "backplane", "logout")
 }
 
 func detectClusterName() string {
@@ -301,8 +301,8 @@ func detectOperatorVersion(ctx context.Context, client *kube.Client, op checks.O
 }
 
 func execSimple(args ...string) string {
-	client := kube.NewClient("")
-	result := client.Run(context.Background(), "detect", args...)
+	client := kube.NewClientConfig("")
+	result := client.ExecCommand(context.Background(), "detect", args...)
 	return result.Stdout
 }
 

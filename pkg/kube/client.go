@@ -1,7 +1,6 @@
 package kube
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -10,20 +9,43 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	// Native SDK imports — will replace exec-based approach incrementally
+	// sdk "github.com/openshift-online/ocm-sdk-go"
+	// bpconfig "github.com/openshift/backplane-cli/pkg/backplaneapi"
+	// bplogin "github.com/openshift/backplane-cli/pkg/login"
+	// "k8s.io/client-go/kubernetes"
+	// "k8s.io/client-go/rest"
+	// ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Result holds the output of a command execution
-type Result struct {
+// ClusterConnection holds all connections needed to interact with a cluster.
+// Supports multiple OCM environments (e.g., staging cluster + production hive).
+// TODO: Migrate from exec-based to native OCM SDK + backplane-cli connections.
+// When migrated, this will hold:
+//   - OCMConn *sdk.Connection — for the cluster's OCM environment
+//   - RestConfig *rest.Config — k8s REST config via backplane
+//   - K8sClient kubernetes.Interface — typed k8s client
+//   - HiveOCMConn *sdk.Connection — for hive's OCM environment (may differ)
+//   - HiveRestConfig/HiveK8sClient — for hive cluster access
+type ClusterConnection struct {
+	ClusterID        string
+	ElevationReasons []string
+	Elevated         bool
+}
+
+// ExecResult holds the output of a CLI command execution (for oc/kubectl fallback)
+type ExecResult struct {
 	Stdout   string
 	Stderr   string
 	ExitCode int
-	Command  string // the equivalent oc/ocm CLI command
+	Command  string // the equivalent CLI command for reproduction
 	Duration time.Duration
 	Cached   bool
 }
 
 // Error returns a formatted error if the command failed
-func (r *Result) Error() error {
+func (r *ExecResult) Error() error {
 	if r.ExitCode == 0 {
 		return nil
 	}
@@ -31,8 +53,8 @@ func (r *Result) Error() error {
 		r.ExitCode, r.Stdout, r.Stderr, r.Command)
 }
 
-// Client wraps oc/ocm command execution with caching, elevation control, and CLI logging
-type Client struct {
+// ClientConfig holds settings for creating clients
+type ClientConfig struct {
 	Reason     string
 	CacheDir   string
 	Replay     bool
@@ -40,26 +62,23 @@ type Client struct {
 	cacheSeq   map[string]int
 }
 
-// NewClient creates a new kube client
-func NewClient(reason string) *Client {
-	return &Client{
+// NewClientConfig creates a new client configuration
+func NewClientConfig(reason string) *ClientConfig {
+	return &ClientConfig{
 		Reason:   reason,
 		cacheSeq: make(map[string]int),
 	}
 }
 
-// Run executes a command and returns the result.
-// The description is used for logging and cache keys.
-// The command parts are joined into a shell command string.
-func (c *Client) Run(ctx context.Context, description string, args ...string) *Result {
+// ExecCommand runs a CLI command with caching and error logging.
+// Use this for commands that don't have native Go SDK equivalents,
+// or when you want the user to see the exact command they can reproduce.
+func (c *ClientConfig) ExecCommand(ctx context.Context, description string, args ...string) *ExecResult {
 	command := strings.Join(args, " ")
 
 	// Check no-elevate
 	if c.NoElevate && strings.Contains(command, "backplane elevate") {
-		return &Result{
-			Command: command,
-			Cached:  false,
-		}
+		return &ExecResult{Command: command}
 	}
 
 	// Try cache/replay
@@ -72,14 +91,14 @@ func (c *Client) Run(ctx context.Context, description string, args ...string) *R
 	// Execute
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	var stdoutBuf, stderrBuf strings.Builder
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 	err := cmd.Run()
 
-	result := &Result{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
+	result := &ExecResult{
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
 		ExitCode: 0,
 		Command:  command,
 		Duration: time.Since(start),
@@ -90,6 +109,7 @@ func (c *Client) Run(ctx context.Context, description string, args ...string) *R
 			result.ExitCode = exitErr.ExitCode()
 		} else {
 			result.ExitCode = 1
+			result.Stderr = err.Error()
 		}
 	}
 
@@ -101,38 +121,32 @@ func (c *Client) Run(ctx context.Context, description string, args ...string) *R
 	return result
 }
 
-// RunOC runs an oc command (not elevated)
-func (c *Client) RunOC(ctx context.Context, description string, args ...string) *Result {
+// ExecOC runs an oc command (not elevated)
+func (c *ClientConfig) ExecOC(ctx context.Context, description string, args ...string) *ExecResult {
 	fullArgs := append([]string{"oc"}, args...)
-	return c.Run(ctx, description, fullArgs...)
+	return c.ExecCommand(ctx, description, fullArgs...)
 }
 
-// RunElevated runs an elevated oc command via ocm backplane elevate
-func (c *Client) RunElevated(ctx context.Context, description string, args ...string) *Result {
+// ExecElevated runs an elevated oc command via ocm backplane elevate
+func (c *ClientConfig) ExecElevated(ctx context.Context, description string, args ...string) *ExecResult {
 	fullArgs := append([]string{"ocm", "backplane", "elevate", c.Reason, "--"}, args...)
-	return c.Run(ctx, description, fullArgs...)
+	return c.ExecCommand(ctx, description, fullArgs...)
 }
 
-// RunOCM runs an ocm API command
-func (c *Client) RunOCM(ctx context.Context, description string, args ...string) *Result {
-	fullArgs := append([]string{"ocm"}, args...)
-	return c.Run(ctx, description, fullArgs...)
-}
-
-// ExecThanos runs a query against Thanos via exec into the thanos-querier pod
-func (c *Client) ExecThanos(ctx context.Context, description, query string) *Result {
-	encodedQuery := query // caller should URL-encode if needed
-	return c.RunElevated(ctx, description,
+// ExecThanos runs a PromQL query against Thanos via exec into the pod.
+// Logs the equivalent oc command for the user to reproduce.
+func (c *ClientConfig) ExecThanos(ctx context.Context, description, query string) *ExecResult {
+	return c.ExecElevated(ctx, description,
 		"exec", "-n", "openshift-monitoring",
 		"deployment/thanos-querier", "-c", "thanos-query", "--",
 		"wget", "-q", "-T", "30", "-O-",
-		fmt.Sprintf("http://localhost:9090/api/v1/query?query=%s", encodedQuery),
+		fmt.Sprintf("http://localhost:9090/api/v1/query?query=%s", query),
 	)
 }
 
-// ExecRHOBSPrometheus runs a query against the RHOBS Prometheus on MCs
-func (c *Client) ExecRHOBSPrometheus(ctx context.Context, description, query string) *Result {
-	return c.RunElevated(ctx, description,
+// ExecRHOBSPrometheus runs a PromQL query against the RHOBS Prometheus on MCs
+func (c *ClientConfig) ExecRHOBSPrometheus(ctx context.Context, description, query string) *ExecResult {
+	return c.ExecElevated(ctx, description,
 		"exec", "-n", "openshift-observability-operator",
 		"statefulset/prometheus-rhobs-hypershift-monitoring-stack", "-c", "prometheus", "--",
 		"curl", "-sf", "--max-time", "30",
@@ -140,8 +154,9 @@ func (c *Client) ExecRHOBSPrometheus(ctx context.Context, description, query str
 	)
 }
 
-// cacheKey generates a filesystem-safe cache key from description
-func (c *Client) cacheKey(description string) string {
+// Cache operations
+
+func (c *ClientConfig) cacheKey(description string) string {
 	safe := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
 			return r
@@ -151,28 +166,26 @@ func (c *Client) cacheKey(description string) string {
 	if len(safe) > 80 {
 		safe = safe[:80]
 	}
-
 	seq := c.cacheSeq[safe]
 	c.cacheSeq[safe] = seq + 1
 	return fmt.Sprintf("%s_%d", safe, seq)
 }
 
-func (c *Client) writeCache(description string, result *Result) {
+func (c *ClientConfig) writeCache(description string, result *ExecResult) {
 	key := c.cacheKey(description)
-	dir := c.CacheDir
-	os.WriteFile(filepath.Join(dir, key+".out"), []byte(result.Stdout), 0644)
-	os.WriteFile(filepath.Join(dir, key+".err"), []byte(result.Stderr), 0644)
-	os.WriteFile(filepath.Join(dir, key+".rc"), []byte(fmt.Sprintf("%d", result.ExitCode)), 0644)
-	os.WriteFile(filepath.Join(dir, key+".cmd"), []byte(result.Command), 0644)
+	os.WriteFile(filepath.Join(c.CacheDir, key+".out"), []byte(result.Stdout), 0644)
+	os.WriteFile(filepath.Join(c.CacheDir, key+".err"), []byte(result.Stderr), 0644)
+	os.WriteFile(filepath.Join(c.CacheDir, key+".rc"), []byte(fmt.Sprintf("%d", result.ExitCode)), 0644)
+	os.WriteFile(filepath.Join(c.CacheDir, key+".cmd"), []byte(result.Command), 0644)
 }
 
-func (c *Client) readCache(description, command string) *Result {
+func (c *ClientConfig) readCache(description, command string) *ExecResult {
 	key := c.cacheKey(description)
 	dir := c.CacheDir
 
 	stdout, err := os.ReadFile(filepath.Join(dir, key+".out"))
 	if err != nil {
-		return &Result{
+		return &ExecResult{
 			ExitCode: 1,
 			Stderr:   fmt.Sprintf("cache miss: %s", description),
 			Command:  command,
@@ -185,11 +198,10 @@ func (c *Client) readCache(description, command string) *Result {
 	rc := 0
 	fmt.Sscanf(string(rcBytes), "%d", &rc)
 
-	// Hash-based dedup tracking
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
 	os.WriteFile(filepath.Join(dir, key+".consumed"), []byte(hash), 0644)
 
-	return &Result{
+	return &ExecResult{
 		Stdout:   string(stdout),
 		Stderr:   string(stderr),
 		ExitCode: rc,
@@ -197,3 +209,13 @@ func (c *Client) readCache(description, command string) *Result {
 		Cached:   true,
 	}
 }
+
+// Placeholder for native OCM/backplane connection functions.
+// These will replace the ExecCommand-based approach for production use.
+// For now, the ExecCommand approach works and logs the exact CLI commands.
+
+// TODO: ConnectToCluster — native OCM SDK + backplane-cli connection
+// Will replace exec-based approach. See osdctl pkg/k8s/client.go for patterns:
+//   - NewWithConn(clusterID, options, ocmConn) for standard connection
+//   - NewAsBackplaneClusterAdminWithConn(clusterID, options, ocmConn, reasons...) for elevated
+//   - GetHiveBPClientForCluster(clusterID, options, reason, hiveOCMURL) for cross-env hive
