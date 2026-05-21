@@ -355,18 +355,26 @@ func detectOperatorVersion(ctx context.Context, client *kube.ClusterClient, op c
 }
 
 func runListClusters(ocmClient *ocm.Client, filter, exclude, include string) error {
-	var search string
+	var searches []string
 	switch filter {
 	case "all":
-		search = "managed='true' and state='ready'"
+		searches = []string{"managed='true' and state='ready'"}
 	case "rosa":
-		search = "managed='true' and state='ready' and product.id='rosa'"
+		searches = []string{"managed='true' and state='ready' and product.id='rosa'"}
+	case "rosa-classic":
+		searches = []string{"hypershift.enabled='false' and managed='true' and state='ready' and product.id='rosa'"}
 	case "osd":
-		search = "managed='true' and state='ready' and product.id='osd'"
+		searches = []string{"managed='true' and state='ready' and product.id='osd'"}
 	case "hypershift":
-		search = "managed='true' and state='ready' and hypershift.enabled='true'"
+		searches = []string{"managed='true' and state='ready' and hypershift.enabled='true'"}
+	case "managed":
+		// ROSA classic + OSD (includes MCs/SCs, excludes HCP ROSA) — matches original get_clusters.sh
+		searches = []string{
+			"hypershift.enabled='false' and managed='true' and state='ready' and product.id='rosa'",
+			"managed='true' and state='ready' and product.id='osd'",
+		}
 	default:
-		search = filter
+		searches = []string{filter}
 	}
 
 	var excludeRe, includeRe *regexp.Regexp
@@ -386,48 +394,56 @@ func runListClusters(ocmClient *ocm.Client, filter, exclude, include string) err
 	}
 
 	conn := ocmClient.Conn()
-	resp, err := conn.ClustersMgmt().V1().Clusters().List().
-		Search(search).
-		Size(1000).
-		Send()
-	if err != nil {
-		return fmt.Errorf("cluster search failed: %w", err)
+	seen := map[string]bool{}
+	printed := 0
+	filtered := 0
+	total := 0
+
+	for _, search := range searches {
+		resp, err := conn.ClustersMgmt().V1().Clusters().List().
+			Search(search).
+			Size(1000).
+			Send()
+		if err != nil {
+			return fmt.Errorf("cluster search failed: %w", err)
+		}
+		total += resp.Total()
+
+		resp.Items().Each(func(cluster *cmv1.Cluster) bool {
+			if seen[cluster.ID()] {
+				return true
+			}
+			seen[cluster.ID()] = true
+
+			name := cluster.Name()
+			if excludeRe != nil && excludeRe.MatchString(name) {
+				filtered++
+				return true
+			}
+			if includeRe != nil && !includeRe.MatchString(name) {
+				filtered++
+				return true
+			}
+
+			hcp := "false"
+			if cluster.Hypershift().Enabled() {
+				hcp = "true"
+			}
+			fmt.Printf("%-36s  %-40s  %-20s  %-6s  %-5s  %s\n",
+				cluster.ID(),
+				cluster.Name(),
+				cluster.OpenshiftVersion(),
+				cluster.Status().State(),
+				hcp,
+				cluster.CreationTimestamp().Format("2006-01-02T15:04:05Z"),
+			)
+			printed++
+			return true
+		})
 	}
 
-	fmt.Fprintf(os.Stderr, "Found %d clusters (%s)\n", resp.Total(), ocmClient.Environment())
-
-	printed := 0
-	excluded := 0
-
-	resp.Items().Each(func(cluster *cmv1.Cluster) bool {
-		name := cluster.Name()
-
-		if excludeRe != nil && excludeRe.MatchString(name) {
-			excluded++
-			return true
-		}
-		if includeRe != nil && !includeRe.MatchString(name) {
-			excluded++
-			return true
-		}
-
-		hcp := "false"
-		if cluster.Hypershift().Enabled() {
-			hcp = "true"
-		}
-		fmt.Printf("%-36s  %-40s  %-20s  %-6s  %-5s  %s\n",
-			cluster.ID(),
-			cluster.Name(),
-			cluster.OpenshiftVersion(),
-			cluster.Status().State(),
-			hcp,
-			cluster.CreationTimestamp().Format("2006-01-02T15:04:05Z"),
-		)
-		printed++
-		return true
-	})
-
-	fmt.Fprintf(os.Stderr, "Listed %d clusters (%d filtered out)\n", printed, excluded)
+	fmt.Fprintf(os.Stderr, "Listed %d clusters (%d filtered, %d total from %d queries, %s)\n",
+		printed, filtered, total, len(searches), ocmClient.Environment())
 
 	return nil
 }
