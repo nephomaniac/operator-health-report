@@ -2155,6 +2155,12 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         if (/hivep|prod/i.test(name)) return 'production';
                         return 'unknown';
                     };
+                    // Derive Quay repo name from SAAS filename for image links
+                    const deriveQuayRepo = (saasFile) => {
+                        if (!saasFile) return '';
+                        return saasFile.replace(/^saas-/, '').replace(/-pko\.yaml$/, '.yaml').replace(/\.yaml$/, '');
+                    };
+
                     const targetRows = targets.map(t => {
                         const targetEnv = classifyEnv(t.target);
                         // Count clusters in our results that resolved to this SAAS target
@@ -2190,7 +2196,22 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         return '<tr style="opacity:' + rowOpacity + ';' + rowBg + 'cursor:pointer;" onclick="var el=document.getElementById(\'' + pipelineNodeId + '\'); if(el){el.scrollIntoView({behavior:\'smooth\',block:\'center\'}); el.style.boxShadow=\'0 0 12px var(--accent)\'; setTimeout(function(){el.style.boxShadow=\'\';},2000); var d=document.getElementById(\'' + pipelineNodeId + '-detail\'); if(d) d.style.display=\'block\';}" title="Click to view in pipeline">' +
                             '<td style="padding:4px 10px;">' + (t.target || '') + envBadge + '</td>' +
                             '<td style="padding:4px 10px;"><span style="display:inline-block;background:' + methodColor + ';color:#111;font-size:0.75em;padding:1px 6px;border-radius:3px;font-weight:600;">' + (t.method || '?') + '</span></td>' +
-                            '<td style="padding:4px 10px;font-family:var(--font-mono);font-size:0.85em;">' + (t.image_tag || t.version || '') + '</td>' +
+                            '<td style="padding:4px 10px;font-family:var(--font-mono);font-size:0.85em;">' + (() => {
+                                const tag = t.image_tag || '';
+                                const repo = t.quay_repo || '';
+                                const ref = t.version || '';
+                                const repoUrl = t.repo_url || '';
+                                let display = tag || ref;
+                                // Image tag → Quay link
+                                if (repo && tag && !tag.startsWith('branch:') && !tag.startsWith('sha:')) {
+                                    display = `<a href="https://quay.io/repository/app-sre/${repo}?tab=tags&tag=${tag}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;" title="View on Quay.io">${tag}</a>`;
+                                }
+                                // Ref hash → GitHub commit link
+                                if (repoUrl && ref && ref.length === 40) {
+                                    display += ` <a href="${repoUrl}/commit/${ref}" target="_blank" rel="noopener" style="color:var(--text-muted);font-size:0.85em;" title="View commit on GitHub">(${ref.substring(0,7)})</a>`;
+                                }
+                                return display;
+                            })() + '</td>' +
                             '<td style="padding:4px 10px;text-align:center;">' + autoBadge + '</td>' +
                             '<td style="padding:4px 10px;font-size:0.8em;color:var(--text-muted);">' + channels + '</td>' +
                             '<td style="padding:4px 10px;text-align:center;' + countStyle + '">' + countDisplay + '</td>' +
@@ -2321,8 +2342,19 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     html += `<div id="${nodeId}-detail" onclick="event.stopPropagation(); this.style.display='none'" style="display:none;position:relative;z-index:10;border:1px solid var(--accent);border-radius:8px;padding:10px;margin:4px -20px;background:var(--bg-primary);width:180px;font-size:0.72em;box-shadow:0 4px 20px rgba(0,0,0,0.5);cursor:pointer;" title="Click to close">`;
                     html += `<div style="font-weight:700;color:var(--accent);margin-bottom:6px;border-bottom:1px solid var(--border-light);padding-bottom:4px;">Target Details</div>`;
                     if (node.hive_cluster) html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Hive:</span> <strong>${node.hive_cluster}</strong></div>`;
-                    html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Ref:</span> <code style="font-size:0.9em;">${shortRef}</code></div>`;
-                    if (node.image_tag) html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Image:</span> <code style="font-size:0.9em;">${node.image_tag}</code></div>`;
+                    if (node.repo_url && fullRef.length === 40) {
+                        html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Ref:</span> <a href="${node.repo_url}/commit/${fullRef}" target="_blank" rel="noopener" style="color:var(--accent);font-size:0.9em;">${shortRef}</a></div>`;
+                    } else {
+                        html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Ref:</span> <code style="font-size:0.9em;">${shortRef}</code></div>`;
+                    }
+                    if (node.image_tag) {
+                        const pipeRepo = node.quay_repo || '';
+                        if (pipeRepo && !node.image_tag.startsWith('branch:') && !node.image_tag.startsWith('sha:')) {
+                            html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Image:</span> <a href="https://quay.io/repository/app-sre/${pipeRepo}?tab=tags&tag=${node.image_tag}" target="_blank" rel="noopener" style="color:var(--accent);font-size:0.9em;">${node.image_tag}</a></div>`;
+                        } else {
+                            html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Image:</span> <code style="font-size:0.9em;">${node.image_tag}</code></div>`;
+                        }
+                    }
                     html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">SAAS:</span> ${node.saas_file || '—'}</div>`;
                     html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Method:</span> ${node.method || '—'}</div>`;
                     html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Promotion:</span> ${node.auto ? 'Auto' : 'Manual'}${node.soak_days ? ' (' + node.soak_days + 'd soak)' : ''}</div>`;

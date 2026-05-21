@@ -25,6 +25,8 @@ type PipelineNode struct {
 	Subscribe   []string `json:"subscribe"`
 	SaasFile    string   `json:"saas_file"`
 	HiveCluster string   `json:"hive_cluster,omitempty"`
+	QuayRepo    string   `json:"quay_repo,omitempty"`
+	RepoURL     string   `json:"repo_url,omitempty"`
 	TestImage   string   `json:"test_image,omitempty"`
 	TestConfig  string   `json:"test_config,omitempty"`
 }
@@ -76,6 +78,8 @@ func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string) (
 					Subscribe:   t.Subscribe,
 					SaasFile:    pkoSaas,
 					HiveCluster: t.HiveCluster,
+				QuayRepo:    t.QuayRepo,
+				RepoURL:     t.RepoURL,
 				})
 			}
 		}
@@ -98,6 +102,8 @@ func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string) (
 					Subscribe:   t.Subscribe,
 					SaasFile:    olmSaas,
 					HiveCluster: t.HiveCluster,
+				QuayRepo:    t.QuayRepo,
+				RepoURL:     t.RepoURL,
 				})
 			}
 		}

@@ -25,6 +25,8 @@ type Target struct {
 	Name        string   `json:"target"`
 	Version     string   `json:"version"`
 	ImageTag    string   `json:"image_tag"`
+	QuayRepo    string   `json:"quay_repo"`    // Quay.io repo name (e.g., "configure-alertmanager-operator")
+	RepoURL     string   `json:"repo_url"`     // GitHub repo URL (e.g., "https://github.com/openshift/...")
 	SaasFile    string   `json:"saas_file"`
 	Method      string   `json:"method"`       // PKO or OLM
 	Auto        bool     `json:"auto"`          // auto-promotion enabled
@@ -41,6 +43,7 @@ type saasFile struct {
 
 type resourceTemplate struct {
 	Name       string            `yaml:"name"`
+	URL        string            `yaml:"url"`
 	Targets    []saasTarget      `yaml:"targets"`
 	Parameters map[string]string `yaml:"parameters"`
 }
@@ -224,6 +227,8 @@ func fetchTargets(ctx context.Context, saasFileName string) ([]Target, error) {
 			t := Target{
 				Name:        st.Name,
 				Version:     st.Ref,
+				QuayRepo:    quayRepo,
+				RepoURL:     rt.URL,
 				Auto:        st.Promotion.Auto,
 				SoakDays:    st.Promotion.SoakDays,
 				Publish:     st.Promotion.Publish,
