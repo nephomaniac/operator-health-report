@@ -2339,7 +2339,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     `Source ↗</a>`;
             }
             html += '</div>';
-            html += '<div style="display:flex;gap:8px;align-items:flex-start;min-width:max-content;padding-bottom:8px;">';
+            html += `<div onclick="this.querySelectorAll('.pipeline-detail').forEach(d => d.style.display='none')" style="display:flex;gap:8px;align-items:flex-start;min-width:max-content;padding-bottom:8px;">`;
 
             pipeline.stages.forEach((stage, stageIdx) => {
                 // Stage column
@@ -2387,7 +2387,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
 
                     // Clickable node card
                     const nodeId = `pipeline-node-${nodeName.replace(/[^a-z0-9]/gi, '-')}`;
-                    html += `<div id="${nodeId}" class="pipeline-node" onclick="document.getElementById('${nodeId}-detail').style.display = document.getElementById('${nodeId}-detail').style.display === 'none' ? 'block' : 'none'" style="cursor:pointer;border:1.5px solid ${borderColor};border-radius:6px;padding:6px 8px;margin:3px 0;background:${bgColor};width:130px;font-size:0.78em;">`;
+                    html += `<div id="${nodeId}" class="pipeline-node" onclick="event.stopPropagation(); document.getElementById('${nodeId}-detail').style.display = document.getElementById('${nodeId}-detail').style.display === 'none' ? 'block' : 'none'" style="cursor:pointer;border:1.5px solid ${borderColor};border-radius:6px;padding:6px 8px;margin:3px 0;background:${bgColor};width:130px;font-size:0.78em;">`;
                     html += `<div style="font-weight:600;color:var(--text-primary);word-break:break-all;line-height:1.2;">${nodeName}</div>`;
                     html += `<div style="margin-top:3px;display:flex;gap:3px;flex-wrap:wrap;">${typeBadge} ${autoBadge}</div>`;
                     html += `<div style="font-family:var(--font-mono,monospace);font-size:0.85em;color:var(--text-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;">${refDisplay}</div>`;
