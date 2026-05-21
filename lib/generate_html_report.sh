@@ -2088,23 +2088,28 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
         }
 
         function generateReport() {
-            if (!healthData || healthData.length === 0) {
-                document.getElementById('tabContents').innerHTML = '<p style="padding: 40px; text-align: center;">No health data available</p>';
-                return;
+            // Collect operator names from both cluster data and SAAS metadata
+            const operatorGroups = {};
+            if (healthData && healthData.length > 0) {
+                generateSummary();
+                healthData.forEach(cluster => {
+                    const op = cluster.operator_name || 'unknown';
+                    if (op === 'unknown') return;
+                    if (!operatorGroups[op]) operatorGroups[op] = [];
+                    operatorGroups[op].push(cluster);
+                });
             }
 
-            generateSummary();
-
-            // Group data by operator
-            const operatorGroups = {};
-            healthData.forEach(cluster => {
-                const op = cluster.operator_name || 'unknown';
-                if (op === 'unknown') return;
+            // Also add operators from SAAS metadata (for --saas-only mode)
+            Object.keys(saasTargets).forEach(op => {
                 if (!operatorGroups[op]) operatorGroups[op] = [];
-                operatorGroups[op].push(cluster);
             });
 
             const operators = Object.keys(operatorGroups).sort();
+            if (operators.length === 0) {
+                document.getElementById('tabContents').innerHTML = '<p style="padding: 40px; text-align: center;">No health data available</p>';
+                return;
+            }
             const tabsContainer = document.getElementById('operatorTabs');
             const contentsContainer = document.getElementById('tabContents');
 
@@ -2302,15 +2307,25 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     html += checkedBadge;
                     html += '</div>';
 
-                    // Expandable detail panel
+                    // Expandable detail panel — styled as a floating card distinct from the flow
                     const subChannels = (node.subscribe || []).map(ch => ch.replace(/.*channel-/, '')).join(', ') || '—';
                     const pubChannels = (node.publish || []).map(ch => ch.replace(/.*channel-/, '')).join(', ') || '—';
-                    html += `<div id="${nodeId}-detail" style="display:none;border:1px solid var(--border-light);border-radius:4px;padding:6px;margin:2px 0;background:var(--bg-primary);width:130px;font-size:0.72em;">`;
-                    html += `<div><strong>Subscribes:</strong> ${subChannels}</div>`;
-                    html += `<div><strong>Publishes:</strong> ${pubChannels}</div>`;
-                    html += `<div><strong>SAAS:</strong> ${node.saas_file || '—'}</div>`;
-                    if (node.test_config) html += `<div><strong>Config:</strong> ${node.test_config}</div>`;
-                    if (node.soak_days) html += `<div><strong>Soak:</strong> ${node.soak_days}d</div>`;
+                    const fullRef = node.ref || '—';
+                    const shortRef = fullRef.length > 12 ? fullRef.substring(0, 12) + '…' : fullRef;
+                    html += `<div id="${nodeId}-detail" onclick="event.stopPropagation(); this.style.display='none'" style="display:none;position:relative;z-index:10;border:1px solid var(--accent);border-radius:8px;padding:10px;margin:4px -20px;background:var(--bg-primary);width:180px;font-size:0.72em;box-shadow:0 4px 20px rgba(0,0,0,0.5);cursor:pointer;" title="Click to close">`;
+                    html += `<div style="font-weight:700;color:var(--accent);margin-bottom:6px;border-bottom:1px solid var(--border-light);padding-bottom:4px;">Target Details</div>`;
+                    html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Ref:</span> <code style="font-size:0.9em;">${shortRef}</code></div>`;
+                    if (node.image_tag) html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Image:</span> <code style="font-size:0.9em;">${node.image_tag}</code></div>`;
+                    html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">SAAS:</span> ${node.saas_file || '—'}</div>`;
+                    html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Method:</span> ${node.method || '—'}</div>`;
+                    html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Promotion:</span> ${node.auto ? 'Auto' : 'Manual'}${node.soak_days ? ' (' + node.soak_days + 'd soak)' : ''}</div>`;
+                    html += `<div style="margin-top:6px;border-top:1px solid var(--border-light);padding-top:4px;">`;
+                    html += `<div style="margin-bottom:2px;"><span style="color:#5eecc0;">▼ Subscribes:</span> ${subChannels}</div>`;
+                    html += `<div><span style="color:#fdd76b;">▲ Publishes:</span> ${pubChannels}</div>`;
+                    html += `</div>`;
+                    if (node.test_config) html += `<div style="margin-top:4px;"><span style="color:var(--text-muted);">E2E Config:</span> ${node.test_config}</div>`;
+                    if (node.test_image) html += `<div style="margin-top:2px;word-break:break-all;"><span style="color:var(--text-muted);">Test Image:</span> <code style="font-size:0.85em;">${node.test_image.split('/').pop()}</code></div>`;
+                    html += `<div style="margin-top:6px;text-align:center;font-size:0.85em;color:var(--text-muted);">click to close</div>`;
                     html += '</div>';
                 });
 
