@@ -206,32 +206,79 @@ func main() {
 			defer clusterWg.Done()
 			defer func() { <-sem }() // release semaphore slot
 
-			fmt.Fprintf(os.Stderr, "\n[%d/%d] Processing cluster: %s\n", idx+1, len(clusterIDs), cid)
-
 			ctx := context.Background()
+
+			// Fetch cluster metadata from OCM first — skip non-ready and limited-support clusters
+			meta, metaErr := ocmClient.GetClusterMetadata(cid)
+			if metaErr != nil {
+				fmt.Fprintf(os.Stderr, "\n[%d/%d] ✗ %s: failed to fetch metadata: %v\n", idx+1, len(clusterIDs), cid, metaErr)
+				return
+			}
+
+			if meta.State != "ready" {
+				fmt.Fprintf(os.Stderr, "\n[%d/%d] ⏭ %s (%s): skipping — state is %s\n", idx+1, len(clusterIDs), meta.Name, cid, meta.State)
+				return
+			}
+			if meta.LimitedSupport {
+				fmt.Fprintf(os.Stderr, "\n[%d/%d] ⏭ %s (%s): skipping — limited support\n", idx+1, len(clusterIDs), meta.Name, cid)
+				return
+			}
+
+			fmt.Fprintf(os.Stderr, "\n[%d/%d] Processing: %s (%s, %s, %s)\n", idx+1, len(clusterIDs), meta.Name, meta.Product, meta.Provider, meta.Region)
 
 			client, err := kube.ConnectToClusterWithConn(ctx, cid, reason, noElevate, ocmClient.Conn())
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "✗ Failed to connect to %s: %v\n", cid, err)
+				fmt.Fprintf(os.Stderr, "  ✗ Failed to connect to %s: %v\n", meta.Name, err)
 				return
 			}
 			defer client.Disconnect()
 
-			fmt.Fprintf(os.Stderr, "✓ Connected to %s\n", cid)
+			fmt.Fprintf(os.Stderr, "  ✓ Connected to %s\n", meta.Name)
 
-			clusterVersion, _ := client.GetClusterVersion(ctx)
-			if clusterVersion == "" {
-				clusterVersion = "unknown"
-			}
-
-			clusterName, _ := ocmClient.GetClusterName(cid)
-			if clusterName == "" {
-				clusterName = "unknown"
-			}
+			clusterVersion := meta.Version
+			clusterName := meta.Name
 			clusterType := kube.DetectClusterType(clusterName)
-			hiveShard, _ := ocmClient.GetHiveShard(cid)
-			if hiveShard == "" {
-				hiveShard = "unknown"
+
+			hiveShard := "unknown"
+			if meta.Shard != "" {
+				parts := strings.Split(meta.Shard, ".")
+				for _, p := range parts {
+					if strings.HasPrefix(p, "hive") {
+						hiveShard = p
+						break
+					}
+				}
+			}
+
+			// Mask email prefix for privacy
+			maskedEmail := meta.OwnerEmail
+			if at := strings.Index(maskedEmail, "@"); at > 0 {
+				maskedEmail = "xxxx" + maskedEmail[at:]
+			}
+
+			// Convert OCM metadata to checks.ClusterMetadata
+			clusterMeta := &checks.ClusterMetadata{
+				ID:             meta.ID,
+				ExternalID:     meta.ExternalID,
+				Name:           meta.Name,
+				State:          meta.State,
+				APIListening:   meta.APIListening,
+				Product:        meta.Product,
+				Provider:       meta.Provider,
+				Version:        meta.Version,
+				Region:         meta.Region,
+				MultiAZ:        meta.MultiAZ,
+				CNIType:        meta.CNIType,
+				PrivateLink:    meta.PrivateLink,
+				STS:            meta.STS,
+				CCS:            meta.CCS,
+				Hypershift:     meta.Hypershift,
+				ExistingVPC:    meta.ExistingVPC,
+				ChannelGroup:   meta.ChannelGroup,
+				LimitedSupport: meta.LimitedSupport,
+				Shard:          meta.Shard,
+				OwnerOrg:       meta.OwnerOrg,
+				OwnerEmail:     maskedEmail,
 			}
 
 			var wg sync.WaitGroup
@@ -247,6 +294,7 @@ func main() {
 						ClusterType:    clusterType,
 						HiveShard:      hiveShard,
 						OCMEnv:         ocmEnv,
+						Metadata:       clusterMeta,
 						Client:         client,
 						Operator:       op,
 					}

@@ -291,6 +291,93 @@ func (c *Client) GetHiveShard(clusterID string) (string, error) {
 	return "", fmt.Errorf("could not parse hive shard from %s", server)
 }
 
+// GetClusterMetadata fetches full cluster properties from the OCM API
+func (c *Client) GetClusterMetadata(clusterID string) (*ClusterMeta, error) {
+	resp, err := c.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).Get().Send()
+	if err != nil {
+		return nil, c.wrapError("get cluster metadata", err)
+	}
+
+	cl := resp.Body()
+
+	apiListening := "external"
+	if cl.API().Listening() == "internal" {
+		apiListening = "internal"
+	}
+
+	shard := ""
+	if ps, err := c.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).ProvisionShard().Get().Send(); err == nil {
+		if hc := ps.Body().HiveConfig(); hc != nil {
+			shard = hc.Server()
+		}
+	}
+
+	meta := &ClusterMeta{
+		ID:             cl.ID(),
+		ExternalID:     cl.ExternalID(),
+		Name:           cl.Name(),
+		State:          string(cl.Status().State()),
+		APIListening:   apiListening,
+		Product:        cl.Product().ID(),
+		Provider:       cl.CloudProvider().ID(),
+		Version:        cl.OpenshiftVersion(),
+		Region:         cl.Region().ID(),
+		MultiAZ:        cl.MultiAZ(),
+		CNIType:        string(cl.Network().Type()),
+		PrivateLink:    cl.AWS().PrivateLink(),
+		STS:            cl.AWS().STS().Enabled(),
+		CCS:            cl.CCS().Enabled(),
+		Hypershift:     cl.Hypershift().Enabled(),
+		ExistingVPC:    cl.AWS().SubnetIDs() != nil && len(cl.AWS().SubnetIDs()) > 0,
+		ChannelGroup:   cl.Version().ChannelGroup(),
+		LimitedSupport: cl.Status().LimitedSupportReasonCount() > 0,
+		Shard:          shard,
+	}
+
+	// Fetch subscription for owner info
+	subID, _ := cl.Subscription().GetID()
+	if subID != "" {
+		subResp, subErr := c.conn.AccountsMgmt().V1().Subscriptions().Subscription(subID).Get().Send()
+		if subErr == nil {
+			sub := subResp.Body()
+			meta.OwnerEmail, _ = sub.Creator().GetEmail()
+			if org, ok := sub.GetOrganizationID(); ok {
+				orgResp, orgErr := c.conn.AccountsMgmt().V1().Organizations().Organization(org).Get().Send()
+				if orgErr == nil {
+					meta.OwnerOrg = orgResp.Body().Name()
+				}
+			}
+		}
+	}
+
+	return meta, nil
+}
+
+// ClusterMeta holds OCM cluster properties (returned by GetClusterMetadata)
+type ClusterMeta struct {
+	ID             string `json:"id"`
+	ExternalID     string `json:"external_id"`
+	Name           string `json:"name"`
+	State          string `json:"state"`
+	APIListening   string `json:"api_listening"`
+	Product        string `json:"product"`
+	Provider       string `json:"provider"`
+	Version        string `json:"version"`
+	Region         string `json:"region"`
+	MultiAZ        bool   `json:"multi_az"`
+	CNIType        string `json:"cni_type"`
+	PrivateLink    bool   `json:"privatelink"`
+	STS            bool   `json:"sts"`
+	CCS            bool   `json:"ccs"`
+	Hypershift     bool   `json:"hypershift"`
+	ExistingVPC    bool   `json:"existing_vpc"`
+	ChannelGroup   string `json:"channel_group"`
+	LimitedSupport bool   `json:"limited_support"`
+	Shard          string `json:"shard"`
+	OwnerOrg       string `json:"owner_org,omitempty"`
+	OwnerEmail     string `json:"owner_email,omitempty"`
+}
+
 func (c *Client) wrapError(operation string, err error) error {
 	if err == nil {
 		return nil

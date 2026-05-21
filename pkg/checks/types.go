@@ -59,26 +59,49 @@ type OperatorConfig struct {
 	OLMSaas    string `json:"olm_saas"`
 }
 
+// ClusterMetadata holds OCM cluster properties for display in reports
+type ClusterMetadata struct {
+	ID              string `json:"id"`
+	ExternalID      string `json:"external_id"`
+	Name            string `json:"name"`
+	State           string `json:"state"`
+	APIListening    string `json:"api_listening"`
+	Product         string `json:"product"`
+	Provider        string `json:"provider"`
+	Version         string `json:"version"`
+	Region          string `json:"region"`
+	MultiAZ         bool   `json:"multi_az"`
+	CNIType         string `json:"cni_type"`
+	PrivateLink     bool   `json:"privatelink"`
+	STS             bool   `json:"sts"`
+	CCS             bool   `json:"ccs"`
+	Hypershift      bool   `json:"hypershift"`
+	ExistingVPC     bool   `json:"existing_vpc"`
+	ChannelGroup    string `json:"channel_group"`
+	LimitedSupport  bool   `json:"limited_support"`
+	Shard           string `json:"shard"`
+	OwnerOrg        string `json:"owner_org,omitempty"`
+	OwnerEmail      string `json:"owner_email,omitempty"`
+}
+
 // ClusterOutput is the JSON output for a single cluster+operator check
 type ClusterOutput struct {
-	ScriptVersion  string                 `json:"script_version"`
-	ClusterID      string                 `json:"cluster_id"`
-	ClusterName    string                 `json:"cluster_name"`
-	ClusterType    string                 `json:"cluster_type"`
-	HiveShard      string                 `json:"hive_shard"`
-	ClusterVersion string                 `json:"cluster_version"`
-	OperatorName   string                 `json:"operator_name"`
-	OperatorVersion string               `json:"operator_version"`
-	OperatorImage  string                 `json:"operator_image"`
-	Namespace      string                 `json:"namespace"`
-	Deployment     string                 `json:"deployment"`
-	Timestamp      string                 `json:"timestamp"`
-	ClusterMetadata map[string]interface{} `json:"cluster_metadata"`
-	BackplaneLogin  map[string]interface{} `json:"backplane_login"`
-	HealthSummary   HealthSummary          `json:"health_summary"`
-	HealthChecks    []Result               `json:"health_checks"`
-	APIErrors       []APIError             `json:"api_errors"`
-	Events          map[string]interface{} `json:"events"`
+	ScriptVersion   string           `json:"script_version"`
+	ClusterID       string           `json:"cluster_id"`
+	ClusterName     string           `json:"cluster_name"`
+	ClusterType     string           `json:"cluster_type"`
+	HiveShard       string           `json:"hive_shard"`
+	ClusterVersion  string           `json:"cluster_version"`
+	OperatorName    string           `json:"operator_name"`
+	OperatorVersion string           `json:"operator_version"`
+	OperatorImage   string           `json:"operator_image"`
+	Namespace       string           `json:"namespace"`
+	Deployment      string           `json:"deployment"`
+	Timestamp       string           `json:"timestamp"`
+	ClusterMetadata *ClusterMetadata `json:"cluster_metadata"`
+	HealthSummary   HealthSummary    `json:"health_summary"`
+	HealthChecks    []Result         `json:"health_checks"`
+	APIErrors       []APIError       `json:"api_errors"`
 }
 
 // HealthSummary aggregates check results
@@ -96,6 +119,7 @@ type ClusterContext struct {
 	ClusterType    string
 	HiveShard      string
 	OCMEnv         string
+	Metadata       *ClusterMetadata
 
 	Client   *kube.ClusterClient
 	Operator OperatorConfig
@@ -158,16 +182,17 @@ func (cc *ClusterContext) OverallStatus() string {
 // ToOutput converts the context to the final JSON output structure
 func (cc *ClusterContext) ToOutput(version string) ClusterOutput {
 	return ClusterOutput{
-		ScriptVersion:  version,
-		ClusterID:      cc.ClusterID,
-		ClusterName:    cc.ClusterName,
-		ClusterType:    cc.ClusterType,
-		HiveShard:      cc.HiveShard,
-		ClusterVersion: cc.ClusterVersion,
-		OperatorName:   cc.Operator.Name,
-		Namespace:      cc.Operator.Namespace,
-		Deployment:     cc.Operator.Deployment,
-		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		ScriptVersion:   version,
+		ClusterID:       cc.ClusterID,
+		ClusterName:     cc.ClusterName,
+		ClusterType:     cc.ClusterType,
+		HiveShard:       cc.HiveShard,
+		ClusterVersion:  cc.ClusterVersion,
+		OperatorName:    cc.Operator.Name,
+		Namespace:       cc.Operator.Namespace,
+		Deployment:      cc.Operator.Deployment,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		ClusterMetadata: cc.Metadata,
 		HealthSummary: HealthSummary{
 			OverallStatus: cc.OverallStatus(),
 			CriticalCount: cc.CriticalCount,
