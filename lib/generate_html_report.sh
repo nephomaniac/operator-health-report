@@ -2237,6 +2237,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         const envBadge = '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;margin-left:4px;background:rgba(255,255,255,0.06);color:var(--text-muted);">' + targetEnv + '</span>';
                         const autoBadge = t.auto ? '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;background:#5eecc030;color:#5eecc0;">auto</span>' : '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;background:rgba(255,255,255,0.06);color:var(--text-muted);">manual</span>';
                         const channels = (t.subscribe && t.subscribe.length > 0) ? t.subscribe.map(ch => ch.replace(/.*channel-/, '')).join(', ') : '—';
+                        const publishes = (t.publish && t.publish.length > 0) ? t.publish.map(ch => ch.replace(/.*channel-/, '')).join(', ') : '—';
 
                         const pipelineNodeId = 'pipeline-node-' + (t.target || '').replace(/[^a-z0-9]/gi, '-');
                         return '<tr class="saas-target-row" style="opacity:' + rowOpacity + ';' + rowBg + 'cursor:pointer;" onclick="var el=document.getElementById(\'' + pipelineNodeId + '\'); if(el){el.scrollIntoView({behavior:\'smooth\',block:\'center\'}); el.style.boxShadow=\'0 0 12px var(--accent)\'; setTimeout(function(){el.style.boxShadow=\'\';},2000); var d=document.getElementById(\'' + pipelineNodeId + '-detail\'); if(d) d.style.display=\'block\';}" title="Click to view in pipeline">' +
@@ -2264,6 +2265,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                             })() + '</td>' +
                             '<td style="padding:4px 10px;text-align:center;">' + autoBadge + '</td>' +
                             '<td style="padding:4px 10px;font-size:0.8em;color:var(--text-muted);">' + channels + '</td>' +
+                            '<td style="padding:4px 10px;font-size:0.8em;color:var(--text-muted);">' + publishes + '</td>' +
                             '<td style="padding:4px 10px;text-align:center;' + countStyle + '">' + countDisplay + '</td>' +
                         '</tr>';
                     }).join('');
@@ -2276,6 +2278,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                                 '<th style="padding:4px 10px;text-align:left;">Version</th>' +
                                 '<th style="padding:4px 10px;text-align:center;">Promotion</th>' +
                                 '<th style="padding:4px 10px;text-align:left;">Subscribes To</th>' +
+                                '<th style="padding:4px 10px;text-align:left;">Publishes To</th>' +
                                 '<th style="padding:4px 10px;text-align:center;" title="Clusters checked in this run that resolved to this SAAS target">Checked</th>' +
                             '</tr></thead>' +
                             '<tbody>' + targetRows + '</tbody>' +
