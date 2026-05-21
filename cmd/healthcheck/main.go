@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"github.com/openshift/operator-health-report/pkg/kube"
 	"github.com/openshift/operator-health-report/pkg/logging"
 	"github.com/openshift/operator-health-report/pkg/ocm"
+	"github.com/openshift/operator-health-report/pkg/report"
 	"github.com/openshift/operator-health-report/pkg/saas"
 
 	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
@@ -393,12 +393,11 @@ func main() {
 	fmt.Fprintf(os.Stderr, "\nResults written to: %s (%d cluster entries, %d SAAS metadata)\n",
 		outputFile, len(allOutputs), len(saasMetadata))
 
-	// Generate HTML using the bash script (reuse existing HTML generation)
+	// Generate HTML report
 	if !noHTML {
 		htmlFile := strings.TrimSuffix(outputFile, ".json") + ".html"
-		cmd := exec.Command("bash", "lib/generate_html_report.sh", outputFile, htmlFile)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "HTML generation failed: %v\n%s\n", err, output)
+		if err := report.GenerateHTML(data, htmlFile); err != nil {
+			fmt.Fprintf(os.Stderr, "HTML generation failed: %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "HTML report: %s\n", htmlFile)
 		}
