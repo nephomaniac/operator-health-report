@@ -102,10 +102,13 @@ func checkMetricsHealth(ctx context.Context, cc *checks.ClusterContext) {
 		return
 	}
 
-	// Check each expected metric — output format matches bash version for HTML rendering
+	// Check each expected metric — output format matches bash version for HTML rendering.
+	// Distinguishes between "query succeeded, metric absent" (real MISSING) vs
+	// "query failed" (authorization/elevation issue — not a metric problem).
 	found := 0
 	missing := 0
 	expectedAbsent := 0
+	queryFailed := 0
 	var metricResults []map[string]any
 
 	for _, metric := range expectedMetrics {
@@ -117,9 +120,20 @@ func checkMetricsHealth(ctx context.Context, cc *checks.ClusterContext) {
 			"trigger": metric.Trigger,
 		}
 
+		if queryErr != nil {
+			// Query itself failed (Forbidden, Unauthorized, pod not found, etc.)
+			entry["status"] = "query_error"
+			entry["value"] = ""
+			entry["trigger_present"] = "unknown"
+			entry["error"] = queryErr.Error()
+			queryFailed++
+			metricResults = append(metricResults, entry)
+			continue
+		}
+
 		isPresent := false
 		metricValue := ""
-		if queryErr == nil && body != "" && thanos.HasResults(body) {
+		if body != "" && thanos.HasResults(body) {
 			isPresent = true
 			if val, _, ok := thanos.InstantValue(body); ok {
 				metricValue = val
@@ -159,10 +173,19 @@ func checkMetricsHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r.Details["present"] = found
 	r.Details["missing"] = missing
 	r.Details["expected_absent"] = expectedAbsent
+	r.Details["query_errors"] = queryFailed
 
-	log.WithField("found", found).WithField("missing", missing).Debug("OME metrics audit")
+	log.WithField("found", found).WithField("missing", missing).WithField("query_errors", queryFailed).Debug("OME metrics audit")
 
 	switch {
+	case queryFailed > 0 && found == 0:
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Cannot verify metrics — %d/%d queries failed (authorization/elevation issue)",
+			queryFailed, len(expectedMetrics))
+	case queryFailed > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d/%d metrics present, %d query errors, %d expected absent — partial results due to authorization issues",
+			found, len(expectedMetrics), queryFailed, expectedAbsent)
 	case missing > 0:
 		r.Status = checks.StatusWarning
 		r.Message = fmt.Sprintf("%d/%d metrics present, %d missing (trigger exists), %d expected absent",

@@ -1567,15 +1567,16 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                                         '<th style="text-align:left;padding:3px 6px;">Assessment</th>' +
                                         '</tr></thead><tbody>' +
                                         value.map(m => {
-                                            const statusIcon = m.status === 'found' ? '✓' : m.status === 'absent_expected' ? 'ℹ' : '✗';
-                                            const statusColor = m.status === 'found' ? '#28a745' : m.status === 'absent_expected' ? '#6c757d' : '#dc3545';
-                                            const triggerIcon = m.trigger_present === 'true' ? '✓' : '✗';
-                                            const triggerColor = m.trigger_present === 'true' ? '#28a745' : '#6c757d';
+                                            const statusIcon = m.status === 'found' ? '✓' : m.status === 'absent_expected' ? 'ℹ' : m.status === 'query_error' ? '⚠' : '✗';
+                                            const statusColor = m.status === 'found' ? '#28a745' : m.status === 'absent_expected' ? '#6c757d' : m.status === 'query_error' ? '#f39c12' : '#dc3545';
+                                            const triggerIcon = m.trigger_present === 'true' ? '✓' : m.trigger_present === 'unknown' ? '?' : '✗';
+                                            const triggerColor = m.trigger_present === 'true' ? '#28a745' : m.trigger_present === 'unknown' ? '#f39c12' : '#6c757d';
                                             const trigger = m.trigger || m.condition || '—';
                                             let assessment = '';
                                             if (m.status === 'found') assessment = '<span style="color:#28a745;">Healthy</span>';
                                             else if (m.status === 'absent_expected') assessment = '<span style="color:#6c757d;">Expected — trigger not present</span>';
-                                            else if (m.status === 'MISSING') assessment = '<span style="color:#dc3545;">OME error — trigger present but metric absent (controller may not have reconciled)</span>';
+                                            else if (m.status === 'query_error') assessment = '<span style="color:#f39c12;">Query failed — authorization/elevation issue (not a metric problem)</span>';
+                                            else if (m.status === 'MISSING') assessment = '<span style="color:#dc3545;">Metric absent — trigger present but metric not found (controller may not have reconciled)</span>';
                                             else assessment = '<span style="color:#f39c12;">Unknown</span>';
                                             return '<tr style="border-bottom:1px solid #f0f0f0;">' +
                                                 '<td style="padding:3px 6px;font-family:var(--font-mono);">' + m.name + '</td>' +
