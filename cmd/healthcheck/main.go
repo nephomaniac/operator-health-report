@@ -17,6 +17,7 @@ import (
 	"github.com/openshift/operator-health-report/pkg/ocm"
 	"github.com/openshift/operator-health-report/pkg/saas"
 
+	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	// Import operator checkers for init() registration
@@ -29,17 +30,18 @@ var version = "dev"
 
 func main() {
 	var (
-		clusterList string
-		reason      string
-		operators   stringSlice
-		noElevate   bool
-		parallel    int
-		outputFile  string
-		noHTML      bool
-		logLevel    string
-		logDir      string
-		ocmConfig   string
-		ocmURL      string
+		clusterList  string
+		reason       string
+		operators    stringSlice
+		noElevate    bool
+		parallel     int
+		outputFile   string
+		noHTML       bool
+		logLevel     string
+		logDir       string
+		ocmConfig    string
+		ocmURL       string
+		listClusters string
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", "", "File with cluster IDs (one per line)")
@@ -53,6 +55,7 @@ func main() {
 	flag.StringVar(&logDir, "log-dir", "", "Directory for debug log file (captures all levels)")
 	flag.StringVar(&ocmConfig, "ocm-config", "", "Path to OCM config file (default: $OCM_CONFIG or ~/.config/ocm/ocm.json)")
 	flag.StringVar(&ocmURL, "ocm-url", "", "OCM API URL override (e.g., https://api.stage.openshift.com)")
+	flag.StringVar(&listClusters, "list-clusters", "", "List clusters and exit (all, rosa, osd, hypershift)")
 	flag.Parse()
 
 	// Configure logging
@@ -68,6 +71,21 @@ func main() {
 	}
 
 	_ = logging.Log
+
+	// List clusters mode — query OCM and exit
+	if listClusters != "" {
+		ocmClient, err := ocm.NewClientWithOptions(ocm.Options{ConfigFile: ocmConfig, URL: ocmURL})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer ocmClient.Close()
+		if err := runListClusters(ocmClient, listClusters); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	if clusterList == "" {
 		fmt.Fprintln(os.Stderr, "Error: --cluster-list is required")
@@ -329,4 +347,49 @@ func detectOperatorVersion(ctx context.Context, client *kube.ClusterClient, op c
 		return image[idx+1 : end]
 	}
 	return "unknown"
+}
+
+func runListClusters(ocmClient *ocm.Client, filter string) error {
+	var search string
+	switch filter {
+	case "all":
+		search = "managed='true' and state='ready'"
+	case "rosa":
+		search = "managed='true' and state='ready' and product.id='rosa'"
+	case "osd":
+		search = "managed='true' and state='ready' and product.id='osd'"
+	case "hypershift":
+		search = "managed='true' and state='ready' and hypershift.enabled='true'"
+	default:
+		search = filter
+	}
+
+	conn := ocmClient.Conn()
+	resp, err := conn.ClustersMgmt().V1().Clusters().List().
+		Search(search).
+		Size(1000).
+		Send()
+	if err != nil {
+		return fmt.Errorf("cluster search failed: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Found %d clusters (%s)\n", resp.Total(), ocmClient.Environment())
+
+	resp.Items().Each(func(cluster *cmv1.Cluster) bool {
+		hcp := "false"
+		if cluster.Hypershift().Enabled() {
+			hcp = "true"
+		}
+		fmt.Printf("%-36s  %-40s  %-20s  %-6s  %-5s  %s\n",
+			cluster.ID(),
+			cluster.Name(),
+			cluster.OpenshiftVersion(),
+			cluster.Status().State(),
+			hcp,
+			cluster.CreationTimestamp().Format("2006-01-02T15:04:05Z"),
+		)
+		return true
+	})
+
+	return nil
 }
