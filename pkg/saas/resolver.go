@@ -22,11 +22,15 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 // Target represents a SAAS deployment target
 type Target struct {
-	Name     string `json:"target"`
-	Version  string `json:"version"`
-	ImageTag string `json:"image_tag"`
-	SaasFile string `json:"saas_file"`
-	Method   string `json:"method"` // PKO or OLM
+	Name      string   `json:"target"`
+	Version   string   `json:"version"`
+	ImageTag  string   `json:"image_tag"`
+	SaasFile  string   `json:"saas_file"`
+	Method    string   `json:"method"`    // PKO or OLM
+	Auto      bool     `json:"auto"`      // auto-promotion enabled
+	SoakDays  *int     `json:"soak_days"` // soak period before promotion
+	Publish   []string `json:"publish"`   // channels this target publishes to
+	Subscribe []string `json:"subscribe"` // channels this target subscribes to
 }
 
 // saasFile is the YAML structure of an app-interface SAAS file
@@ -48,7 +52,10 @@ type saasTarget struct {
 }
 
 type saasPromotion struct {
-	SoakDays *int `yaml:"soakDays"`
+	SoakDays  *int     `yaml:"soakDays"`
+	Auto      bool     `yaml:"auto"`
+	Publish   []string `yaml:"publish"`
+	Subscribe []string `yaml:"subscribe"`
 }
 
 // quayTagResponse is the Quay.io tag list API response
@@ -207,8 +214,12 @@ func fetchTargets(ctx context.Context, saasFileName string) ([]Target, error) {
 			}
 
 			t := Target{
-				Name:    st.Name,
-				Version: st.Ref,
+				Name:      st.Name,
+				Version:   st.Ref,
+				Auto:      st.Promotion.Auto,
+				SoakDays:  st.Promotion.SoakDays,
+				Publish:   st.Promotion.Publish,
+				Subscribe: st.Promotion.Subscribe,
 			}
 
 			// Resolve image tag from Quay

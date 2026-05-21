@@ -2152,37 +2152,41 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     };
                     const targetRows = targets.map(t => {
                         const targetEnv = classifyEnv(t.target);
-                        const isTested = targetEnv === testedEnv;
-                        // Count clusters per target by hive shard mapping
-                        // Use shard-based counting to handle target resolution mismatches
+                        // Count clusters in our results that resolved to this SAAS target
                         const clusterCount = opData.filter(c => {
-                            const shard = c.hive_shard || '';
                             const vc = (c.health_checks || []).find(ch => ch.check === 'version_verification');
-                            const resolvedTarget = vc?.details?.target_name || '';
-                            // Exact match on resolved target name
+                            const resolvedTarget = vc?.details?.saas_target || '';
                             if (resolvedTarget === t.target) return true;
-                            // Shard-based match: target name contains shard name or shares shard number
+                            // Fuzzy: shard-based match
+                            const shard = c.hive_shard || '';
                             if (shard && t.target.includes(shard)) return true;
                             if (shard) {
                                 const targetNum = t.target.match(/(\d+)/);
                                 const shardNum = shard.match(/(\d+)/);
                                 if (targetNum && shardNum && targetNum[1] === shardNum[1] && classifyEnv(t.target) === classifyEnv(shard)) {
-                                    // Only match if no other target in the same env has the exact shard name
                                     const exactShardTarget = targets.find(other => other.target.includes(shard) && other !== t);
                                     if (!exactShardTarget) return true;
                                 }
                             }
                             return false;
                         }).length;
+
+                        const isTested = clusterCount > 0;
                         const methodColor = t.method === 'PKO' ? '#5eecc0' : '#fdd76b';
-                        const rowOpacity = isTested ? '1' : '0.4';
-                        const countDisplay = isTested ? (clusterCount + (clusterCount === 0 ? ' ⚠' : '')) : '—';
-                        const countStyle = isTested && clusterCount === 0 ? 'color:#ff8a8a;font-weight:600;' : 'color:var(--text-primary);';
+                        const rowOpacity = isTested ? '1' : '0.5';
+                        const rowBg = isTested ? 'background:rgba(94,236,192,0.06);' : '';
+                        const countDisplay = clusterCount > 0 ? clusterCount : '—';
+                        const countStyle = isTested ? 'color:var(--text-primary);font-weight:600;' : 'color:var(--text-muted);';
                         const envBadge = '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;margin-left:4px;background:rgba(255,255,255,0.06);color:var(--text-muted);">' + targetEnv + '</span>';
-                        return '<tr style="opacity:' + rowOpacity + ';">' +
+                        const autoBadge = t.auto ? '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;background:#5eecc030;color:#5eecc0;">auto</span>' : '<span style="display:inline-block;font-size:0.7em;padding:1px 4px;border-radius:2px;background:rgba(255,255,255,0.06);color:var(--text-muted);">manual</span>';
+                        const channels = (t.subscribe && t.subscribe.length > 0) ? t.subscribe.map(ch => ch.replace(/.*channel-/, '')).join(', ') : '—';
+
+                        return '<tr style="opacity:' + rowOpacity + ';' + rowBg + '">' +
                             '<td style="padding:4px 10px;">' + (t.target || '') + envBadge + '</td>' +
                             '<td style="padding:4px 10px;"><span style="display:inline-block;background:' + methodColor + ';color:#111;font-size:0.75em;padding:1px 6px;border-radius:3px;font-weight:600;">' + (t.method || '?') + '</span></td>' +
                             '<td style="padding:4px 10px;font-family:var(--font-mono);font-size:0.85em;">' + (t.image_tag || t.version || '') + '</td>' +
+                            '<td style="padding:4px 10px;text-align:center;">' + autoBadge + '</td>' +
+                            '<td style="padding:4px 10px;font-size:0.8em;color:var(--text-muted);">' + channels + '</td>' +
                             '<td style="padding:4px 10px;text-align:center;' + countStyle + '">' + countDisplay + '</td>' +
                         '</tr>';
                     }).join('');
@@ -2193,7 +2197,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                                 '<th style="padding:4px 10px;text-align:left;">Target</th>' +
                                 '<th style="padding:4px 10px;text-align:left;">Method</th>' +
                                 '<th style="padding:4px 10px;text-align:left;">Version</th>' +
-                                '<th style="padding:4px 10px;text-align:center;">Clusters</th>' +
+                                '<th style="padding:4px 10px;text-align:center;">Promotion</th>' +
+                                '<th style="padding:4px 10px;text-align:left;">Subscribes To</th>' +
+                                '<th style="padding:4px 10px;text-align:center;" title="Clusters checked in this run that resolved to this SAAS target">Checked</th>' +
                             '</tr></thead>' +
                             '<tbody>' + targetRows + '</tbody>' +
                         '</table>' +
