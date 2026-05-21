@@ -550,7 +550,7 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
     <div class="container">
         <div class="header">
             <h1>Operator Health Report</h1>
-            <div class="subtitle">Generated on <span id="reportDate"></span> | Script version: <span id="scriptVersion">unknown</span></div>
+            <div class="subtitle">Generated on <span id="reportDate"></span> | Version: <span id="scriptVersion"></span></div>
         </div>
 
         <div class="summary-overview" id="summaryOverview"></div>
@@ -594,8 +594,12 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
         }
 
         // Extract and display script version from first cluster's data
-        if (healthData && healthData.length > 0 && healthData[0].script_version) {
-            document.getElementById('scriptVersion').textContent = healthData[0].script_version;
+        // Extract version from cluster data or SAAS metadata
+        const reportVersion = (healthData && healthData.length > 0 && healthData[0].script_version)
+            ? healthData[0].script_version
+            : (healthDataRaw && Array.isArray(healthDataRaw) && healthDataRaw.find(e => e.script_version))?.script_version || 'dev';
+        if (reportVersion) {
+            document.getElementById('scriptVersion').textContent = reportVersion;
         }
 
         function expandToCheck(clusterIdx, checkId) {

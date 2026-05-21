@@ -27,6 +27,8 @@ import (
 	_ "github.com/openshift/operator-health-report/pkg/checks/rmo"
 )
 
+// version is set at build time via:
+//   go build -ldflags "-X main.version=$(git describe --always --dirty)" ./cmd/healthcheck/
 var version = "dev"
 
 func main() {
@@ -181,6 +183,7 @@ func main() {
 		Type         string         `json:"type"`
 		OperatorName string         `json:"operator_name"`
 		OCMEnv       string         `json:"ocm_environment"`
+		Version      string         `json:"script_version"`
 		Targets      []saas.Target  `json:"targets"`
 		Pipeline     *saas.Pipeline `json:"pipeline,omitempty"`
 	}
@@ -238,6 +241,7 @@ func main() {
 			Type:         "saas_targets",
 			OperatorName: op.Name,
 			OCMEnv:       ocmEnv,
+			Version:      version,
 			Targets:      targets,
 			Pipeline:     pipeline,
 		})
