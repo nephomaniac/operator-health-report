@@ -240,6 +240,26 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .clusters-table tbody tr.main-row.expanded {
             background: var(--accent-dim);
         }
+
+        /* SAAS target table rows */
+        .saas-target-row { transition: all 0.15s; }
+        .saas-target-row:hover { background: rgba(102,126,234,0.1) !important; }
+        .saas-target-row:active { background: rgba(102,126,234,0.2) !important; transform: scale(0.995); }
+
+        /* Pipeline nodes */
+        .pipeline-node { transition: all 0.15s; }
+        .pipeline-node:hover { transform: scale(1.05) !important; box-shadow: 0 2px 12px rgba(102,126,234,0.3); }
+        .pipeline-node:active { transform: scale(0.97) !important; }
+
+        /* Pipeline detail panels */
+        .pipeline-detail { transition: all 0.15s; }
+        .pipeline-detail:hover { box-shadow: 0 6px 24px rgba(0,0,0,0.6) !important; }
+
+        /* Clickable links in reports */
+        a[target="_blank"] { transition: color 0.15s, text-shadow 0.15s; }
+        a[target="_blank"]:hover { text-shadow: 0 0 8px currentColor; }
+        a[target="_blank"]:active { opacity: 0.7; }
+
         .clusters-table td {
             padding: 8px 6px;
             vertical-align: middle;
@@ -2193,7 +2213,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         const channels = (t.subscribe && t.subscribe.length > 0) ? t.subscribe.map(ch => ch.replace(/.*channel-/, '')).join(', ') : '—';
 
                         const pipelineNodeId = 'pipeline-node-' + (t.target || '').replace(/[^a-z0-9]/gi, '-');
-                        return '<tr style="opacity:' + rowOpacity + ';' + rowBg + 'cursor:pointer;" onclick="var el=document.getElementById(\'' + pipelineNodeId + '\'); if(el){el.scrollIntoView({behavior:\'smooth\',block:\'center\'}); el.style.boxShadow=\'0 0 12px var(--accent)\'; setTimeout(function(){el.style.boxShadow=\'\';},2000); var d=document.getElementById(\'' + pipelineNodeId + '-detail\'); if(d) d.style.display=\'block\';}" title="Click to view in pipeline">' +
+                        return '<tr class="saas-target-row" style="opacity:' + rowOpacity + ';' + rowBg + 'cursor:pointer;" onclick="var el=document.getElementById(\'' + pipelineNodeId + '\'); if(el){el.scrollIntoView({behavior:\'smooth\',block:\'center\'}); el.style.boxShadow=\'0 0 12px var(--accent)\'; setTimeout(function(){el.style.boxShadow=\'\';},2000); var d=document.getElementById(\'' + pipelineNodeId + '-detail\'); if(d) d.style.display=\'block\';}" title="Click to view in pipeline">' +
                             '<td style="padding:4px 10px;">' + (t.target || '') + envBadge + '</td>' +
                             '<td style="padding:4px 10px;"><span style="display:inline-block;background:' + methodColor + ';color:#111;font-size:0.75em;padding:1px 6px;border-radius:3px;font-weight:600;">' + (t.method || '?') + '</span></td>' +
                             '<td style="padding:4px 10px;font-family:var(--font-mono);font-size:0.85em;">' + (() => {
@@ -2327,7 +2347,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
 
                     // Clickable node card
                     const nodeId = `pipeline-node-${nodeName.replace(/[^a-z0-9]/gi, '-')}`;
-                    html += `<div id="${nodeId}" onclick="document.getElementById('${nodeId}-detail').style.display = document.getElementById('${nodeId}-detail').style.display === 'none' ? 'block' : 'none'" style="cursor:pointer;border:1.5px solid ${borderColor};border-radius:6px;padding:6px 8px;margin:3px 0;background:${bgColor};width:130px;font-size:0.78em;transition:all 0.15s;" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform='scale(1)'">`;
+                    html += `<div id="${nodeId}" class="pipeline-node" onclick="document.getElementById('${nodeId}-detail').style.display = document.getElementById('${nodeId}-detail').style.display === 'none' ? 'block' : 'none'" style="cursor:pointer;border:1.5px solid ${borderColor};border-radius:6px;padding:6px 8px;margin:3px 0;background:${bgColor};width:130px;font-size:0.78em;">`;
                     html += `<div style="font-weight:600;color:var(--text-primary);word-break:break-all;line-height:1.2;">${nodeName}</div>`;
                     html += `<div style="margin-top:3px;display:flex;gap:3px;flex-wrap:wrap;">${typeBadge} ${autoBadge}</div>`;
                     html += `<div style="font-family:var(--font-mono,monospace);font-size:0.85em;color:var(--text-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;">${refDisplay}</div>`;
@@ -2339,7 +2359,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     const pubChannels = (node.publish || []).map(ch => ch.replace(/.*channel-/, '')).join(', ') || '—';
                     const fullRef = node.ref || '—';
                     const shortRef = fullRef.length > 12 ? fullRef.substring(0, 12) + '…' : fullRef;
-                    html += `<div id="${nodeId}-detail" onclick="event.stopPropagation(); this.style.display='none'" style="display:none;position:relative;z-index:10;border:1px solid var(--accent);border-radius:8px;padding:10px;margin:4px -20px;background:var(--bg-primary);width:180px;font-size:0.72em;box-shadow:0 4px 20px rgba(0,0,0,0.5);cursor:pointer;" title="Click to close">`;
+                    html += `<div id="${nodeId}-detail" class="pipeline-detail" onclick="event.stopPropagation(); this.style.display='none'" style="display:none;position:relative;z-index:10;border:1px solid var(--accent);border-radius:8px;padding:10px;margin:4px -20px;background:var(--bg-primary);width:180px;font-size:0.72em;box-shadow:0 4px 20px rgba(0,0,0,0.5);cursor:pointer;" title="Click to close">`;
                     html += `<div style="font-weight:700;color:var(--accent);margin-bottom:6px;border-bottom:1px solid var(--border-light);padding-bottom:4px;">Target Details</div>`;
                     if (node.hive_cluster) html += `<div style="margin-bottom:3px;"><span style="color:var(--text-muted);">Hive:</span> <strong>${node.hive_cluster}</strong></div>`;
                     if (node.repo_url && fullRef.length === 40) {
