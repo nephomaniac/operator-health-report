@@ -39,6 +39,7 @@ type Target struct {
 // saasFile is the YAML structure of an app-interface SAAS file
 type saasFile struct {
 	ResourceTemplates []resourceTemplate `yaml:"resourceTemplates"`
+	PipelinesProvider saasNamespace      `yaml:"pipelinesProvider"`
 }
 
 type resourceTemplate struct {
@@ -173,41 +174,39 @@ func FetchAllTargets(ctx context.Context, pkoSaas, olmSaas string) ([]Target, er
 	return all, nil
 }
 
-// fetchTargets fetches targets from a SAAS file via GitLab API and enriches with Quay image tags
-func fetchTargets(ctx context.Context, saasFileName string) ([]Target, error) {
-	log := logging.Log
-
-	// Fetch SAAS YAML from GitLab
+// fetchSaasFile fetches and parses a SAAS YAML file from GitLab
+func fetchSaasFile(ctx context.Context, saasFileName string) (*saasFile, error) {
 	url := fmt.Sprintf("%s/%s?ref_type=heads", gitlabBaseURL, saasFileName)
-	log.WithField("url", url).Debug("Fetching SAAS file from GitLab")
-
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, err
 	}
-
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching SAAS file: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("GitLab returned %d for %s", resp.StatusCode, saasFileName)
 	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
+		return nil, err
 	}
-
-	// Parse YAML
 	var sf saasFile
 	if err := yaml.Unmarshal(body, &sf); err != nil {
 		return nil, fmt.Errorf("parsing SAAS YAML: %w", err)
 	}
+	return &sf, nil
+}
 
-	// Derive Quay repo name from SAAS filename
+// fetchTargets fetches targets from a SAAS file via GitLab API and enriches with Quay image tags
+func fetchTargets(ctx context.Context, saasFileName string) ([]Target, error) {
+	sf, err := fetchSaasFile(ctx, saasFileName)
+	if err != nil {
+		return nil, err
+	}
+
 	quayRepo := deriveQuayRepo(saasFileName)
 
 	// Fetch Quay tags for image tag enrichment
@@ -243,7 +242,7 @@ func fetchTargets(ctx context.Context, saasFileName string) ([]Target, error) {
 		}
 	}
 
-	log.WithField("saas_file", saasFileName).WithField("count", len(targets)).Debug("Parsed SAAS targets")
+	logging.Log.WithField("saas_file", saasFileName).WithField("count", len(targets)).Debug("Parsed SAAS targets")
 	return targets, nil
 }
 

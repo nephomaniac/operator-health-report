@@ -2320,7 +2320,18 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
             });
 
             let html = '<div style="margin:0 0 16px;padding:12px 14px;background:var(--bg-card);border:1px solid var(--border-light);border-radius:6px;overflow-x:auto;">';
-            html += '<div style="font-weight:600;font-size:0.9em;margin-bottom:12px;color:var(--text-secondary);">Promotion Pipeline</div>';
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">';
+            html += '<div style="font-weight:600;font-size:0.9em;color:var(--text-secondary);">Promotion Pipeline</div>';
+            if (pipeline.tekton && pipeline.tekton.pipeline_runs_url) {
+                html += `<div style="font-size:0.78em;">`;
+                html += `<a href="${pipeline.tekton.pipeline_runs_url}" target="_blank" rel="noopener" style="color:var(--accent);margin-right:12px;">View Pipeline Runs ↗</a>`;
+                html += `<span style="color:var(--text-muted);">on ${pipeline.tekton.cluster}</span>`;
+                html += `</div>`;
+            }
+            if (pipeline.repo_url) {
+                html += `<a href="${pipeline.repo_url}" target="_blank" rel="noopener" style="font-size:0.78em;color:var(--text-muted);">Source ↗</a>`;
+            }
+            html += '</div>';
             html += '<div style="display:flex;gap:8px;align-items:flex-start;min-width:max-content;padding-bottom:8px;">';
 
             pipeline.stages.forEach((stage, stageIdx) => {

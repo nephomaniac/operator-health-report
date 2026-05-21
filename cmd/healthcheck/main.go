@@ -184,6 +184,42 @@ func main() {
 		Targets      []saas.Target  `json:"targets"`
 		Pipeline     *saas.Pipeline `json:"pipeline,omitempty"`
 	}
+	// Create a prod OCM client for resolving pipeline cluster console URLs.
+	// Uses the same SSO token — no separate login needed.
+	var resolveConsoleURL saas.ConsoleURLResolver
+	prodClient, prodErr := ocm.NewClientWithOptions(ocm.Options{URL: "https://api.openshift.com"})
+	if prodErr == nil {
+		defer prodClient.Close()
+		// Cache resolved console URLs to avoid redundant API calls
+		consoleCache := map[string]string{}
+		var cacheMu sync.Mutex
+		resolveConsoleURL = func(clusterName string) (string, error) {
+			cacheMu.Lock()
+			if url, ok := consoleCache[clusterName]; ok {
+				cacheMu.Unlock()
+				return url, nil
+			}
+			cacheMu.Unlock()
+
+			resp, err := prodClient.Conn().ClustersMgmt().V1().Clusters().List().
+				Search(fmt.Sprintf("name='%s'", clusterName)).Size(1).Send()
+			if err != nil {
+				return "", err
+			}
+			if resp.Total() == 0 {
+				return "", fmt.Errorf("cluster %s not found in prod OCM", clusterName)
+			}
+			consoleURL := resp.Items().Get(0).Console().URL()
+			cacheMu.Lock()
+			consoleCache[clusterName] = consoleURL
+			cacheMu.Unlock()
+			return consoleURL, nil
+		}
+		fmt.Fprintf(os.Stderr, "Prod OCM: connected for pipeline cluster resolution\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "Prod OCM: skipping pipeline URL resolution (%v)\n", prodErr)
+	}
+
 	var saasMetadata []saasTargetMeta
 	for _, op := range opConfigs {
 		ctx := context.Background()
@@ -192,7 +228,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "SAAS targets: %s — %d active targets\n", strings.ToUpper(op.ShortName), len(targets))
 		}
 
-		pipeline, pipeErr := saas.BuildPipeline(ctx, op.Name, op.PKOSaas, op.OLMSaas)
+		pipeline, pipeErr := saas.BuildPipeline(ctx, op.Name, op.PKOSaas, op.OLMSaas, resolveConsoleURL)
 		if pipeErr == nil && pipeline != nil {
 			fmt.Fprintf(os.Stderr, "Pipeline: %s — %d nodes, %d edges, %d stages\n",
 				strings.ToUpper(op.ShortName), len(pipeline.Nodes), len(pipeline.Edges), len(pipeline.Stages))

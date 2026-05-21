@@ -44,21 +44,59 @@ type PipelineStage struct {
 	Nodes []string `json:"nodes"`
 }
 
+// PipelineInfo holds Tekton pipeline cluster and namespace details
+type PipelineInfo struct {
+	Cluster      string `json:"cluster"`
+	Namespace    string `json:"namespace"`
+	ConsoleURL   string `json:"console_url,omitempty"`
+	PipelineRunsURL string `json:"pipeline_runs_url,omitempty"`
+}
+
 // Pipeline represents the complete promotion DAG for an operator
 type Pipeline struct {
 	OperatorName string          `json:"operator_name"`
+	RepoURL      string         `json:"repo_url,omitempty"`
+	Tekton       *PipelineInfo  `json:"tekton,omitempty"`
 	Nodes        []PipelineNode  `json:"nodes"`
 	Edges        []PipelineEdge  `json:"edges"`
 	Stages       []PipelineStage `json:"stages"`
 }
 
+// ConsoleURLResolver resolves an OCM cluster name to its OpenShift console URL.
+// Pass nil to skip console URL resolution.
+type ConsoleURLResolver func(clusterName string) (string, error)
+
 // BuildPipeline constructs the full promotion pipeline for an operator
 // by fetching deploy SAAS files and e2e test SAAS files, then connecting
 // them via publish/subscribe channels.
-func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string) (*Pipeline, error) {
+func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string, resolveConsoleURL ConsoleURLResolver) (*Pipeline, error) {
 	log := logging.Log
 
 	p := &Pipeline{OperatorName: operatorName}
+
+	// Extract pipeline provider info from the primary SAAS file
+	primarySaas := pkoSaas
+	if primarySaas == "" {
+		primarySaas = olmSaas
+	}
+	if primarySaas != "" {
+		sf, sfErr := fetchSaasFile(ctx, primarySaas)
+		if sfErr == nil && sf != nil {
+			if len(sf.ResourceTemplates) > 0 {
+				p.RepoURL = sf.ResourceTemplates[0].URL
+			}
+			tektonInfo := parsePipelineProvider(sf.PipelinesProvider.Ref)
+			if tektonInfo != nil && resolveConsoleURL != nil {
+				consoleURL, err := resolveConsoleURL(tektonInfo.Cluster)
+				if err == nil && consoleURL != "" {
+					tektonInfo.ConsoleURL = consoleURL
+					tektonInfo.PipelineRunsURL = fmt.Sprintf("%s/k8s/ns/%s/tekton.dev~v1~PipelineRun",
+						strings.TrimRight(consoleURL, "/"), tektonInfo.Namespace)
+				}
+				p.Tekton = tektonInfo
+			}
+		}
+	}
 
 	// Fetch deploy targets from PKO and OLM SAAS files
 	if pkoSaas != "" {
@@ -334,6 +372,42 @@ func buildStages(nodes []PipelineNode, edges []PipelineEdge) []PipelineStage {
 	return stages
 }
 
+
+// parsePipelineProvider extracts the Tekton cluster and namespace from a pipelinesProvider $ref.
+// Example ref: /services/osd-operators/configure-alertmanager-operator/pipelines/tekton-configure-alertmanager-operator-pipelines.appsrep09ue1.yaml
+// → cluster: appsrep09ue1, namespace: configure-alertmanager-operator-pipelines
+func parsePipelineProvider(ref string) *PipelineInfo {
+	if ref == "" {
+		return nil
+	}
+
+	// Extract filename from path
+	parts := strings.Split(ref, "/")
+	filename := parts[len(parts)-1]
+	// Remove .yaml extension
+	filename = strings.TrimSuffix(filename, ".yaml")
+
+	// Pattern: tekton-{namespace}.{cluster}
+	// e.g., tekton-configure-alertmanager-operator-pipelines.appsrep09ue1
+	if !strings.HasPrefix(filename, "tekton-") {
+		return nil
+	}
+	filename = strings.TrimPrefix(filename, "tekton-")
+
+	// Split on the last dot to separate namespace from cluster
+	dotIdx := strings.LastIndex(filename, ".")
+	if dotIdx <= 0 {
+		return nil
+	}
+
+	namespace := filename[:dotIdx]
+	cluster := filename[dotIdx+1:]
+
+	return &PipelineInfo{
+		Cluster:   cluster,
+		Namespace: namespace,
+	}
+}
 
 // classifyEnv determines the environment from a target name
 func classifyEnv(name string) string {
