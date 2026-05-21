@@ -418,8 +418,9 @@ if [ "$COMPREHENSIVE_HEALTH" = true ]; then
             fi
         fi
 
-        # Export NO_ELEVATE so child scripts (collect_operator_health.sh) inherit it
+        # Export NO_ELEVATE so child scripts inherit it
         export NO_ELEVATE
+        [ "$NO_ELEVATE" = true ] && echo "Mode: --no-elevate (skipping all backplane elevation commands)"
 
         # Pre-fetch and cache versions for all operators
         for op in "${OPERATORS_TO_COLLECT[@]}"; do

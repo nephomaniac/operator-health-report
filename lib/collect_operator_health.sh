@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="057c133"
+SCRIPT_VERSION="e389f12"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -898,6 +898,9 @@ declare -a api_errors
 overall_status="HEALTHY"
 critical_count=0
 warning_count=0
+pod_name=""
+pod_count=0
+container_name=""
 
 #=============================================================================
 # 0. NAMESPACE STATUS CHECK
