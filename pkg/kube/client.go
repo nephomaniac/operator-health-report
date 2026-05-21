@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -43,6 +44,92 @@ type ClusterClient struct {
 	elevationBroken bool
 }
 
+const (
+	maxRetries    = 3
+	baseBackoff   = 2 * time.Second
+	maxBackoff    = 15 * time.Second
+)
+
+// isRetryable returns true for transient errors that should be retried
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "429") ||
+		strings.Contains(msg, "Too Many Requests") ||
+		strings.Contains(msg, "Rate limit") ||
+		strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "Try again later") ||
+		strings.Contains(msg, "500") ||
+		strings.Contains(msg, "502") ||
+		strings.Contains(msg, "503") ||
+		strings.Contains(msg, "504") ||
+		strings.Contains(msg, "server is currently unable") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "TLS handshake timeout") ||
+		strings.Contains(msg, "unexpected EOF")
+}
+
+// isAuthError returns true for errors that indicate auth/permission failures (not retryable)
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Forbidden") ||
+		strings.Contains(msg, "Unauthorized") ||
+		strings.Contains(msg, "401") ||
+		strings.Contains(msg, "403")
+}
+
+// withRetry executes fn with exponential backoff on retryable errors.
+// Auth errors are returned immediately without retry.
+func withRetry(ctx context.Context, description string, fn func() error) error {
+	log := logging.Log
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+		if isAuthError(lastErr) || !isRetryable(lastErr) {
+			return lastErr
+		}
+		if attempt < maxRetries {
+			backoff := baseBackoff * time.Duration(1<<uint(attempt))
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
+			wait := backoff + jitter
+			log.WithField("attempt", attempt+1).
+				WithField("wait", wait.Round(100*time.Millisecond)).
+				WithField("operation", description).
+				Warn("Rate limited — retrying")
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
+}
+
+// withRetryResult executes fn with retry, returning a value and error.
+func withRetryResult[T any](ctx context.Context, description string, fn func() (T, error)) (T, error) {
+	var result T
+	err := withRetry(ctx, description, func() error {
+		var fnErr error
+		result, fnErr = fn()
+		return fnErr
+	})
+	return result, err
+}
+
 // bpConfigMu serializes calls to backplane-cli's GetBackplaneConfiguration
 // which uses viper internally and is not goroutine-safe.
 var bpConfigMu sync.Mutex
@@ -76,11 +163,12 @@ func ConnectToClusterWithConn(ctx context.Context, clusterID, reason string, noE
 	log.WithField("cluster_id", clusterID).Info("Connecting to cluster via backplane")
 
 	var cfg *rest.Config
-	if ocmConn != nil {
-		cfg, err = bplogin.GetRestConfigWithConn(bp, ocmConn, clusterID)
-	} else {
-		cfg, err = bplogin.GetRestConfig(bp, clusterID)
-	}
+	cfg, err = withRetryResult(ctx, "backplane login "+clusterID, func() (*rest.Config, error) {
+		if ocmConn != nil {
+			return bplogin.GetRestConfigWithConn(bp, ocmConn, clusterID)
+		}
+		return bplogin.GetRestConfig(bp, clusterID)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("backplane login failed: %w", err)
 	}
@@ -107,12 +195,12 @@ func ConnectToClusterWithConn(ctx context.Context, clusterID, reason string, noE
 
 	// Create elevated clients if elevation is enabled
 	if !noElevate && reason != "" {
-		var elevCfg *rest.Config
-		if ocmConn != nil {
-			elevCfg, err = bplogin.GetRestConfigAsUserWithConn(bp, ocmConn, clusterID, "backplane-cluster-admin", reason)
-		} else {
-			elevCfg, err = bplogin.GetRestConfigAsUser(bp, clusterID, "backplane-cluster-admin", reason)
-		}
+		elevCfg, err := withRetryResult(ctx, "elevated login "+clusterID, func() (*rest.Config, error) {
+			if ocmConn != nil {
+				return bplogin.GetRestConfigAsUserWithConn(bp, ocmConn, clusterID, "backplane-cluster-admin", reason)
+			}
+			return bplogin.GetRestConfigAsUser(bp, clusterID, "backplane-cluster-admin", reason)
+		})
 		if err != nil {
 			log.WithField("error", err).Warn("Failed to create elevated config — elevation will be unavailable")
 			cc.elevationBroken = true
@@ -179,13 +267,12 @@ func (cc *ClusterClient) GetResource(ctx context.Context, gvr schema.GroupVersio
 		client = cc.elevatedDynamic
 	}
 
-	var obj *unstructured.Unstructured
-	var err error
-	if namespace != "" {
-		obj, err = client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	} else {
-		obj, err = client.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
-	}
+	obj, err := withRetryResult(ctx, "get "+gvr.Resource+"/"+name, func() (*unstructured.Unstructured, error) {
+		if namespace != "" {
+			return client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		}
+		return client.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
+	})
 	if elevated {
 		cc.checkElevatedError(err)
 	}
@@ -199,13 +286,12 @@ func (cc *ClusterClient) ListResources(ctx context.Context, gvr schema.GroupVers
 		client = cc.elevatedDynamic
 	}
 
-	var list *unstructured.UnstructuredList
-	var err error
-	if namespace != "" {
-		list, err = client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
-	} else {
-		list, err = client.Resource(gvr).List(ctx, metav1.ListOptions{})
-	}
+	list, err := withRetryResult(ctx, "list "+gvr.Resource, func() (*unstructured.UnstructuredList, error) {
+		if namespace != "" {
+			return client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
+		}
+		return client.Resource(gvr).List(ctx, metav1.ListOptions{})
+	})
 	if elevated {
 		cc.checkElevatedError(err)
 	}
@@ -214,11 +300,13 @@ func (cc *ClusterClient) ListResources(ctx context.Context, gvr schema.GroupVers
 
 // GetNamespacePhase returns the phase of a namespace
 func (cc *ClusterClient) GetNamespacePhase(ctx context.Context, name string) (string, error) {
-	ns, err := cc.clientset.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return "", err
-	}
-	return string(ns.Status.Phase), nil
+	return withRetryResult(ctx, "get namespace "+name, func() (string, error) {
+		ns, err := cc.clientset.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		return string(ns.Status.Phase), nil
+	})
 }
 
 // GetDeployment returns a deployment as JSON-like map
@@ -238,36 +326,49 @@ func (cc *ClusterClient) GetDeployment(ctx context.Context, namespace, name stri
 
 // GetPods returns pods matching a label selector
 func (cc *ClusterClient) GetPods(ctx context.Context, namespace, labelSelector string) (*corev1.PodList, error) {
-	return cc.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
+	return withRetryResult(ctx, "get pods "+namespace, func() (*corev1.PodList, error) {
+		return cc.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labelSelector,
+		})
 	})
 }
 
 // GetPodLogs returns the last N lines of logs from a deployment
 func (cc *ClusterClient) GetPodLogs(ctx context.Context, namespace, podName string, tailLines int64) (string, error) {
-	req := cc.clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
-		TailLines: &tailLines,
+	return withRetryResult(ctx, "get logs "+podName, func() (string, error) {
+		req := cc.clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+			TailLines: &tailLines,
+		})
+		stream, err := req.Stream(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer stream.Close()
+		buf := new(bytes.Buffer)
+		_, err = io.Copy(buf, stream)
+		return buf.String(), err
 	})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer stream.Close()
-	buf := new(bytes.Buffer)
-	_, err = io.Copy(buf, stream)
-	return buf.String(), err
 }
 
 // GetEvents returns events for a specific object
 func (cc *ClusterClient) GetEvents(ctx context.Context, namespace, objectName string) (*corev1.EventList, error) {
-	return cc.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
-		FieldSelector: fmt.Sprintf("involvedObject.name=%s", objectName),
+	return withRetryResult(ctx, "get events "+objectName, func() (*corev1.EventList, error) {
+		return cc.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("involvedObject.name=%s", objectName),
+		})
 	})
 }
 
 // ExecInPod executes a command inside a pod and returns stdout.
 // This is used for Thanos/Prometheus queries via pod exec.
+// Retries on transient errors (5xx, connection reset, timeout).
 func (cc *ClusterClient) ExecInPod(ctx context.Context, namespace, podName, container string, command []string, elevated bool) (string, error) {
+	return withRetryResult(ctx, "exec "+podName, func() (string, error) {
+		return cc.execInPodOnce(ctx, namespace, podName, container, command, elevated)
+	})
+}
+
+func (cc *ClusterClient) execInPodOnce(ctx context.Context, namespace, podName, container string, command []string, elevated bool) (string, error) {
 	config := cc.restConfig
 	client := cc.clientset
 	if elevated && cc.CanElevate() {
@@ -313,9 +414,10 @@ func (cc *ClusterClient) ExecInPod(ctx context.Context, namespace, podName, cont
 func (cc *ClusterClient) QueryThanos(ctx context.Context, query string) (string, error) {
 	log := logging.Log
 
-	// Find thanos pod with regular client (doesn't need elevation)
-	pods, err := cc.clientset.CoreV1().Pods("openshift-monitoring").List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=thanos-query",
+	pods, err := withRetryResult(ctx, "list thanos pods", func() (*corev1.PodList, error) {
+		return cc.clientset.CoreV1().Pods("openshift-monitoring").List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=thanos-query",
+		})
 	})
 	if err != nil {
 		return "", fmt.Errorf("listing thanos pods: %w", err)
@@ -338,8 +440,10 @@ func (cc *ClusterClient) QueryThanos(ctx context.Context, query string) (string,
 
 // QueryThanosRange runs a PromQL range query against the Thanos querier pod.
 func (cc *ClusterClient) QueryThanosRange(ctx context.Context, query string, start, end int64, step int) (string, error) {
-	pods, err := cc.clientset.CoreV1().Pods("openshift-monitoring").List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=thanos-query",
+	pods, err := withRetryResult(ctx, "list thanos pods", func() (*corev1.PodList, error) {
+		return cc.clientset.CoreV1().Pods("openshift-monitoring").List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=thanos-query",
+		})
 	})
 	if err != nil {
 		return "", fmt.Errorf("listing thanos pods: %w", err)
@@ -359,9 +463,10 @@ func (cc *ClusterClient) QueryThanosRange(ctx context.Context, query string, sta
 
 // QueryRHOBSPrometheus runs a PromQL query against the RHOBS Prometheus on MCs.
 func (cc *ClusterClient) QueryRHOBSPrometheus(ctx context.Context, query string) (string, error) {
-	// Find prometheus pod with regular client
-	pods, err := cc.clientset.CoreV1().Pods("openshift-observability-operator").List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=prometheus",
+	pods, err := withRetryResult(ctx, "list RHOBS prometheus pods", func() (*corev1.PodList, error) {
+		return cc.clientset.CoreV1().Pods("openshift-observability-operator").List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=prometheus",
+		})
 	})
 	if err != nil {
 		return "", fmt.Errorf("listing RHOBS prometheus pods: %w", err)
@@ -380,13 +485,15 @@ func (cc *ClusterClient) QueryRHOBSPrometheus(ctx context.Context, query string)
 
 // GetClusterVersion returns the desired cluster version string.
 func (cc *ClusterClient) GetClusterVersion(ctx context.Context) (string, error) {
-	gvr := schema.GroupVersionResource{Group: "config.openshift.io", Version: "v1", Resource: "clusterversions"}
-	cv, err := cc.dynamicClient.Resource(gvr).Get(ctx, "version", metav1.GetOptions{})
-	if err != nil {
-		return "", err
-	}
-	version, _, _ := unstructured.NestedString(cv.Object, "status", "desired", "version")
-	return version, nil
+	return withRetryResult(ctx, "get clusterversion", func() (string, error) {
+		gvr := schema.GroupVersionResource{Group: "config.openshift.io", Version: "v1", Resource: "clusterversions"}
+		cv, err := cc.dynamicClient.Resource(gvr).Get(ctx, "version", metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		version, _, _ := unstructured.NestedString(cv.Object, "status", "desired", "version")
+		return version, nil
+	})
 }
 
 // DetectClusterType returns the cluster type based on the cluster name prefix.
