@@ -256,9 +256,28 @@ cat > "$OUTPUT_HTML" <<'HTMLEOF'
         .pipeline-detail:hover { box-shadow: 0 6px 24px rgba(0,0,0,0.6) !important; }
 
         /* Clickable links in reports */
-        a[target="_blank"] { transition: color 0.15s, text-shadow 0.15s; }
-        a[target="_blank"]:hover { text-shadow: 0 0 8px currentColor; }
+        a[target="_blank"] {
+            transition: all 0.15s;
+            text-decoration: none;
+            border-bottom: 1px dashed transparent;
+        }
+        a[target="_blank"]:hover {
+            text-shadow: 0 0 10px currentColor;
+            border-bottom: 1px dashed currentColor;
+            filter: brightness(1.3);
+        }
         a[target="_blank"]:active { opacity: 0.7; }
+
+        /* Quay/GitHub links inside tables and panels — make them stand out */
+        .saas-target-row a, .pipeline-detail a {
+            padding: 1px 4px;
+            border-radius: 3px;
+            background: rgba(102,126,234,0.08);
+        }
+        .saas-target-row a:hover, .pipeline-detail a:hover {
+            background: rgba(102,126,234,0.25);
+            text-shadow: 0 0 12px var(--accent);
+        }
 
         .clusters-table td {
             padding: 8px 6px;
