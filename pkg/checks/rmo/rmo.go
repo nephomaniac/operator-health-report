@@ -1,0 +1,1257 @@
+package rmo
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/openshift/operator-health-report/pkg/checks"
+	"github.com/openshift/operator-health-report/pkg/logging"
+	"github.com/openshift/operator-health-report/pkg/thanos"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+// GVR definitions for custom resources
+var (
+	routeMonitorGVR      = schema.GroupVersionResource{Group: "monitoring.openshift.io", Version: "v1alpha1", Resource: "routemonitors"}
+	clusterUrlMonitorGVR = schema.GroupVersionResource{Group: "monitoring.openshift.io", Version: "v1alpha1", Resource: "clusterurlmonitors"}
+	prometheusRuleGVR    = schema.GroupVersionResource{Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules"}
+	hostedControlPlaneGVR = schema.GroupVersionResource{Group: "hypershift.openshift.io", Version: "v1beta1", Resource: "hostedcontrolplanes"}
+	clusterPackageGVR    = schema.GroupVersionResource{Group: "package-operator.run", Version: "v1alpha1", Resource: "clusterpackages"}
+)
+
+func serviceMonitorGVR(apiGroup string) schema.GroupVersionResource {
+	return schema.GroupVersionResource{Group: apiGroup, Version: "v1", Resource: "servicemonitors"}
+}
+
+func init() {
+	checks.Register(&RMOChecker{})
+}
+
+type RMOChecker struct{}
+
+func (c *RMOChecker) Name() string { return "rmo" }
+
+func (c *RMOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
+	checkControllerManager(ctx, cc)
+
+	// Fetch CRs once (shared by multiple checks, requires elevation)
+	rmList, cumList := fetchMonitorCRs(ctx, cc)
+
+	checkBlackboxExporter(ctx, cc, rmList, cumList)
+	checkRouteMonitorStatus(ctx, cc, rmList, cumList)
+	checkSREProbeExpectations(ctx, cc, rmList, cumList)
+	checkProbeHealth(ctx, cc, rmList, cumList)
+	checkServiceMonitorHealth(ctx, cc, rmList, cumList)
+	checkPrometheusRuleHealth(ctx, cc, rmList, cumList)
+	checkOperatorMetrics(ctx, cc)
+	checkConfig(ctx, cc)
+
+	if cc.ClusterType == "management_cluster" {
+		checkHCPCoverage(ctx, cc)
+		checkHCPProbeCoverage(ctx, cc)
+		checkHCPState(ctx, cc)
+		checkRHOBSAPIHealth(ctx, cc)
+	}
+
+	checkRHOBSIntegration(ctx, cc)
+
+	if cc.ClusterType != "management_cluster" {
+		checkLimitedSupportDisagreement(ctx, cc)
+	}
+}
+
+// fetchMonitorCRs retrieves RouteMonitor and ClusterUrlMonitor CRs with elevation
+func fetchMonitorCRs(ctx context.Context, cc *checks.ClusterContext) (*unstructured.UnstructuredList, *unstructured.UnstructuredList) {
+	if !cc.Client.CanElevate() {
+		return nil, nil
+	}
+
+	rmList, err := cc.Client.ListResources(ctx, routeMonitorGVR, "", true)
+	cc.RecordError("Get RouteMonitor CRs", err)
+	if err != nil {
+		rmList = nil
+	}
+
+	cumList, err := cc.Client.ListResources(ctx, clusterUrlMonitorGVR, "", true)
+	cc.RecordError("Get ClusterUrlMonitor CRs", err)
+	if err != nil {
+		cumList = nil
+	}
+
+	return rmList, cumList
+}
+
+func countItems(list *unstructured.UnstructuredList) int {
+	if list == nil {
+		return 0
+	}
+	return len(list.Items)
+}
+
+// checkControllerManager verifies the RMO controller pod status
+func checkControllerManager(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_controller_manager"
+
+	r := checks.Result{
+		Check:    "rmo_controller_manager",
+		Severity: checks.SeverityCritical,
+		Details:  map[string]any{},
+	}
+
+	podList, err := cc.Client.GetPods(ctx, cc.Operator.Namespace, "control-plane=controller-manager")
+	cc.RecordError("Get RMO controller pods", err)
+
+	if err != nil || len(podList.Items) == 0 {
+		r.Status = checks.StatusFail
+		r.Message = "No controller-manager pod found"
+		cc.AddResult(r)
+		return
+	}
+
+	pod := podList.Items[0]
+	podName := pod.Name
+	phase := string(pod.Status.Phase)
+
+	restarts := 0
+	termReason := ""
+	blackboxImage := ""
+
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "manager" {
+			restarts = int(cs.RestartCount)
+			if cs.LastTerminationState.Terminated != nil {
+				termReason = cs.LastTerminationState.Terminated.Reason
+			}
+		}
+	}
+
+	// Extract BLACKBOX_IMAGE env var
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "manager" {
+			for _, env := range container.Env {
+				if env.Name == "BLACKBOX_IMAGE" {
+					blackboxImage = env.Value
+				}
+			}
+		}
+	}
+
+	r.Details["pod_name"] = podName
+	r.Details["phase"] = phase
+	r.Details["restart_count"] = restarts
+	r.Details["last_termination_reason"] = termReason
+	r.Details["blackbox_image"] = blackboxImage
+
+	switch {
+	case phase != "Running":
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Controller-manager pod is %s (expected Running)", phase)
+	case restarts > 10:
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Excessive restarts (%d)", restarts)
+	case restarts > 5:
+		r.Status = checks.StatusWarning
+		r.Severity = checks.SeverityWarning
+		r.Message = fmt.Sprintf("Elevated restarts (%d)", restarts)
+	case termReason == "OOMKilled":
+		r.Status = checks.StatusWarning
+		r.Severity = checks.SeverityWarning
+		r.Message = "Last termination was OOMKilled"
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Controller-manager healthy (%s, %d restarts)", podName, restarts)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkBlackboxExporter verifies the blackbox-exporter deployment
+func checkBlackboxExporter(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
+	cc.CurrentCheck = "rmo_blackbox_exporter"
+
+	r := checks.Result{
+		Check:    "rmo_blackbox_exporter",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	totalMonitors := countItems(rmList) + countItems(cumList)
+	hasMonitors := totalMonitors > 0
+
+	bbDeploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, "blackbox-exporter", metav1.GetOptions{})
+
+	if err != nil {
+		if hasMonitors {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("Blackbox exporter missing but %d monitor(s) exist — probes cannot run", totalMonitors)
+		} else {
+			r.Status = checks.StatusInfo
+			r.Message = "No blackbox-exporter (expected — no monitors configured)"
+		}
+		r.Details["monitors_present"] = hasMonitors
+		r.Details["total_monitors"] = totalMonitors
+		cc.AddResult(r)
+		return
+	}
+
+	desired := 1
+	if bbDeploy.Spec.Replicas != nil {
+		desired = int(*bbDeploy.Spec.Replicas)
+	}
+	ready := int(bbDeploy.Status.ReadyReplicas)
+
+	// Check companion resources
+	_, svcErr := cc.Client.Clientset().CoreV1().Services(cc.Operator.Namespace).Get(ctx, "blackbox-exporter", metav1.GetOptions{})
+	svcExists := svcErr == nil
+
+	_, cmErr := cc.Client.Clientset().CoreV1().ConfigMaps(cc.Operator.Namespace).Get(ctx, "blackbox-exporter", metav1.GetOptions{})
+	cmExists := cmErr == nil
+
+	r.Details["desired_replicas"] = desired
+	r.Details["ready_replicas"] = ready
+	r.Details["service_exists"] = svcExists
+	r.Details["configmap_exists"] = cmExists
+	r.Details["total_monitors"] = totalMonitors
+
+	switch {
+	case ready != desired:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Blackbox exporter not fully ready (%d/%d)", ready, desired)
+	case !svcExists:
+		r.Status = checks.StatusWarning
+		r.Message = "Blackbox exporter Service missing"
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Blackbox exporter healthy (%d/%d ready)", ready, desired)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkRouteMonitorStatus validates RouteMonitor and ClusterUrlMonitor CRs
+func checkRouteMonitorStatus(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
+	cc.CurrentCheck = "rmo_routemonitor_status"
+
+	r := checks.Result{
+		Check:    "rmo_routemonitor_status",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	rmCount := countItems(rmList)
+	cumCount := countItems(cumList)
+	totalCount := rmCount + cumCount
+
+	// Check for MCC-expected resources
+	consoleRMExists := false
+	apiCUMExists := false
+	rmErrors := 0
+	rmMissingURL := 0
+	rmMissingSM := 0
+
+	if rmList != nil {
+		for _, item := range rmList.Items {
+			name := item.GetName()
+			ns := item.GetNamespace()
+
+			if name == "console" && ns == "openshift-route-monitor-operator" {
+				consoleRMExists = true
+			}
+
+			errStatus, _, _ := unstructured.NestedString(item.Object, "status", "errorStatus")
+			if errStatus != "" {
+				rmErrors++
+			}
+			routeURL, _, _ := unstructured.NestedString(item.Object, "status", "routeURL")
+			if routeURL == "" {
+				rmMissingURL++
+			}
+			smRef, _, _ := unstructured.NestedMap(item.Object, "status", "serviceMonitorRef")
+			smName, _ := smRef["name"].(string)
+			if smName == "" {
+				rmMissingSM++
+			}
+		}
+	}
+
+	if cumList != nil {
+		for _, item := range cumList.Items {
+			name := item.GetName()
+			ns := item.GetNamespace()
+
+			if name == "api" && ns == "openshift-route-monitor-operator" {
+				apiCUMExists = true
+			}
+
+			errStatus, _, _ := unstructured.NestedString(item.Object, "status", "errorStatus")
+			if errStatus != "" {
+				rmErrors++
+			}
+		}
+	}
+
+	// Validate MCC expectations
+	var mccIssues []string
+	if cc.ClusterType == "management_cluster" {
+		if !apiCUMExists {
+			mccIssues = append(mccIssues, "ClusterUrlMonitor 'api' missing")
+		}
+	} else {
+		if !consoleRMExists {
+			mccIssues = append(mccIssues, "RouteMonitor 'console' missing")
+		}
+		if !apiCUMExists {
+			mccIssues = append(mccIssues, "ClusterUrlMonitor 'api' missing")
+		}
+	}
+
+	r.Details["routemonitor_count"] = rmCount
+	r.Details["clusterurlmonitor_count"] = cumCount
+	r.Details["console_routemonitor_present"] = consoleRMExists
+	r.Details["api_clusterurlmonitor_present"] = apiCUMExists
+	r.Details["error_count"] = rmErrors
+	r.Details["missing_url_count"] = rmMissingURL
+	r.Details["missing_servicemonitor_count"] = rmMissingSM
+
+	switch {
+	case totalCount == 0:
+		r.Status = checks.StatusWarning
+		r.Message = "No RouteMonitor or ClusterUrlMonitor CRs found"
+		if len(mccIssues) > 0 {
+			r.Message += " — " + strings.Join(mccIssues, ", ")
+		}
+	case len(mccIssues) > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%s (%d RouteMonitor(s), %d ClusterUrlMonitor(s) present)",
+			strings.Join(mccIssues, ", "), rmCount, cumCount)
+	case rmErrors > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d monitor(s) have errorStatus", rmErrors)
+	case rmMissingURL > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d RouteMonitor(s) missing routeURL", rmMissingURL)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d RouteMonitor(s), %d ClusterUrlMonitor(s) — all healthy", rmCount, cumCount)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkSREProbeExpectations verifies SRE probe-missing PrometheusRules
+func checkSREProbeExpectations(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
+	cc.CurrentCheck = "rmo_sre_probe_expectations"
+
+	r := checks.Result{
+		Check:    "rmo_sre_probe_expectations",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	// Check for SRE probe-missing PrometheusRules
+	_, apiErr := cc.Client.GetResource(ctx, prometheusRuleGVR, "openshift-monitoring",
+		"sre-route-monitor-operator-probe-missing-api", true)
+	apiRuleExists := apiErr == nil
+
+	consoleRuleExists := false
+	if cc.ClusterType != "management_cluster" {
+		_, consoleErr := cc.Client.GetResource(ctx, prometheusRuleGVR, "openshift-monitoring",
+			"sre-route-monitor-operator-probe-missing-console", true)
+		consoleRuleExists = consoleErr == nil
+	}
+
+	totalCRs := countItems(rmList) + countItems(cumList)
+	sreExpectsProbes := apiRuleExists || consoleRuleExists
+
+	r.Details["sre_probe_missing_api_rule"] = apiRuleExists
+	r.Details["sre_probe_missing_console_rule"] = consoleRuleExists
+	r.Details["sre_expects_probes"] = sreExpectsProbes
+
+	switch {
+	case sreExpectsProbes && totalCRs == 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = "SRE probe-missing alerts exist but no probes found — route monitoring absent"
+	case sreExpectsProbes:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("SRE probe expectations met (%d monitors active)", totalCRs)
+	default:
+		r.Status = checks.StatusInfo
+		r.Message = "No SRE probe-missing PrometheusRules found"
+	}
+
+	cc.AddResult(r)
+}
+
+// checkProbeHealth verifies blackbox probe_success metrics
+func checkProbeHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
+	cc.CurrentCheck = "rmo_probe_health"
+
+	r := checks.Result{
+		Check:    "rmo_probe_health",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	totalCRs := countItems(rmList) + countItems(cumList)
+	if totalCRs == 0 {
+		r.Status = checks.StatusSkip
+		r.Message = "No monitors configured — no probes to check"
+		cc.AddResult(r)
+		return
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	query := thanos.EncodeQuery(`probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}`)
+	probeData, err := cc.Client.QueryThanos(ctx, query)
+	cc.RecordError("Probe success instant query", err)
+
+	if err != nil || !thanos.HasResults(probeData) {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("No probe metrics found but %d monitors exist", totalCRs)
+		cc.AddResult(r)
+		return
+	}
+
+	resp, _ := thanos.Parse(probeData)
+	probeTotal := len(resp.Data.Result)
+	failing := 0
+	var failingTargets []string
+
+	for _, result := range resp.Data.Result {
+		val := ""
+		if len(result.Value) >= 2 {
+			val = fmt.Sprintf("%v", result.Value[1])
+		}
+		if val == "0" {
+			failing++
+			probeURL := result.Metric["probe_url"]
+			label := classifyProbeURL(probeURL)
+			failingTargets = append(failingTargets, label)
+		}
+	}
+
+	// On MCs, only ClusterUrlMonitor probes are visible in platform Thanos.
+	// HCP RouteMonitor probes are scraped by RHOBS (checked in rmo_hcp_probe_coverage).
+	expectedVisible := totalCRs
+	if cc.ClusterType == "management_cluster" {
+		expectedVisible = countItems(cumList)
+	}
+
+	r.Details["active_probes"] = probeTotal
+	r.Details["expected_visible_probes"] = expectedVisible
+	r.Details["total_monitors"] = totalCRs
+	r.Details["failing_probes"] = failing
+	r.Details["failing_targets"] = strings.Join(failingTargets, ", ")
+
+	if cc.ClusterType == "management_cluster" {
+		r.Details["note"] = "HCP probes in RHOBS stack — see rmo_hcp_probe_coverage check"
+	}
+
+	switch {
+	case failing > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Failing endpoint(s): %s (%d/%d failing)",
+			strings.Join(failingTargets, ", "), failing, probeTotal)
+	case probeTotal < expectedVisible:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Probe count mismatch: %d active but %d expected in platform Thanos", probeTotal, expectedVisible)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All local endpoints healthy (%d/%d)", probeTotal, expectedVisible)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkServiceMonitorHealth verifies ServiceMonitors referenced by monitors exist
+func checkServiceMonitorHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
+	cc.CurrentCheck = "rmo_servicemonitor_health"
+
+	r := checks.Result{
+		Check:    "rmo_servicemonitor_health",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	totalCRs := countItems(rmList) + countItems(cumList)
+	if totalCRs == 0 || !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — no monitors or requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	// Collect serviceMonitorRefs from both monitor types
+	type smRef struct {
+		apiGroup  string
+		namespace string
+		name      string
+	}
+	var refs []smRef
+
+	extractRefs := func(list *unstructured.UnstructuredList) {
+		if list == nil {
+			return
+		}
+		for _, item := range list.Items {
+			apiGroup, _, _ := unstructured.NestedString(item.Object, "spec", "serviceMonitorType")
+			if apiGroup == "" {
+				apiGroup = "monitoring.coreos.com"
+			}
+			smRefMap, _, _ := unstructured.NestedMap(item.Object, "status", "serviceMonitorRef")
+			name, _ := smRefMap["name"].(string)
+			ns, _ := smRefMap["namespace"].(string)
+			if name != "" && ns != "" {
+				refs = append(refs, smRef{apiGroup: apiGroup, namespace: ns, name: name})
+			}
+		}
+	}
+
+	extractRefs(rmList)
+	extractRefs(cumList)
+
+	found := 0
+	missing := 0
+
+	for _, ref := range refs {
+		gvr := serviceMonitorGVR(ref.apiGroup)
+		_, err := cc.Client.GetResource(ctx, gvr, ref.namespace, ref.name, true)
+		if err == nil {
+			found++
+		} else {
+			missing++
+		}
+	}
+
+	r.Details["found_servicemonitors"] = found
+	r.Details["missing_servicemonitors"] = missing
+	r.Details["expected_monitors"] = totalCRs
+
+	switch {
+	case missing > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d ServiceMonitor(s) missing (%d/%d found)", missing, found, len(refs))
+	case found == 0 && totalCRs > 0:
+		r.Status = checks.StatusWarning
+		r.Message = "No ServiceMonitors referenced in monitor status"
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d ServiceMonitor(s) verified", found)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkPrometheusRuleHealth verifies PrometheusRules referenced by monitors
+func checkPrometheusRuleHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
+	cc.CurrentCheck = "rmo_prometheusrule_health"
+
+	r := checks.Result{
+		Check:    "rmo_prometheusrule_health",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	totalCRs := countItems(rmList) + countItems(cumList)
+	if totalCRs == 0 || !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — no monitors or requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	type prRef struct {
+		namespace string
+		name      string
+	}
+	var refs []prRef
+
+	extractPRRefs := func(list *unstructured.UnstructuredList) {
+		if list == nil {
+			return
+		}
+		for _, item := range list.Items {
+			skipPR, _, _ := unstructured.NestedBool(item.Object, "spec", "skipPrometheusRule")
+			if skipPR {
+				continue
+			}
+			refMap, _, _ := unstructured.NestedMap(item.Object, "status", "prometheusRuleRef")
+			name, _ := refMap["name"].(string)
+			ns, _ := refMap["namespace"].(string)
+			if name != "" && ns != "" {
+				refs = append(refs, prRef{namespace: ns, name: name})
+			}
+		}
+	}
+
+	extractPRRefs(rmList)
+	extractPRRefs(cumList)
+
+	found := 0
+	missing := 0
+
+	for _, ref := range refs {
+		_, err := cc.Client.GetResource(ctx, prometheusRuleGVR, ref.namespace, ref.name, true)
+		if err == nil {
+			found++
+		} else {
+			missing++
+		}
+	}
+
+	r.Details["total_prometheusrules"] = found
+	r.Details["expected_prometheusrules"] = len(refs)
+
+	switch {
+	case len(refs) == 0:
+		r.Status = checks.StatusInfo
+		r.Message = "No PrometheusRules expected"
+	case missing > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d PrometheusRule(s) missing (%d/%d found)", missing, found, len(refs))
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d PrometheusRule(s) verified", found)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkOperatorMetrics queries RMO-specific Prometheus metrics
+func checkOperatorMetrics(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_operator_metrics"
+	log := logging.WithCheck("rmo_operator_metrics")
+
+	r := checks.Result{
+		Check:    "rmo_operator_metrics",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	queryMetric := func(name string) string {
+		query := thanos.EncodeQuery(fmt.Sprintf(`%s{namespace="%s"}`, name, cc.Operator.Namespace))
+		data, err := cc.Client.QueryThanos(ctx, query)
+		cc.RecordError("RMO metric: "+name, err)
+		return data
+	}
+
+	// Info metric
+	infoVersion := ""
+	infoData := queryMetric("rhobs_route_monitor_operator_info")
+	if thanos.HasResults(infoData) {
+		_, labels, ok := thanos.InstantValue(infoData)
+		if ok {
+			infoVersion = labels["version"]
+		}
+	}
+	r.Details["info_version"] = infoVersion
+
+	// API requests
+	apiData := queryMetric("rhobs_route_monitor_operator_api_requests_total")
+	apiSuccess := 0.0
+	apiErrors := 0.0
+	if resp, err := thanos.Parse(apiData); err == nil {
+		for _, result := range resp.Data.Result {
+			val, ok := thanos.ToFloat(result)
+			if !ok {
+				continue
+			}
+			if result.Metric["status"] == "success" {
+				apiSuccess += val
+			} else if result.Metric["status"] == "error" {
+				apiErrors += val
+			}
+		}
+	}
+	r.Details["api_success_count"] = int(apiSuccess)
+	r.Details["api_error_count"] = int(apiErrors)
+
+	// Probe deletion timeouts
+	timeoutData := queryMetric("rhobs_route_monitor_operator_probe_deletion_timeout_total")
+	timeouts := 0.0
+	if f, ok := thanos.InstantFloat(timeoutData); ok {
+		timeouts = f
+	}
+	r.Details["probe_deletion_timeouts"] = int(timeouts)
+
+	log.WithField("version", infoVersion).Debug("RMO metrics")
+
+	switch {
+	case timeouts > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%.0f probe deletion timeout(s) detected", timeouts)
+	case apiErrors > 0 && apiSuccess == 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("All RHOBS API requests failing (%.0f errors, 0 success)", apiErrors)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = "RMO metrics healthy"
+	}
+
+	cc.AddResult(r)
+}
+
+// checkConfig validates the RMO ConfigMap
+func checkConfig(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_config"
+
+	r := checks.Result{
+		Check:    "rmo_config",
+		Severity: checks.SeverityInfo,
+		Details:  map[string]any{},
+	}
+
+	// Try both possible ConfigMap names
+	configNames := []string{
+		"route-monitor-operator-manager-config",
+		"route-monitor-operator-config",
+	}
+
+	var configMap *corev1.ConfigMap
+	for _, name := range configNames {
+		cm, err := cc.Client.Clientset().CoreV1().ConfigMaps(cc.Operator.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			configMap = cm
+			break
+		}
+	}
+
+	if configMap == nil {
+		r.Status = checks.StatusInfo
+		r.Message = "No ConfigMap found (using defaults)"
+		cc.AddResult(r)
+		return
+	}
+
+	r.Details["probe_api_url"] = configMap.Data["probe-api-url"]
+	r.Details["only_public_clusters"] = configMap.Data["only-public-clusters"]
+	r.Details["skip_infrastructure_health_check"] = configMap.Data["skip-infrastructure-health-check"]
+
+	r.Status = checks.StatusPass
+	r.Message = "ConfigMap present"
+
+	cc.AddResult(r)
+}
+
+// checkHCPCoverage checks HCP RouteMonitor coverage on management clusters
+func checkHCPCoverage(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_hcp_coverage"
+
+	r := checks.Result{
+		Check:    "rmo_hcp_coverage",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	hcpList, err := cc.Client.ListResources(ctx, hostedControlPlaneGVR, "", false)
+	cc.RecordError("Get HostedControlPlane CRs", err)
+
+	if err != nil || len(hcpList.Items) == 0 {
+		if err != nil {
+			r.Status = checks.StatusSkip
+			r.Message = "Could not retrieve HostedControlPlane resources"
+		} else {
+			r.Status = checks.StatusInfo
+			r.Message = "No HostedControlPlane resources found"
+			r.Details["hcp_count"] = 0
+		}
+		cc.AddResult(r)
+		return
+	}
+
+	hcpCount := len(hcpList.Items)
+	r.Details["hcp_count"] = hcpCount
+
+	// Check how many have RouteMonitors via RHOBS Prometheus
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("%d HCP(s) found — probe coverage check requires elevation", hcpCount)
+		cc.AddResult(r)
+		return
+	}
+
+	// Query RHOBS Prometheus for HCP probe metrics (no namespace filter —
+	// RHOBS only contains HCP probe data, so all results are relevant)
+	probeData, err := cc.Client.QueryRHOBSPrometheus(ctx, thanos.EncodeQuery("probe_success"))
+	cc.RecordError("HCP probe metrics", err)
+
+	monitored := 0
+	if err == nil && thanos.HasResults(probeData) {
+		resp, _ := thanos.Parse(probeData)
+		// Count unique cluster IDs with probes
+		clusterIDs := map[string]bool{}
+		for _, result := range resp.Data.Result {
+			id := result.Metric["_id"]
+			if id != "" {
+				clusterIDs[id] = true
+			}
+		}
+		monitored = len(clusterIDs)
+		// If no _id labels, fall back to counting unique probe targets
+		if monitored == 0 {
+			monitored = len(resp.Data.Result)
+		}
+	}
+
+	r.Details["hcp_monitored"] = monitored
+	unmonitored := hcpCount - monitored
+	if unmonitored < 0 {
+		unmonitored = 0
+	}
+	r.Details["hcp_unmonitored"] = unmonitored
+
+	switch {
+	case unmonitored > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d/%d HCP(s) without probe coverage", unmonitored, hcpCount)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d HCP(s) have probe coverage", hcpCount)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkHCPProbeCoverage queries RHOBS Prometheus for actual HCP probe health (MC only)
+func checkHCPProbeCoverage(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_hcp_probe_coverage"
+
+	r := checks.Result{
+		Check:    "rmo_hcp_probe_coverage",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	query := thanos.EncodeQuery("probe_success")
+	probeData, err := cc.Client.QueryRHOBSPrometheus(ctx, query)
+	cc.RecordError("HCP probe_success (all)", err)
+
+	if err != nil || !thanos.HasResults(probeData) {
+		r.Status = checks.StatusWarning
+		r.Message = "No HCP probes found in RHOBS Prometheus"
+		cc.AddResult(r)
+		return
+	}
+
+	resp, _ := thanos.Parse(probeData)
+	totalProbes := len(resp.Data.Result)
+	probesOK := 0
+	probesFailing := 0
+	var failingURLs []string
+
+	for _, result := range resp.Data.Result {
+		val := ""
+		if len(result.Value) >= 2 {
+			val = fmt.Sprintf("%v", result.Value[1])
+		}
+		if val == "1" {
+			probesOK++
+		} else {
+			probesFailing++
+			failingURLs = append(failingURLs, result.Metric["probe_url"])
+		}
+	}
+
+	r.Details["total_probes"] = totalProbes
+	r.Details["probes_succeeding"] = probesOK
+	r.Details["probes_failing"] = probesFailing
+	r.Details["failing_probe_urls"] = strings.Join(failingURLs, ", ")
+	r.Details["data_source"] = "RHOBS Prometheus"
+
+	switch {
+	case probesFailing > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d/%d HCP probe(s) failing", probesFailing, totalProbes)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d HCP probes succeeding", totalProbes)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkHCPState queries RHOBS for HCP state breakdown (MC only, informational)
+func checkHCPState(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_hcp_state"
+
+	r := checks.Result{
+		Check:    "rmo_hcp_state",
+		Severity: checks.SeverityInfo,
+		Details:  map[string]any{},
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	queryScalar := func(desc, q string) int {
+		query := thanos.EncodeQuery(q)
+		data, err := cc.Client.QueryRHOBSPrometheus(ctx, query)
+		cc.RecordError(desc, err)
+		if f, ok := thanos.InstantFloat(data); ok {
+			return int(f)
+		}
+		return 0
+	}
+
+	provisioned := queryScalar("HCP provisioned", "count(hypershift_cluster_vcpus > 0)")
+	limited := queryScalar("HCP limited support", "count(hypershift_cluster_limited_support_enabled == 1)")
+	deleting := queryScalar("HCP deleting", "count(hypershift_cluster_deleting_duration_seconds)")
+	waiting := queryScalar("HCP waiting", "count(hypershift_cluster_waiting_initial_availability_duration_seconds)")
+	ready := queryScalar("HCP ready", `count(hypershift_cluster_vcpus > 0 unless on(_id) hypershift_cluster_limited_support_enabled == 1 unless on(_id) hypershift_cluster_waiting_initial_availability_duration_seconds unless on(_id) hypershift_cluster_deleting_duration_seconds)`)
+
+	r.Details["provisioned"] = provisioned
+	r.Details["ready"] = ready
+	r.Details["limited_support"] = limited
+	r.Details["deleting"] = deleting
+	r.Details["waiting_availability"] = waiting
+	r.Details["data_source"] = "RHOBS Prometheus hypershift_cluster_* metrics"
+
+	r.Status = checks.StatusInfo
+	r.Message = fmt.Sprintf("%d provisioned HCPs: %d ready, %d limited support, %d deleting, %d waiting",
+		provisioned, ready, limited, deleting, waiting)
+
+	cc.AddResult(r)
+}
+
+// checkRHOBSAPIHealth queries RHOBS for per-operation API request metrics (MC only)
+func checkRHOBSAPIHealth(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_rhobs_api_health"
+
+	r := checks.Result{
+		Check:    "rmo_rhobs_api_health",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	// API requests by operation from RHOBS Prometheus
+	apiQuery := thanos.EncodeQuery("rhobs_route_monitor_operator_api_requests_total")
+	apiData, err := cc.Client.QueryRHOBSPrometheus(ctx, apiQuery)
+	cc.RecordError("RMO API requests", err)
+
+	type opCounts struct{ success, errors int }
+	ops := map[string]*opCounts{
+		"get_probe":           {},
+		"create_probe":        {},
+		"delete_probe":        {},
+		"update_probe_labels": {},
+	}
+
+	if resp, parseErr := thanos.Parse(apiData); parseErr == nil {
+		for _, result := range resp.Data.Result {
+			op := result.Metric["operation"]
+			status := result.Metric["status"]
+			val, ok := thanos.ToFloat(result)
+			if !ok {
+				continue
+			}
+			c, exists := ops[op]
+			if !exists {
+				c = &opCounts{}
+				ops[op] = c
+			}
+			if status == "success" {
+				c.success += int(val)
+			} else if status == "error" {
+				c.errors += int(val)
+			}
+		}
+	}
+
+	totalSuccess := 0
+	totalErrors := 0
+	for op, c := range ops {
+		r.Details[op+"_success"] = c.success
+		r.Details[op+"_error"] = c.errors
+		totalSuccess += c.success
+		totalErrors += c.errors
+	}
+
+	// OIDC token refresh
+	oidcQuery := thanos.EncodeQuery("rhobs_route_monitor_operator_oidc_token_refresh_total")
+	oidcData, err := cc.Client.QueryRHOBSPrometheus(ctx, oidcQuery)
+	cc.RecordError("RMO OIDC token refresh", err)
+
+	oidcSuccess := 0
+	oidcErrors := 0
+	if resp, parseErr := thanos.Parse(oidcData); parseErr == nil {
+		for _, result := range resp.Data.Result {
+			val, ok := thanos.ToFloat(result)
+			if !ok {
+				continue
+			}
+			if result.Metric["status"] == "success" {
+				oidcSuccess += int(val)
+			} else {
+				oidcErrors += int(val)
+			}
+		}
+	}
+	r.Details["oidc_refresh_success"] = oidcSuccess
+	r.Details["oidc_refresh_error"] = oidcErrors
+
+	// Probe deletion timeouts
+	timeoutQuery := thanos.EncodeQuery("rhobs_route_monitor_operator_probe_deletion_timeout_total")
+	timeoutData, err := cc.Client.QueryRHOBSPrometheus(ctx, timeoutQuery)
+	cc.RecordError("RMO probe deletion timeouts", err)
+
+	deletionTimeouts := 0
+	if f, ok := thanos.InstantFloat(timeoutData); ok {
+		deletionTimeouts = int(f)
+	}
+	r.Details["probe_deletion_timeouts"] = deletionTimeouts
+
+	// RMO version from RHOBS
+	infoQuery := thanos.EncodeQuery("rhobs_route_monitor_operator_info")
+	infoData, _ := cc.Client.QueryRHOBSPrometheus(ctx, infoQuery)
+	rmoVersion := "unknown"
+	if _, labels, ok := thanos.InstantValue(infoData); ok {
+		if v := labels["version"]; v != "" {
+			rmoVersion = v
+		}
+	}
+	r.Details["rmo_version"] = rmoVersion
+	r.Details["data_source"] = "RHOBS Prometheus rhobs_route_monitor_operator_* metrics"
+
+	switch {
+	case totalErrors > 0 && totalSuccess == 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("All RHOBS API calls failing (%d errors, 0 success)", totalErrors)
+	case oidcErrors > 0 && oidcSuccess == 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("OIDC token refresh failing (%d errors, 0 success)", oidcErrors)
+	case deletionTimeouts > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d probe deletion timeout(s)", deletionTimeouts)
+	case totalErrors > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Some RHOBS API errors: %d errors out of %d total calls", totalErrors, totalSuccess+totalErrors)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("RHOBS API healthy: %d API calls, %d OIDC refreshes, 0 errors", totalSuccess, oidcSuccess)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkRHOBSIntegration verifies RHOBS synthetics config and OIDC token health (all cluster types)
+func checkRHOBSIntegration(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_rhobs_integration"
+
+	r := checks.Result{
+		Check:    "rmo_rhobs_integration",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	// Check if RHOBS is enabled via env vars on the controller-manager
+	podList, err := cc.Client.GetPods(ctx, cc.Operator.Namespace, "control-plane=controller-manager")
+
+	rhobsEnabled := false
+	oidcConfigured := false
+
+	if err == nil && len(podList.Items) > 0 {
+		pod := podList.Items[0]
+		for _, container := range pod.Spec.Containers {
+			if container.Name == "manager" {
+				for _, env := range container.Env {
+					if env.Name == "PROBE_API_URL" && env.Value != "" {
+						rhobsEnabled = true
+					}
+					if env.Name == "OIDC_CLIENT_ID" && env.Value != "" {
+						oidcConfigured = true
+					}
+				}
+			}
+		}
+	}
+
+	r.Details["rhobs_enabled"] = rhobsEnabled
+	r.Details["oidc_configured"] = oidcConfigured
+	r.Details["cluster_type"] = cc.ClusterType
+
+	if !rhobsEnabled {
+		r.Status = checks.StatusInfo
+		if cc.ClusterType == "management_cluster" || cc.ClusterType == "service_cluster" {
+			r.Message = fmt.Sprintf("RHOBS synthetics not configured on this %s (probe-api-url not set)", cc.ClusterType)
+		} else {
+			r.Message = "RHOBS synthetics not applicable (standard cluster)"
+		}
+		cc.AddResult(r)
+		return
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "RHOBS enabled but OIDC check requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	// Check OIDC token refresh metrics
+	oidcQuery := thanos.EncodeQuery(fmt.Sprintf(`rhobs_route_monitor_operator_oidc_token_refresh_total{namespace="%s"}`, cc.Operator.Namespace))
+	oidcData, err := cc.Client.QueryThanos(ctx, oidcQuery)
+	cc.RecordError("OIDC token refresh", err)
+
+	oidcSuccess := 0.0
+	oidcErrors := 0.0
+	if resp, parseErr := thanos.Parse(oidcData); parseErr == nil {
+		for _, result := range resp.Data.Result {
+			val, ok := thanos.ToFloat(result)
+			if !ok {
+				continue
+			}
+			if result.Metric["status"] == "success" {
+				oidcSuccess += val
+			} else {
+				oidcErrors += val
+			}
+		}
+	}
+
+	r.Details["oidc_refresh_success"] = int(oidcSuccess)
+	r.Details["oidc_refresh_errors"] = int(oidcErrors)
+
+	switch {
+	case oidcErrors > 0 && oidcSuccess == 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("OIDC token refresh failing (%.0f errors, 0 success)", oidcErrors)
+	case rhobsEnabled && !oidcConfigured:
+		r.Status = checks.StatusWarning
+		r.Message = "RHOBS enabled but OIDC not configured"
+	default:
+		r.Status = checks.StatusPass
+		r.Message = "RHOBS synthetics healthy"
+	}
+
+	cc.AddResult(r)
+}
+
+// checkDualInstallation detects both OLM and PKO installed
+// checkLimitedSupportDisagreement detects when HCP labels and Prometheus metrics disagree
+func checkLimitedSupportDisagreement(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rmo_limited_support_disagreement"
+	log := logging.WithCheck("rmo_limited_support_disagreement")
+
+	r := checks.Result{
+		Check:       "rmo_limited_support_disagreement",
+		Description: "Checks if the HCP limited-support label and the Prometheus limited_support metric agree",
+		Severity:    checks.SeverityWarning,
+		Details:     map[string]any{},
+	}
+
+	if !cc.Client.CanElevate() {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — requires elevation"
+		cc.AddResult(r)
+		return
+	}
+
+	// Get label from HCP — list all HCPs across namespaces and take the first
+	hcpList, err := cc.Client.ListResources(ctx, hostedControlPlaneGVR, "", true)
+	labelValue := ""
+	if err == nil && len(hcpList.Items) > 0 {
+		labels := hcpList.Items[0].GetLabels()
+		labelValue = labels["api.openshift.com/limited-support"]
+	}
+	r.Details["hcp_label_value"] = labelValue
+
+	// Get metric from Thanos
+	query := thanos.EncodeQuery(fmt.Sprintf(`limited_support{_id="%s"}`, cc.ClusterID))
+	metricData, err := cc.Client.QueryThanos(ctx, query)
+	cc.RecordError("Query limited_support metric", err)
+
+	metricValue := ""
+	if err == nil && thanos.HasResults(metricData) {
+		val, _, ok := thanos.InstantValue(metricData)
+		if ok {
+			metricValue = val
+		}
+	}
+	r.Details["metric_value"] = metricValue
+
+	labelLS := labelValue == "true"
+	metricLS := metricValue == "1"
+
+	log.WithField("label_ls", labelLS).WithField("metric_ls", metricLS).Debug("LS check")
+
+	if labelLS != metricLS {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Limited support disagreement — HCP label=%s, Prometheus metric=%s", labelValue, metricValue)
+	} else {
+		r.Status = checks.StatusPass
+		if labelLS {
+			r.Message = "Cluster is in limited support (label and metric agree)"
+		} else {
+			r.Message = "Cluster is fully supported (label and metric agree)"
+		}
+	}
+
+	cc.AddResult(r)
+}
+
+func classifyProbeURL(url string) string {
+	switch {
+	case strings.Contains(url, "console"):
+		return "console"
+	case strings.Contains(url, "api") || strings.Contains(url, "livez"):
+		return "api"
+	case url != "":
+		parts := strings.Split(url, "/")
+		return parts[len(parts)-1]
+	default:
+		return "unknown"
+	}
+}

@@ -1,217 +1,147 @@
 # Operator Health Report
 
-Comprehensive health monitoring for SRE-managed OpenShift operators (CAMO, RMO, OME) across multiple clusters. Runs health checks, generates interactive HTML reports with charts, and detects deployment issues, resource leaks, and configuration mismatches.
-
-## Architecture
-
-```
-                                    run.sh
-                                  (entry point)
-                                      |
-                    +-----------------+-----------------+
-                    |                                   |
-              --local flag                     container mode (default)
-                    |                                   |
-                    v                           +-------+-------+
-          lib/collect_from_                     |   Containerfile  |
-          multiple_clusters.sh                  |  (ocm-container  |
-                    |                           |   + yq/skopeo)  |
-                    |                           +-------+-------+
-                    |                                   |
-                    |                     --parallel N splits clusters
-                    |                     across N containers, each running:
-                    |                                   |
-                    +-----------------------------------+
-                    |
-          Per cluster, runs operators in parallel:
-          +----+----+----+
-          |    |    |    |
-        CAMO  RMO  OME  ...
-          |    |    |    |
-          +----+----+----+
-                    |
-          lib/collect_operator_health.sh
-          (per operator, per cluster)
-                    |
-          +--------+--------+--------+--------+
-          |        |        |        |        |
-       Namespace  Version  Pod/     Operator  Prometheus
-       Status     Check    Deploy   Specific  Metrics
-                  (SAAS)   Health   Checks    (Thanos)
-                    |
-                    v
-              JSON output (per cluster per operator)
-                    |
-                    v
-          lib/generate_html_report.sh
-                    |
-                    v
-          Interactive HTML Report
-          (dark theme, charts, per-operator tabs,
-           SAAS target summary, inline errors)
-```
+Comprehensive health monitoring for SRE-managed OpenShift operators across multiple clusters. Runs 60+ health checks per cluster, generates interactive HTML reports, and detects deployment issues, resource leaks, version mismatches, and configuration problems.
 
 ## Quick Start
 
 ```bash
-# Container mode (default) — isolated, reproducible
-./run.sh -- --cluster-list clusters.list --reason "SREP-1234" --oper camo --oper rmo --oper ome
+# Build
+go build -o healthcheck ./cmd/healthcheck/
 
-# Parallel containers — 4 workers splitting the cluster list
-./run.sh --parallel 4 -- --cluster-list clusters.list --reason "SREP-1234" --oper camo --oper rmo --oper ome
+# Run against staging clusters
+./healthcheck \
+  --cluster-list stage_clusters.list \
+  --reason "SREP-1234" \
+  --oper camo --oper rmo --oper ome \
+  --parallel 4
 
-# Local mode — uses host tools directly
-./run.sh --local -- --cluster-list clusters.list --reason "SREP-1234" --oper rmo
-
-# Single operator, single cluster
-./run.sh --local -- --cluster-list <(echo "CLUSTER_ID") --reason "debugging" --oper ome
+# Run with specific OCM config
+./healthcheck \
+  --ocm-config ~/.config/ocm/ocm.stg.json \
+  --cluster-list clusters.list \
+  --reason "SREP-1234"
 ```
 
 ## Supported Operators
 
-| Operator | Short Name | Namespace | Operator-Specific Checks |
-|----------|-----------|-----------|-------------------------|
-| configure-alertmanager-operator | `camo` | openshift-monitoring | AlertManager health, secrets, PD integration, reconciliation |
-| route-monitor-operator | `rmo` | openshift-route-monitor-operator | RouteMonitor CRs, probe health, HCP coverage, RHOBS API, limited support detection |
-| osd-metrics-exporter | `ome` | openshift-osd-metrics | Per-metric trigger validation, pull secret, proxy CA, ServiceMonitor |
+| Operator | Key | Namespace |
+|----------|-----|-----------|
+| configure-alertmanager-operator | `camo` | `openshift-monitoring` |
+| route-monitor-operator | `rmo` | `openshift-route-monitor-operator` |
+| osd-metrics-exporter | `ome` | `openshift-osd-metrics` |
 
-## General Checks (all operators)
-
-| Check | What It Detects |
-|-------|----------------|
-| Namespace Status | Namespace missing or Terminating |
-| Version Verification | Deployed version vs SAAS target (with mid-run refresh) |
-| Pod Status & Restarts | Crashloops, OOM kills, pods not running |
-| Leader Election | Stale lease, holder mismatch |
-| Resource Leak Detection | CPU/memory trends over 7 days with absolute thresholds |
-| Resource Limits | Missing limits/requests on deployment |
-| Log Analysis | Error/warning counts in operator logs |
-| OLM/PKO Health | Dual installation, stuck ClusterPackage, adoption refusal |
-| PKO Job Health | Hung/failed OLM cleanup jobs |
-| Image Pull Status | ImagePullBackOff detection |
-| Orphaned Resources | Leftover OLM artifacts on PKO clusters |
-
-## HTML Report Features
-
-- Dark "mission control" theme with IBM Plex fonts
-- Per-operator tabs with colored status badges (ok/warn/crit)
-- SAAS target summary table showing all targets, deployment method (PKO/OLM), expected versions
-- Per-shard grouping with expected version display
-- CPU/memory timeseries charts with version change annotations
-- Per-endpoint probe success rate and latency charts
-- OME per-metric table with trigger resource validation
-- Inline API/script errors under each check
-- Click-to-navigate from table status icons to check details
-- Summary overview with cluster counts by status
-
-## Project Structure
+## Architecture
 
 ```
-run.sh                    # Main entry point (container or --local)
-Containerfile             # Builds from ocm-container, adds yq/skopeo/wget
-CLAUDE.md                 # Operator context and enhancement notes
-lib/
-  collect_operator_health.sh          # Single-cluster health check (all checks)
-  collect_from_multiple_clusters.sh   # Multi-cluster orchestrator
-  generate_html_report.sh            # JSON → interactive HTML report
-  get_app_interface_saas_refs.sh      # SAAS target resolution (basic)
-  get_app_interface_saas_refs_with_images.sh  # SAAS targets with image tags
+healthcheck binary
+├── OCM SDK connection (token lifecycle, multi-env support)
+│   ├── Cluster metadata (name, version, hive shard)
+│   └── SAAS target resolution (GitLab + Quay APIs)
+├── Backplane k8s clients (native connection per cluster)
+│   ├── Standard client (pods, deployments, logs, events)
+│   ├── Elevated client (k8s impersonation for custom resources, Thanos)
+│   └── Dynamic client (ClusterPackages, RouteMonitors, etc.)
+├── 13 common checks (all operators)
+├── Operator-specific checks (CAMO: 11, RMO: 16, OME: 5)
+└── JSON output → HTML report generator
 ```
 
-## Container Image
+## CLI Options
 
-The container image is built from `Containerfile` using `ocm-container` as base, adding `yq`, `skopeo`, and `wget`.
+```
+--cluster-list FILE    File with cluster IDs (one per line)
+--reason TEXT          Elevation reason (JIRA ticket — required for production)
+--oper KEY             Operator to check: camo, rmo, ome (repeatable, default: all)
+--parallel N           Clusters to process concurrently (default: 1)
+--no-elevate           Skip elevated checks (secrets, Thanos queries, custom resources)
+--ocm-config FILE      OCM config file path (default: $OCM_CONFIG)
+--ocm-url URL          Override OCM API URL
+--output FILE          JSON output file (default: health_TIMESTAMP.json)
+--no-html              Skip HTML report generation
+--log-level LEVEL      debug, info, warn, error (default: info)
+--log-dir DIR          Write debug-level logs to file
+```
+
+## What It Checks
+
+### Common Checks (all operators)
+
+- Namespace status, deployment health, pod restarts
+- PKO ClusterPackage conditions (Available, Progressing, Unpacked)
+- Competing deployment methods (OLM + PKO conflict detection)
+- Orphaned OLM artifacts (CSVs remaining after PKO migration)
+- Version verification against app-interface SAAS targets
+- Resource usage trends over 7 days (CPU/memory via Thanos)
+- Resource limits validation with peak usage comparison
+- Leader election, image pull status, PKO cleanup jobs
+- Log error analysis, Kubernetes warning events
+
+### CAMO Checks
+
+- AlertManager pod status, StatefulSet health, restarts with termination reasons
+- Controller availability condition
+- Reconciliation activity and behavior analysis
+- 10 CAMO-specific Prometheus metrics (config validation, secret existence, integrations)
+- AlertManager log analysis with DNS warning filtering
+- AlertManager and CAMO deployment events
+- AlertManager secret and PagerDuty integration verification
+
+### RMO Checks
+
+- Controller-manager pod health with BLACKBOX_IMAGE env detection
+- Blackbox exporter deployment, service, and configmap validation
+- RouteMonitor/ClusterUrlMonitor CR validation against MCC expectations
+- SRE probe-missing PrometheusRule verification
+- Probe health (probe_success metrics from Thanos)
+- ServiceMonitor and PrometheusRule child resource validation
+- Operator metrics (API request counts, probe deletion timeouts)
+- ConfigMap configuration (probe-api-url, RHOBS settings)
+- HCP probe coverage and state breakdown (MC only, via RHOBS Prometheus)
+- RHOBS API health (per-operation success/error, OIDC token refresh)
+- Limited support disagreement (HCP label vs Prometheus metric)
+
+### OME Checks
+
+- 10 expected Prometheus metrics with trigger-based validation
+- Pull secret validity (pull_secret_valid metric)
+- Proxy CA certificate health and expiry
+- ServiceMonitor existence
+- Identity provider configuration (informational)
+
+## HTML Report
+
+The report is a single-file HTML with embedded JavaScript/CSS:
+- Per-operator tabs with sortable tables
+- Expandable cluster detail panels with check results
+- CPU/memory trend charts (Chart.js, rendered on demand)
+- SAAS target summary per operator with PKO/OLM badges
+- Inline API error display under each check
 
 ```bash
-# First run — image builds automatically
-./run.sh -- --cluster-list clusters.list --reason "test" --oper rmo
-
-# Force rebuild (after code changes to lib/ scripts)
-./run.sh --build -- --cluster-list clusters.list --reason "test" --oper rmo
-
-# Manual build
-podman build --platform linux/amd64 -t operator-health-report:latest .
+# Generate from existing JSON
+bash lib/generate_html_report.sh results.json report.html
+open report.html
 ```
-
-**When to rebuild:**
-- After modifying any script in `lib/` — the container copies scripts at build time
-- After updating `Containerfile` (new dependencies, base image)
-- NOT needed for changes to `run.sh`, cluster lists, or `generate_html_report.sh` (HTML generation runs locally after container completes)
-
-**Tip for development:** Use `--local` mode to skip containers entirely while iterating on script changes. No rebuild needed.
 
 ## Production Safety
 
-The script auto-detects the OCM environment. In **production**:
+- Production OCM environment is auto-detected
+- `--no-elevate` is applied automatically in production
+- `--reason` with a valid JIRA ticket is required for production elevation
+- Elevated checks gracefully SKIP when elevation is unavailable
 
-```bash
-# Default: elevation disabled automatically (safe checks only)
-./run.sh -- --cluster-list prod_clusters.list --reason "SREP-1234" --oper camo
+## Adding a New Operator
 
-# Explicit: skip elevation (same effect, explicit intent)
-./run.sh -- --cluster-list prod_clusters.list --reason "SREP-1234" --oper camo --no-elevate
+See [CLAUDE.md](CLAUDE.md) for detailed instructions. Summary:
 
-# Override: acknowledge elevation in production (use with caution)
-./run.sh -- --cluster-list prod_clusters.list --reason "SREP-1234" --oper camo --prod-elevate
-```
+1. Create `pkg/checks/<key>/<key>.go` implementing `OperatorChecker` interface
+2. Add `OperatorConfig` to `pkg/checks/types.go`
+3. Import package in `cmd/healthcheck/main.go` for init() registration
+4. Update HTML report check ordering in `lib/generate_html_report.sh`
 
-Without elevation, these checks still run: namespace status, version verification, pod/deployment health, PKO/OLM status, log analysis, events. Prometheus queries and custom resource checks are skipped.
+## Legacy Bash Version
 
-## Configuration
-
-### run.sh Options (before `--`)
-
-| Flag | Description |
-|------|-------------|
-| `--local` | Run without container (uses host oc/ocm/jq) |
-| `--build` | Force rebuild container image |
-| `--parallel N` | Run N containers concurrently |
-| `--engine ENGINE` | Container engine: podman or docker (auto-detected) |
-| `--ocm-config FILE` | Path to OCM config |
-| `--bp-config FILE` | Path to backplane config (proxy settings) |
-
-### Health Check Options (after `--`)
-
-| Flag | Description |
-|------|-------------|
-| `--cluster-list FILE` | File with cluster IDs (one per line) |
-| `--reason TEXT` | OCM elevation reason (JIRA ticket) |
-| `--oper OPERATOR` | Operator to check: camo, rmo, ome (repeatable) |
-| `--secrets` | Enable extended secret-based checks |
-| `--no-html` | Skip HTML report generation |
-| `--max-clusters N` | Limit to first N clusters |
-| `--cache-dir DIR` | Save oc outputs for offline replay |
-| `--replay` | Read from cache instead of running commands |
-
-## Requirements
-
-### Container Mode (default)
-- podman or docker
-- OCM config (`~/.config/ocm/ocm.json` or set `OCM_CONFIG`)
-- Backplane config (`~/.config/backplane/config.json` for VPN proxy)
-
-### Local Mode (`--local`)
-- bash 4.0+
-- oc, ocm (with backplane plugin), jq, yq, skopeo, wget, curl, bc
-
-## Cache & Replay
-
-For iterating on checks without re-logging into clusters:
-
-```bash
-# Collect with cache
-./run.sh --local -- --cluster-list test.list --reason "debug" --oper rmo --cache-dir /tmp/cache
-
-# Replay from cache (instant, no cluster access needed)
-./run.sh --local -- --cluster-list test.list --reason "debug" --oper rmo --cache-dir /tmp/cache --replay
-```
-
-## Error Handling
-
-All `oc`, `ocm`, `curl`, `skopeo` commands go through `_run_oc()` which:
-- Captures stderr and exit codes
-- Logs errors with command, check context, and error type (API vs script)
-- Associates errors with the health check that triggered them
-- Reports errors inline under each check in the HTML report
-
-Expected "not found" responses (e.g., OLM subscription on PKO clusters) use `_run_oc_optional()` which suppresses expected absence from error reporting.
+The original bash implementation is preserved on the `bash-legacy` branch for reference. It includes:
+- `lib/collect_operator_health.sh` — single-cluster check script
+- `lib/collect_from_multiple_clusters.sh` — multi-cluster orchestrator
+- `run.sh` — container-based execution with `--parallel N`

@@ -2,10 +2,10 @@
 
 ## Overview
 
-This repo provides comprehensive health monitoring for SRE-managed OpenShift operators across multiple clusters. It runs checks against live clusters, collects data via `oc`/`ocm`/Prometheus, and generates interactive HTML reports.
+Go binary that runs comprehensive health checks against SRE-managed OpenShift operators across multiple clusters. Connects to clusters via native backplane-cli and OCM SDK (no shell-outs to `oc` or `ocm`), queries Prometheus/Thanos via pod exec, and produces JSON + HTML reports.
 
-**Entry point:** `run.sh` — runs in containers by default (`--local` for direct execution)
-**Scripts:** all in `lib/` — `collect_operator_health.sh` (single cluster), `collect_from_multiple_clusters.sh` (orchestrator), `generate_html_report.sh` (HTML report)
+**Entry point:** `./healthcheck` — single binary, no containers required
+**HTML report:** `lib/generate_html_report.sh` — reads JSON output, produces interactive single-file HTML
 
 ## Supported Operators
 
@@ -15,89 +15,212 @@ This repo provides comprehensive health monitoring for SRE-managed OpenShift ope
 | route-monitor-operator | `rmo` | `openshift-route-monitor-operator` | `route-monitor-operator-controller-manager` |
 | osd-metrics-exporter | `ome` | `openshift-osd-metrics` | `osd-metrics-exporter` |
 
-## Architecture Patterns
+## Usage
 
-### Adding New Checks
-
-- **General checks** (all operators): Add to the main flow in `collect_operator_health.sh` between namespace check and operator-specific sections. Use `$NAMESPACE`, `$DEPLOYMENT`, `$OPERATOR_NAME`, `$PACKAGE_NAME` variables.
-- **Operator-specific checks**: Add inside the `if [[ "$OPERATOR_NAME" == *"operator-name"* ]]` blocks at the end of the script.
-- **Set `CURRENT_CHECK`** before each check section so API errors are associated with the right check.
-- **Use `_run_oc`** for all `oc`/`ocm`/`curl`/`skopeo` commands — it captures errors, supports cache/replay, and logs to `api_errors`.
-- **Use `_run_oc_optional`** for existence checks where "not found" is an expected result (e.g., OLM subscription on PKO clusters).
-- **Use `jq_int`** instead of `jq '... | length'` for any value used in integer comparisons — prevents multiline jq output from crashing bash.
-
-### JSON Output
-
-Each check appends to the `health_checks` array via `health_checks+=("$(cat <<EOF ... EOF)")`. The final JSON output includes all checks, API errors, events, and cluster metadata.
-
-**Critical**: Never use `$(...)` subshells inside heredoc JSON that modify global variables (like `api_errors`). Pre-compute values before the heredoc.
-
-### Error Handling
-
-- Every external command goes through `_run_oc()` → `_exec_or_replay()` → captures stderr, exit code, logs errors
-- API errors include: operation description, actual command, check context, error type (api_error vs script_error)
-- Errors are displayed inline under their parent check in the HTML report
-- `set -uo pipefail` is used but NOT `set -e` — errors are handled per-cluster gracefully
-
-### Cache/Replay System
-
-`_exec_or_replay()` supports `--cache-dir` (save outputs) and `--replay` (read from cache). All oc/exec/curl commands go through this. Use for development iteration:
 ```bash
-# Collect once
-./run.sh --local -- --cluster-list test.list --reason "test" --oper rmo --cache-dir /tmp/cache
-# Iterate on code changes
-./run.sh --local -- --cluster-list test.list --reason "test" --oper rmo --cache-dir /tmp/cache --replay
+# Single cluster, all operators
+./healthcheck --cluster-list clusters.list --reason "SREP-1234" --oper camo --oper rmo --oper ome
+
+# 10 clusters, 4 concurrent, staging
+./healthcheck --cluster-list stage.list --reason "SREP-1234" --parallel 4
+
+# Specific OCM config file
+./healthcheck --ocm-config ~/.config/ocm/ocm.stg.json --cluster-list clusters.list
+
+# No elevation (safe subset of checks only)
+./healthcheck --cluster-list clusters.list --no-elevate
+
+# Debug logging to file
+./healthcheck --cluster-list clusters.list --log-level debug --log-dir /tmp/debug
 ```
 
-### Container Support
+## Architecture
 
-`run.sh` builds from `Containerfile` (based on `ocm-container`). Mounts OCM config and backplane config as read-only volumes. `--parallel N` splits cluster list across N containers.
+```
+cmd/healthcheck/main.go     CLI entry point, cluster loop, parallel processing
+pkg/ocm/ocm.go              OCM SDK client — multi-env, token lifecycle management
+pkg/kube/client.go           Backplane k8s client — native connection, elevation
+pkg/checks/
+  types.go                   Result, ClusterContext, OperatorConfig types
+  operator.go                OperatorChecker interface + registry
+  common.go                  13 common checks (all operators get these)
+  camo/camo.go               CAMO-specific checks
+  rmo/rmo.go                 RMO-specific checks
+  ome/ome.go                 OME-specific checks
+pkg/saas/resolver.go         SAAS target resolution (GitLab + Quay APIs)
+pkg/thanos/thanos.go         Prometheus/Thanos response parsing
+pkg/logging/logger.go        Structured logging (logrus)
+lib/generate_html_report.sh  HTML report generator (reads JSON output)
+```
 
-### SAAS Target Resolution
+## Adding a New Operator
 
-Version verification uses `resolve_saas_target()` which:
-1. Tries PKO SAAS file first (`saas-*-pko.yaml`)
-2. Falls back to OLM SAAS file (`saas-*.yaml`)
-3. Uses fuzzy shard number matching for non-standard hive names (e.g., `hives02ue1` → `camo-pko-stage-02`)
-4. Re-fetches SAAS refs on version mismatch to detect mid-run updates
+1. Create `pkg/checks/<short_name>/<short_name>.go`
+2. Implement the `OperatorChecker` interface:
 
-### HTML Report
+```go
+package newop
 
-`generate_html_report.sh` produces a single-file HTML with embedded JavaScript/CSS. Key patterns:
-- Data injected as `healthDataRaw` variable
-- `saas_targets` metadata entries separated from cluster data
-- Per-operator tabs with independent table rendering
-- Custom renderers for OME metrics table, API errors, preconditions
-- Charts use Chart.js with deferred rendering (created on first expand)
+import (
+    "context"
+    "github.com/openshift/operator-health-report/pkg/checks"
+)
 
-## Testing
+func init() {
+    checks.Register(&NewOpChecker{})
+}
 
-When making changes:
-1. Test against at least one cluster of each type: standard, SC, MC
-2. Use `--cache-dir` to collect once, then `--replay` to iterate
-3. Verify JSON output: `jq '.[0].health_checks | length'`
-4. Verify HTML renders: `bash lib/generate_html_report.sh results.json report.html && open report.html`
-5. Check for bash errors: `bash -n lib/collect_operator_health.sh`
+type NewOpChecker struct{}
+
+func (c *NewOpChecker) Name() string { return "newop" }
+
+func (c *NewOpChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
+    // Common checks (namespace, deployment, PKO, version, resources, etc.)
+    // already ran before this is called — add operator-specific checks here
+    checkCustomThing(ctx, cc)
+}
+```
+
+3. Add operator config to `pkg/checks/types.go`:
+
+```go
+NewOpConfig = OperatorConfig{
+    Name:       "new-operator",
+    ShortName:  "newop",
+    Namespace:  "openshift-new-operator",
+    Deployment: "new-operator-controller-manager",
+    PKOSaas:    "saas-new-operator-pko.yaml",
+    OLMSaas:    "saas-new-operator.yaml",
+}
+```
+
+Add to `AllOperators` map.
+
+4. Import in `cmd/healthcheck/main.go`:
+
+```go
+_ "github.com/openshift/operator-health-report/pkg/checks/newop"
+```
+
+5. Add check names to `lib/generate_html_report.sh` `checkOrder` and `formatCheckName()`.
+
+## Adding New Checks
+
+### Common checks (all operators)
+
+Add to `pkg/checks/common.go`. Every operator gets these automatically:
+- Use `cc.Client.Clientset()` for standard k8s API calls
+- Use `cc.Client.GetResource(ctx, gvr, ns, name, elevated)` for custom resources
+- Use `cc.Client.QueryThanos(ctx, query)` for Prometheus queries (requires elevation)
+- Use `cc.RecordError(operation, err)` to record API errors
+- Set `cc.CurrentCheck = "check_name"` before each check
+
+### Operator-specific checks
+
+Add to the operator's checker file. The `ClusterContext` provides:
+- `cc.Client` — `*kube.ClusterClient` with Clientset(), ElevatedClientset(), CanElevate()
+- `cc.ClusterID`, `cc.ClusterName`, `cc.ClusterType`, `cc.HiveShard`
+- `cc.Operator` — OperatorConfig with Name, Namespace, Deployment, etc.
+- `cc.AddResult(r)` — append a check result
+- `cc.RecordError(op, err)` — record an API error under the current check
+
+### Check result format
+
+```go
+r := checks.Result{
+    Check:    "check_name",           // unique identifier
+    Status:   checks.StatusPass,      // PASS, FAIL, WARNING, SKIP, INFO, UNKNOWN
+    Severity: checks.SeverityWarning, // critical, warning, info
+    Message:  "Human-readable summary",
+    Details:  map[string]any{         // displayed in expandable detail grid
+        "key": "value",
+    },
+}
+cc.AddResult(r)
+```
+
+## Common Checks (13 — all operators inherit)
+
+| Check | Description |
+|-------|-------------|
+| `namespace_status` | Namespace exists and is Active |
+| `pod_status_and_restarts` | Deployment health, pod count, restarts |
+| `pko_clusterpackage_health` | PKO conditions (Available/Progressing/Unpacked) |
+| `dual_installation_check` | Detects OLM + PKO conflict |
+| `orphaned_olm_artifacts` | Orphaned CSVs on PKO clusters |
+| `version_verification` | Deployed version matches SAAS target |
+| `resource_leak_detection` | CPU/memory trend over 7d via Thanos |
+| `resource_limits_validation` | Limits/requests with peak usage comparison |
+| `leader_election` | Lease health |
+| `image_pull_status` | ImagePullBackOff detection |
+| `pko_job_health` | Cleanup job status |
+| `log_error_analysis` | Error/warning counts in logs |
+| `operator_events` | K8s warning events |
+
+## Key Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `github.com/openshift/backplane-cli` | Backplane connection + elevation via k8s impersonation |
+| `github.com/openshift-online/ocm-sdk-go` | OCM API (cluster metadata, provision shards) |
+| `k8s.io/client-go` | Native k8s API calls (typed + dynamic) |
+| `github.com/sirupsen/logrus` | Structured logging |
+| `gopkg.in/yaml.v3` | SAAS file YAML parsing |
+
+## Connection Architecture
+
+```
+OCM SDK Connection (per environment)
+  ├── Cluster metadata (name, version, hive shard)
+  ├── SAAS target resolution (GitLab API)
+  └── Backplane k8s clients (per cluster)
+       ├── Standard client — pods, deployments, namespaces, logs, events
+       ├── Elevated client — k8s impersonation as backplane-cluster-admin
+       │    ├── Custom resources (RouteMonitors, ServiceMonitors, PrometheusRules)
+       │    ├── Secrets (alertmanager-main, pd-secret)
+       │    └── Pod exec (Thanos/RHOBS Prometheus queries)
+       └── Dynamic client — ClusterPackages, Subscriptions, CSVs, HCPs
+```
+
+Multi-environment: create separate `ocm.Client` per env, pass `ocmClient.Conn()` to `kube.ConnectToClusterWithConn()`.
 
 ## Production Safety — CRITICAL
 
-**NEVER run `ocm backplane elevate` commands against production clusters without explicit user authorization.**
+- Production environment is auto-detected from OCM URL
+- `--no-elevate` is applied automatically in production
+- `--reason` with a JIRA ticket is required for production elevation
+- Claude should NEVER suggest removing production safety checks
 
-The script auto-detects the OCM environment. In production:
-- `--no-elevate` is applied automatically (safe subset of checks only)
-- `--prod-elevate` is required to explicitly acknowledge elevation in production
-- Claude should NEVER suggest or execute `--prod-elevate` — only the user can decide this
+## Elevation Handling
 
-When `NO_ELEVATE=true`:
-- All `ocm backplane elevate` commands are silently skipped (return empty, rc=0)
-- Checks that depend on elevated data report as SKIP or show empty results
-- Safe checks still run: namespace, version, deployment/pod health, PKO/OLM status, logs, events
+- Uses native k8s impersonation (`backplane-cluster-admin`) — not CLI `ocm backplane elevate`
+- If elevation fails (Forbidden), `elevationBroken` flag is set and all subsequent elevated checks SKIP
+- Standard k8s API calls (pods, deployments, namespaces) work without elevation
+- Elevated calls needed for: custom resources, secrets, pod exec (Thanos queries)
 
-## Known Patterns and Pitfalls
+## Testing
 
-- **Multiline jq output**: `jq '... | length'` can produce multiple values if input has multiple JSON objects. Always use `jq_int` for integer comparisons.
-- **Heredoc JSON**: Variables expanded inside `cat <<EOF` must be single-line. Use `jq -cs` or `tr -d '\n'` for variables that might contain newlines.
-- **Subshell variable loss**: `$(...)` creates a subshell. Don't call `log_api_error()` inside `$(...)` — the `api_errors` array modification is lost.
-- **Elevation required**: Custom resources (RouteMonitor, ClusterUrlMonitor, ServiceMonitor, PrometheusRule) need `ocm backplane elevate` on managed clusters.
-- **Two Prometheus stacks on MCs**: Platform Thanos (`openshift-monitoring`) sees MC-local probes. RHOBS Prometheus (`openshift-observability-operator`) sees HCP probes. Use `query_rhobs_prometheus()` for HCP data.
-- **OLM-to-PKO migration**: Check for `collision-protection: IfNoController` annotation on resources that exist from OLM deployments. Missing annotation causes "refusing adoption" errors.
+```bash
+# Build
+go build -o healthcheck ./cmd/healthcheck/
+
+# Run against one staging cluster
+./healthcheck --cluster-list test.list --reason "test" --oper rmo --no-html
+
+# Verify JSON
+jq '.[].health_summary' results.json
+
+# Generate HTML
+bash lib/generate_html_report.sh results.json report.html && open report.html
+
+# Run all checks
+go vet ./... && go build ./...
+```
+
+## Known Patterns
+
+- **Two Prometheus stacks on MCs**: Platform Thanos (`openshift-monitoring`) sees MC-local probes. RHOBS Prometheus (`openshift-observability-operator`) sees HCP probes. Use `cc.Client.QueryRHOBSPrometheus()` for HCP data.
+- **MC probe count**: On MCs, only ClusterUrlMonitor probes appear in platform Thanos. HCP RouteMonitor probes are in RHOBS. The `rmo_probe_health` check accounts for this.
+- **OLM-to-PKO migration**: Check for orphaned CSVs and competing Subscription + ClusterPackage.
+- **Viper thread safety**: `backplane-cli` uses viper which isn't goroutine-safe. Connection creation is serialized with a mutex.
+- **OCM token lifecycle**: Refresh token expiry is checked before connecting. If token will expire during the estimated runtime, it's refreshed proactively.

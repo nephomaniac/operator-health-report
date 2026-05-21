@@ -97,7 +97,7 @@ type ClusterContext struct {
 	HiveShard      string
 	OCMEnv         string
 
-	Client   *kube.ClientConfig
+	Client   *kube.ClusterClient
 	Operator OperatorConfig
 
 	CurrentCheck  string
@@ -118,24 +118,26 @@ func (cc *ClusterContext) AddResult(r Result) {
 	}
 }
 
-// RunAndRecord executes a kube command and records any error
-func (cc *ClusterContext) RunAndRecord(description string, result *kube.ExecResult) {
-	if result.ExitCode != 0 {
-		errType := "api_error"
-		lower := strings.ToLower(result.Stderr)
-		if strings.Contains(lower, "command not found") || strings.Contains(lower, "no such file") {
-			errType = "script_error"
-		}
-		cc.APIErrors = append(cc.APIErrors, APIError{
-			Operation:    description,
-			ErrorMessage: strings.TrimSpace(result.Stderr),
-			Command:      result.Command,
-			Check:        cc.CurrentCheck,
-			ErrorType:    errType,
-			ExitCode:     result.ExitCode,
-			Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		})
+// RecordError logs an API error for the current check
+func (cc *ClusterContext) RecordError(operation string, err error) {
+	if err == nil {
+		return
 	}
+	errMsg := err.Error()
+	errType := "api_error"
+	lower := strings.ToLower(errMsg)
+	if strings.Contains(lower, "command not found") || strings.Contains(lower, "no such file") {
+		errType = "script_error"
+	}
+	cc.APIErrors = append(cc.APIErrors, APIError{
+		Operation:    operation,
+		ErrorMessage: errMsg,
+		Command:      "",
+		Check:        cc.CurrentCheck,
+		ErrorType:    errType,
+		ExitCode:     1,
+		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 // OverallStatus returns CRITICAL, WARNING, or HEALTHY

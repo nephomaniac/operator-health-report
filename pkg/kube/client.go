@@ -1,244 +1,402 @@
 package kube
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
+	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openshift/operator-health-report/pkg/logging"
 
-	// Native SDK imports — will replace exec-based approach incrementally
-	// sdk "github.com/openshift-online/ocm-sdk-go"
-	// bpconfig "github.com/openshift/backplane-cli/pkg/backplaneapi"
-	// bplogin "github.com/openshift/backplane-cli/pkg/login"
-	// "k8s.io/client-go/kubernetes"
-	// "k8s.io/client-go/rest"
-	// ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	sdk "github.com/openshift-online/ocm-sdk-go"
+	bplogin "github.com/openshift/backplane-cli/cmd/ocm-backplane/login"
+	bpconfig "github.com/openshift/backplane-cli/pkg/cli/config"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/kubectl/pkg/scheme"
 )
 
-// ClusterConnection holds all connections needed to interact with a cluster.
-// Supports multiple OCM environments (e.g., staging cluster + production hive).
-// TODO: Migrate from exec-based to native OCM SDK + backplane-cli connections.
-// When migrated, this will hold:
-//   - OCMConn *sdk.Connection — for the cluster's OCM environment
-//   - RestConfig *rest.Config — k8s REST config via backplane
-//   - K8sClient kubernetes.Interface — typed k8s client
-//   - HiveOCMConn *sdk.Connection — for hive's OCM environment (may differ)
-//   - HiveRestConfig/HiveK8sClient — for hive cluster access
-type ClusterConnection struct {
-	ClusterID        string
-	ElevationReasons []string
-	Elevated         bool
+// ClusterClient provides native k8s access to a cluster via backplane.
+type ClusterClient struct {
+	ClusterID string
+	Reason    string
+	NoElevate bool
+
+	restConfig     *rest.Config
+	elevatedConfig *rest.Config
+	clientset      kubernetes.Interface
+	elevatedClient kubernetes.Interface
+	dynamicClient  dynamic.Interface
+	elevatedDynamic dynamic.Interface
+
+	elevationBroken bool
 }
 
-// ExecResult holds the output of a CLI command execution (for oc/kubectl fallback)
-type ExecResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	Command  string // the equivalent CLI command for reproduction
-	Duration time.Duration
-	Cached   bool
+// bpConfigMu serializes calls to backplane-cli's GetBackplaneConfiguration
+// which uses viper internally and is not goroutine-safe.
+var bpConfigMu sync.Mutex
+
+// ConnectToCluster establishes a backplane connection using the default OCM config.
+// For multi-environment use, prefer ConnectToClusterWithConn.
+func ConnectToCluster(ctx context.Context, clusterID, reason string, noElevate bool) (*ClusterClient, error) {
+	return ConnectToClusterWithConn(ctx, clusterID, reason, noElevate, nil)
 }
 
-// Error returns a formatted error if the command failed
-func (r *ExecResult) Error() error {
-	if r.ExitCode == 0 {
-		return nil
-	}
-	return fmt.Errorf("command failed (rc=%d): %s\n  stderr: %s\n  reproduce with: %s",
-		r.ExitCode, r.Stdout, r.Stderr, r.Command)
-}
-
-// ClientConfig holds settings for creating clients
-type ClientConfig struct {
-	Reason     string
-	CacheDir   string
-	Replay     bool
-	NoElevate  bool
-	cacheSeq   map[string]int
-}
-
-// NewClientConfig creates a new client configuration
-func NewClientConfig(reason string) *ClientConfig {
-	return &ClientConfig{
-		Reason:   reason,
-		cacheSeq: make(map[string]int),
-	}
-}
-
-// ExecCommand runs a CLI command with caching and error logging.
-// Use this for commands that don't have native Go SDK equivalents,
-// or when you want the user to see the exact command they can reproduce.
-func (c *ClientConfig) ExecCommand(ctx context.Context, description string, args ...string) *ExecResult {
-	command := strings.Join(args, " ")
-
+// ConnectToClusterWithConn establishes a backplane connection using a specific OCM SDK connection.
+// If ocmConn is nil, uses the default backplane configuration.
+// This allows connecting to clusters across different OCM environments in the same process.
+func ConnectToClusterWithConn(ctx context.Context, clusterID, reason string, noElevate bool, ocmConn *sdk.Connection) (*ClusterClient, error) {
 	log := logging.Log
 
-	// Check no-elevate
-	if c.NoElevate && strings.Contains(command, "backplane elevate") {
-		log.WithField("command", command).Debug("Skipped — no-elevate mode")
-		return &ExecResult{Command: command}
-	}
-
-	// Try cache/replay
-	if c.CacheDir != "" {
-		if c.Replay {
-			return c.readCache(description, command)
-		}
-	}
-
-	// Execute
-	log.WithFields(map[string]interface{}{
-		"description": description,
-		"command":     command,
-	}).Debug("Executing command")
-
-	start := time.Now()
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	var stdoutBuf, stderrBuf strings.Builder
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-	err := cmd.Run()
-
-	result := &ExecResult{
-		Stdout:   stdoutBuf.String(),
-		Stderr:   stderrBuf.String(),
-		ExitCode: 0,
-		Command:  command,
-		Duration: time.Since(start),
-	}
-
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			result.ExitCode = 1
-			result.Stderr = err.Error()
-		}
-		log.WithFields(map[string]interface{}{
-			"description": description,
-			"exit_code":   result.ExitCode,
-			"stderr":      strings.TrimSpace(result.Stderr),
-			"command":     command,
-			"duration":    result.Duration.String(),
-		}).Warn("Command failed")
+	// Serialize backplane config loading — viper is not goroutine-safe
+	bpConfigMu.Lock()
+	var bp bpconfig.BackplaneConfiguration
+	var err error
+	if ocmConn != nil {
+		bp, err = bpconfig.GetBackplaneConfigurationWithConn(ocmConn)
 	} else {
-		log.WithFields(map[string]interface{}{
-			"description":   description,
-			"duration":      result.Duration.String(),
-			"stdout_length": len(result.Stdout),
-		}).Debug("Command succeeded")
+		bp, err = bpconfig.GetBackplaneConfiguration()
 	}
-
-	// Cache the result
-	if c.CacheDir != "" {
-		c.writeCache(description, result)
-	}
-
-	return result
-}
-
-// ExecOC runs an oc command (not elevated)
-func (c *ClientConfig) ExecOC(ctx context.Context, description string, args ...string) *ExecResult {
-	fullArgs := append([]string{"oc"}, args...)
-	return c.ExecCommand(ctx, description, fullArgs...)
-}
-
-// ExecElevated runs an elevated oc command via ocm backplane elevate
-func (c *ClientConfig) ExecElevated(ctx context.Context, description string, args ...string) *ExecResult {
-	fullArgs := append([]string{"ocm", "backplane", "elevate", c.Reason, "--"}, args...)
-	return c.ExecCommand(ctx, description, fullArgs...)
-}
-
-// ExecThanos runs a PromQL query against Thanos via exec into the pod.
-// Logs the equivalent oc command for the user to reproduce.
-func (c *ClientConfig) ExecThanos(ctx context.Context, description, query string) *ExecResult {
-	return c.ExecElevated(ctx, description,
-		"exec", "-n", "openshift-monitoring",
-		"deployment/thanos-querier", "-c", "thanos-query", "--",
-		"wget", "-q", "-T", "30", "-O-",
-		fmt.Sprintf("http://localhost:9090/api/v1/query?query=%s", query),
-	)
-}
-
-// ExecRHOBSPrometheus runs a PromQL query against the RHOBS Prometheus on MCs
-func (c *ClientConfig) ExecRHOBSPrometheus(ctx context.Context, description, query string) *ExecResult {
-	return c.ExecElevated(ctx, description,
-		"exec", "-n", "openshift-observability-operator",
-		"statefulset/prometheus-rhobs-hypershift-monitoring-stack", "-c", "prometheus", "--",
-		"curl", "-sf", "--max-time", "30",
-		fmt.Sprintf("http://localhost:9090/api/v1/query?query=%s", query),
-	)
-}
-
-// Cache operations
-
-func (c *ClientConfig) cacheKey(description string) string {
-	safe := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
-			return r
-		}
-		return '_'
-	}, description)
-	if len(safe) > 80 {
-		safe = safe[:80]
-	}
-	seq := c.cacheSeq[safe]
-	c.cacheSeq[safe] = seq + 1
-	return fmt.Sprintf("%s_%d", safe, seq)
-}
-
-func (c *ClientConfig) writeCache(description string, result *ExecResult) {
-	key := c.cacheKey(description)
-	os.WriteFile(filepath.Join(c.CacheDir, key+".out"), []byte(result.Stdout), 0644)
-	os.WriteFile(filepath.Join(c.CacheDir, key+".err"), []byte(result.Stderr), 0644)
-	os.WriteFile(filepath.Join(c.CacheDir, key+".rc"), []byte(fmt.Sprintf("%d", result.ExitCode)), 0644)
-	os.WriteFile(filepath.Join(c.CacheDir, key+".cmd"), []byte(result.Command), 0644)
-}
-
-func (c *ClientConfig) readCache(description, command string) *ExecResult {
-	key := c.cacheKey(description)
-	dir := c.CacheDir
-
-	stdout, err := os.ReadFile(filepath.Join(dir, key+".out"))
+	bpConfigMu.Unlock()
 	if err != nil {
-		return &ExecResult{
-			ExitCode: 1,
-			Stderr:   fmt.Sprintf("cache miss: %s", description),
-			Command:  command,
-			Cached:   true,
+		return nil, fmt.Errorf("failed to load backplane config: %w", err)
+	}
+
+	log.WithField("cluster_id", clusterID).Info("Connecting to cluster via backplane")
+
+	var cfg *rest.Config
+	if ocmConn != nil {
+		cfg, err = bplogin.GetRestConfigWithConn(bp, ocmConn, clusterID)
+	} else {
+		cfg, err = bplogin.GetRestConfig(bp, clusterID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("backplane login failed: %w", err)
+	}
+	cfg.Timeout = 30 * time.Second
+
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create k8s client: %w", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	cc := &ClusterClient{
+		ClusterID:     clusterID,
+		Reason:        reason,
+		NoElevate:     noElevate,
+		restConfig:    cfg,
+		clientset:     clientset,
+		dynamicClient: dynClient,
+	}
+
+	// Create elevated clients if elevation is enabled
+	if !noElevate && reason != "" {
+		var elevCfg *rest.Config
+		if ocmConn != nil {
+			elevCfg, err = bplogin.GetRestConfigAsUserWithConn(bp, ocmConn, clusterID, "backplane-cluster-admin", reason)
+		} else {
+			elevCfg, err = bplogin.GetRestConfigAsUser(bp, clusterID, "backplane-cluster-admin", reason)
+		}
+		if err != nil {
+			log.WithField("error", err).Warn("Failed to create elevated config — elevation will be unavailable")
+			cc.elevationBroken = true
+		} else {
+			elevCfg.Timeout = 30 * time.Second
+			elevClient, err := kubernetes.NewForConfig(elevCfg)
+			if err != nil {
+				log.WithField("error", err).Warn("Failed to create elevated k8s client")
+				cc.elevationBroken = true
+			} else {
+				cc.elevatedConfig = elevCfg
+				cc.elevatedClient = elevClient
+				cc.elevatedDynamic, _ = dynamic.NewForConfig(elevCfg)
+			}
 		}
 	}
 
-	stderr, _ := os.ReadFile(filepath.Join(dir, key+".err"))
-	rcBytes, _ := os.ReadFile(filepath.Join(dir, key+".rc"))
-	rc := 0
-	fmt.Sscanf(string(rcBytes), "%d", &rc)
+	return cc, nil
+}
 
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
-	os.WriteFile(filepath.Join(dir, key+".consumed"), []byte(hash), 0644)
+// Disconnect cleans up the connection (no-op for backplane — session is per-request)
+func (cc *ClusterClient) Disconnect() {
+	logging.Log.WithField("cluster_id", cc.ClusterID).Debug("Disconnected from cluster")
+}
 
-	return &ExecResult{
-		Stdout:   string(stdout),
-		Stderr:   string(stderr),
-		ExitCode: rc,
-		Command:  command,
-		Cached:   true,
+// CanElevate returns true if elevation is available and working
+func (cc *ClusterClient) CanElevate() bool {
+	return !cc.NoElevate && !cc.elevationBroken && cc.elevatedClient != nil
+}
+
+// checkElevatedError inspects an error from an elevated API call. If it's a
+// Forbidden/unknown error, marks elevation as broken so subsequent checks skip.
+func (cc *ClusterClient) checkElevatedError(err error) {
+	if err == nil {
+		return
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "Forbidden") || strings.Contains(msg, "unknown (get") || strings.Contains(msg, "unknown (list") {
+		if !cc.elevationBroken {
+			cc.elevationBroken = true
+			logging.Log.Warn("Elevated API call failed — disabling elevation for remaining checks on this cluster")
+		}
 	}
 }
 
-// Placeholder for native OCM/backplane connection functions.
-// These will replace the ExecCommand-based approach for production use.
-// For now, the ExecCommand approach works and logs the exact CLI commands.
+// Clientset returns the standard (non-elevated) k8s client
+func (cc *ClusterClient) Clientset() kubernetes.Interface {
+	return cc.clientset
+}
 
-// TODO: ConnectToCluster — native OCM SDK + backplane-cli connection
-// Will replace exec-based approach. See osdctl pkg/k8s/client.go for patterns:
-//   - NewWithConn(clusterID, options, ocmConn) for standard connection
-//   - NewAsBackplaneClusterAdminWithConn(clusterID, options, ocmConn, reasons...) for elevated
-//   - GetHiveBPClientForCluster(clusterID, options, reason, hiveOCMURL) for cross-env hive
+// ElevatedClientset returns the elevated k8s client, or nil if unavailable
+func (cc *ClusterClient) ElevatedClientset() kubernetes.Interface {
+	if !cc.CanElevate() {
+		return nil
+	}
+	return cc.elevatedClient
+}
+
+// GetResource fetches a single resource using the dynamic client.
+// Uses elevated client when elevated=true and elevation is available.
+func (cc *ClusterClient) GetResource(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string, elevated bool) (*unstructured.Unstructured, error) {
+	client := cc.dynamicClient
+	if elevated && cc.CanElevate() {
+		client = cc.elevatedDynamic
+	}
+
+	var obj *unstructured.Unstructured
+	var err error
+	if namespace != "" {
+		obj, err = client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	} else {
+		obj, err = client.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
+	}
+	if elevated {
+		cc.checkElevatedError(err)
+	}
+	return obj, err
+}
+
+// ListResources lists resources using the dynamic client.
+func (cc *ClusterClient) ListResources(ctx context.Context, gvr schema.GroupVersionResource, namespace string, elevated bool) (*unstructured.UnstructuredList, error) {
+	client := cc.dynamicClient
+	if elevated && cc.CanElevate() {
+		client = cc.elevatedDynamic
+	}
+
+	var list *unstructured.UnstructuredList
+	var err error
+	if namespace != "" {
+		list, err = client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	} else {
+		list, err = client.Resource(gvr).List(ctx, metav1.ListOptions{})
+	}
+	if elevated {
+		cc.checkElevatedError(err)
+	}
+	return list, err
+}
+
+// GetNamespacePhase returns the phase of a namespace
+func (cc *ClusterClient) GetNamespacePhase(ctx context.Context, name string) (string, error) {
+	ns, err := cc.clientset.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return string(ns.Status.Phase), nil
+}
+
+// GetDeployment returns a deployment as JSON-like map
+func (cc *ClusterClient) GetDeployment(ctx context.Context, namespace, name string) (map[string]any, error) {
+	deploy, err := cc.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(deploy)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	json.Unmarshal(data, &result)
+	return result, nil
+}
+
+// GetPods returns pods matching a label selector
+func (cc *ClusterClient) GetPods(ctx context.Context, namespace, labelSelector string) (*corev1.PodList, error) {
+	return cc.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+}
+
+// GetPodLogs returns the last N lines of logs from a deployment
+func (cc *ClusterClient) GetPodLogs(ctx context.Context, namespace, podName string, tailLines int64) (string, error) {
+	req := cc.clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		TailLines: &tailLines,
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+	buf := new(bytes.Buffer)
+	_, err = io.Copy(buf, stream)
+	return buf.String(), err
+}
+
+// GetEvents returns events for a specific object
+func (cc *ClusterClient) GetEvents(ctx context.Context, namespace, objectName string) (*corev1.EventList, error) {
+	return cc.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("involvedObject.name=%s", objectName),
+	})
+}
+
+// ExecInPod executes a command inside a pod and returns stdout.
+// This is used for Thanos/Prometheus queries via pod exec.
+func (cc *ClusterClient) ExecInPod(ctx context.Context, namespace, podName, container string, command []string, elevated bool) (string, error) {
+	config := cc.restConfig
+	client := cc.clientset
+	if elevated && cc.CanElevate() {
+		config = cc.elevatedConfig
+		client = cc.elevatedClient
+	}
+
+	req := client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(namespace).
+		SubResource("exec")
+
+	req.VersionedParams(&corev1.PodExecOptions{
+		Container: container,
+		Command:   command,
+		Stdout:    true,
+		Stderr:    true,
+	}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(config, http.MethodPost, req.URL())
+	if err != nil {
+		return "", fmt.Errorf("creating executor: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		if stderr.Len() > 0 {
+			return "", fmt.Errorf("%w: %s", err, stderr.String())
+		}
+		return "", err
+	}
+
+	return stdout.String(), nil
+}
+
+// QueryThanos runs a PromQL instant query against the Thanos querier pod.
+// Uses regular client for pod discovery, elevated client for exec.
+func (cc *ClusterClient) QueryThanos(ctx context.Context, query string) (string, error) {
+	log := logging.Log
+
+	// Find thanos pod with regular client (doesn't need elevation)
+	pods, err := cc.clientset.CoreV1().Pods("openshift-monitoring").List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=thanos-query",
+	})
+	if err != nil {
+		return "", fmt.Errorf("listing thanos pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("no thanos-querier pods found")
+	}
+
+	podName := pods.Items[0].Name
+	log.WithField("pod", podName).Debug("Querying Thanos")
+
+	// Exec into pod requires elevation
+	result, err := cc.ExecInPod(ctx, "openshift-monitoring", podName, "thanos-query",
+		[]string{"wget", "-q", "-T", "30", "-O-",
+			fmt.Sprintf("http://localhost:9090/api/v1/query?query=%s", query)},
+		true)
+	cc.checkElevatedError(err)
+	return result, err
+}
+
+// QueryThanosRange runs a PromQL range query against the Thanos querier pod.
+func (cc *ClusterClient) QueryThanosRange(ctx context.Context, query string, start, end int64, step int) (string, error) {
+	pods, err := cc.clientset.CoreV1().Pods("openshift-monitoring").List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=thanos-query",
+	})
+	if err != nil {
+		return "", fmt.Errorf("listing thanos pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("no thanos-querier pods found")
+	}
+
+	result, err := cc.ExecInPod(ctx, "openshift-monitoring", pods.Items[0].Name, "thanos-query",
+		[]string{"wget", "-q", "-T", "30", "-O-",
+			fmt.Sprintf("http://localhost:9090/api/v1/query_range?query=%s&start=%d&end=%d&step=%d",
+				query, start, end, step)},
+		true)
+	cc.checkElevatedError(err)
+	return result, err
+}
+
+// QueryRHOBSPrometheus runs a PromQL query against the RHOBS Prometheus on MCs.
+func (cc *ClusterClient) QueryRHOBSPrometheus(ctx context.Context, query string) (string, error) {
+	// Find prometheus pod with regular client
+	pods, err := cc.clientset.CoreV1().Pods("openshift-observability-operator").List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=prometheus",
+	})
+	if err != nil {
+		return "", fmt.Errorf("listing RHOBS prometheus pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("no RHOBS prometheus pods found")
+	}
+
+	result, err := cc.ExecInPod(ctx, "openshift-observability-operator", pods.Items[0].Name, "prometheus",
+		[]string{"curl", "-sf", "--max-time", "30",
+			fmt.Sprintf("http://localhost:9090/api/v1/query?query=%s", query)},
+		true)
+	cc.checkElevatedError(err)
+	return result, err
+}
+
+// GetClusterVersion returns the desired cluster version string.
+func (cc *ClusterClient) GetClusterVersion(ctx context.Context) (string, error) {
+	gvr := schema.GroupVersionResource{Group: "config.openshift.io", Version: "v1", Resource: "clusterversions"}
+	cv, err := cc.dynamicClient.Resource(gvr).Get(ctx, "version", metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	version, _, _ := unstructured.NestedString(cv.Object, "status", "desired", "version")
+	return version, nil
+}
+
+// DetectClusterType returns the cluster type based on the cluster name prefix.
+func DetectClusterType(clusterName string) string {
+	switch {
+	case strings.HasPrefix(clusterName, "hs-mc-"):
+		return "management_cluster"
+	case strings.HasPrefix(clusterName, "hs-sc-"):
+		return "service_cluster"
+	default:
+		return "standard"
+	}
+}
