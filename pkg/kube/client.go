@@ -130,6 +130,68 @@ func withRetryResult[T any](ctx context.Context, description string, fn func() (
 	return result, err
 }
 
+// retryTransport wraps an HTTP transport to retry on 429 and 5xx responses.
+// This ensures ALL k8s API calls (including direct Clientset() usage in
+// operator checkers) get automatic retry with backoff.
+func retryTransport(rt http.RoundTripper) http.RoundTripper {
+	return &retryRoundTripper{delegate: rt}
+}
+
+type retryRoundTripper struct {
+	delegate http.RoundTripper
+}
+
+func (r *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	var resp *http.Response
+	var err error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Clone request body for retry (body may be consumed on first attempt)
+		var bodyClone io.ReadCloser
+		if req.Body != nil && req.GetBody != nil {
+			bodyClone, _ = req.GetBody()
+			req.Body = bodyClone
+		}
+
+		resp, err = r.delegate.RoundTrip(req)
+		if err != nil {
+			// Network errors — check if retryable
+			if isRetryable(err) && attempt < maxRetries {
+				backoff := baseBackoff * time.Duration(1<<uint(attempt))
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
+				time.Sleep(backoff + jitter)
+				continue
+			}
+			return resp, err
+		}
+
+		// HTTP-level retry on 429 and 5xx
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			if attempt < maxRetries {
+				resp.Body.Close()
+				backoff := baseBackoff * time.Duration(1<<uint(attempt))
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
+				logging.Log.WithField("status", resp.StatusCode).
+					WithField("attempt", attempt+1).
+					WithField("wait", (backoff + jitter).Round(100*time.Millisecond)).
+					Warn("HTTP retry on server error")
+				time.Sleep(backoff + jitter)
+				continue
+			}
+		}
+
+		return resp, err
+	}
+
+	return resp, err
+}
+
 // bpConfigMu serializes calls to backplane-cli's GetBackplaneConfiguration
 // which uses viper internally and is not goroutine-safe.
 var bpConfigMu sync.Mutex
@@ -173,6 +235,8 @@ func ConnectToClusterWithConn(ctx context.Context, clusterID, reason string, noE
 		return nil, fmt.Errorf("backplane login failed: %w", err)
 	}
 	cfg.Timeout = 30 * time.Second
+	// Enable client-go's built-in retry on 429/5xx with backoff
+	cfg.Wrap(retryTransport)
 
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
@@ -206,6 +270,7 @@ func ConnectToClusterWithConn(ctx context.Context, clusterID, reason string, noE
 			cc.elevationBroken = true
 		} else {
 			elevCfg.Timeout = 30 * time.Second
+			elevCfg.Wrap(retryTransport)
 			elevClient, err := kubernetes.NewForConfig(elevCfg)
 			if err != nil {
 				log.WithField("error", err).Warn("Failed to create elevated k8s client")
