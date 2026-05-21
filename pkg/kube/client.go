@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openshift/operator-health-report/pkg/logging"
+
 	// Native SDK imports — will replace exec-based approach incrementally
 	// sdk "github.com/openshift-online/ocm-sdk-go"
 	// bpconfig "github.com/openshift/backplane-cli/pkg/backplaneapi"
@@ -76,8 +78,11 @@ func NewClientConfig(reason string) *ClientConfig {
 func (c *ClientConfig) ExecCommand(ctx context.Context, description string, args ...string) *ExecResult {
 	command := strings.Join(args, " ")
 
+	log := logging.Log
+
 	// Check no-elevate
 	if c.NoElevate && strings.Contains(command, "backplane elevate") {
+		log.WithField("command", command).Debug("Skipped — no-elevate mode")
 		return &ExecResult{Command: command}
 	}
 
@@ -89,6 +94,11 @@ func (c *ClientConfig) ExecCommand(ctx context.Context, description string, args
 	}
 
 	// Execute
+	log.WithFields(map[string]interface{}{
+		"description": description,
+		"command":     command,
+	}).Debug("Executing command")
+
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	var stdoutBuf, stderrBuf strings.Builder
@@ -111,6 +121,19 @@ func (c *ClientConfig) ExecCommand(ctx context.Context, description string, args
 			result.ExitCode = 1
 			result.Stderr = err.Error()
 		}
+		log.WithFields(map[string]interface{}{
+			"description": description,
+			"exit_code":   result.ExitCode,
+			"stderr":      strings.TrimSpace(result.Stderr),
+			"command":     command,
+			"duration":    result.Duration.String(),
+		}).Warn("Command failed")
+	} else {
+		log.WithFields(map[string]interface{}{
+			"description":   description,
+			"duration":      result.Duration.String(),
+			"stdout_length": len(result.Stdout),
+		}).Debug("Command succeeded")
 	}
 
 	// Cache the result

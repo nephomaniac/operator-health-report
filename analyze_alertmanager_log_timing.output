@@ -1,0 +1,35 @@
+==================================================================
+AlertManager Log Timing Analysis
+==================================================================
+Namespace: openshift-monitoring
+Lookback: Last 30 minutes
+
+1. Analyzing AlertManager pod events...
+==================================================================
+
+Pod: alertmanager-main-0
+  Created: 2025-09-08T11:09:56Z
+  Phase: Running
+  Container Statuses:
+    alertmanager: ready=true, restarts=1, state=running
+    alertmanager-proxy: ready=true, restarts=0, state=running
+    config-reloader: ready=true, restarts=0, state=running
+    kube-rbac-proxy: ready=true, restarts=0, state=running
+    kube-rbac-proxy-metric: ready=true, restarts=0, state=running
+    prom-label-proxy: ready=true, restarts=0, state=running
+
+Pod: alertmanager-main-1
+  Created: 2025-10-23T04:27:14Z
+  Phase: Running
+  Container Statuses:
+    alertmanager: ready=true, restarts=1, state=running
+    alertmanager-proxy: ready=true, restarts=0, state=running
+    config-reloader: ready=true, restarts=0, state=running
+    kube-rbac-proxy: ready=true, restarts=0, state=running
+    kube-rbac-proxy-metric: ready=true, restarts=0, state=running
+    prom-label-proxy: ready=true, restarts=0, state=running
+
+
+2. Recent pod events (last 30 min)...
+==================================================================
+

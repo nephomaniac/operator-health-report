@@ -12,6 +12,7 @@ import (
 
 	"github.com/openshift/operator-health-report/pkg/checks"
 	"github.com/openshift/operator-health-report/pkg/kube"
+	"github.com/openshift/operator-health-report/pkg/logging"
 )
 
 var version = "dev"
@@ -26,6 +27,8 @@ func main() {
 		replay      bool
 		outputFile  string
 		noHTML      bool
+		logLevel    string
+		logDir      string
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", "", "File with cluster IDs (one per line)")
@@ -36,7 +39,23 @@ func main() {
 	flag.BoolVar(&replay, "replay", false, "Read from cache instead of running commands")
 	flag.StringVar(&outputFile, "output", "", "Output JSON file (default: health_TIMESTAMP.json)")
 	flag.BoolVar(&noHTML, "no-html", false, "Skip HTML report generation")
+	flag.StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
+	flag.StringVar(&logDir, "log-dir", "", "Directory for debug log file (captures all levels)")
 	flag.Parse()
+
+	// Configure logging
+	logging.SetLevel(logLevel)
+	if logDir != "" {
+		logPath, err := logging.EnableDebugFile(logDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to create debug log: %v\n", err)
+		} else {
+			defer logging.CloseDebugFile()
+			logging.Log.Infof("Debug log: %s", logPath)
+		}
+	}
+
+	_ = logging.Log
 
 	if clusterList == "" {
 		fmt.Fprintln(os.Stderr, "Error: --cluster-list is required")
@@ -212,7 +231,7 @@ func detectOCMEnv() string {
 	return strings.TrimSpace(r)
 }
 
-func loginToCluster(clusterID string) *kube.Result {
+func loginToCluster(clusterID string) *kube.ExecResult {
 	client := kube.NewClientConfig("")
 	return client.ExecCommand(context.Background(), "backplane login",
 		"ocm", "backplane", "login", clusterID)
@@ -278,8 +297,8 @@ func detectHiveShard(clusterID string) string {
 	return "unknown"
 }
 
-func detectOperatorVersion(ctx context.Context, client *kube.Client, op checks.OperatorConfig) string {
-	result := client.RunOC(ctx, "Get operator image",
+func detectOperatorVersion(ctx context.Context, client *kube.ClientConfig, op checks.OperatorConfig) string {
+	result := client.ExecOC(ctx, "Get operator image",
 		"get", "deployment", "-n", op.Namespace, op.Deployment,
 		"-o", "jsonpath={.spec.template.spec.containers[0].image}")
 	if result.ExitCode != 0 || result.Stdout == "" {

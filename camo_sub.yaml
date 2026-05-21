@@ -1,0 +1,100 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  creationTimestamp: "2026-04-08T19:13:42Z"
+  generation: 1
+  labels:
+    hive.openshift.io/managed: "true"
+    operators.coreos.com/configure-alertmanager-operator.openshift-monitoring: ""
+  name: configure-alertmanager-operator
+  namespace: openshift-monitoring
+  resourceVersion: "112206922"
+  uid: 2b816fc3-e04d-478a-8e1d-2dbb3a6c35a0
+spec:
+  channel: staging
+  config:
+    env:
+    - name: FEDRAMP
+      value: "false"
+  name: configure-alertmanager-operator
+  source: configure-alertmanager-operator-registry
+  sourceNamespace: openshift-monitoring
+status:
+  catalogHealth:
+  - catalogSourceRef:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: CatalogSource
+      name: certified-operators
+      namespace: openshift-marketplace
+      resourceVersion: "1003788"
+      uid: b06dd3ec-9ec5-4876-9135-0935cb2ab6ca
+    healthy: true
+    lastUpdated: "2026-04-09T15:28:52Z"
+  - catalogSourceRef:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: CatalogSource
+      name: community-operators
+      namespace: openshift-marketplace
+      resourceVersion: "1003685"
+      uid: 11ed025f-4b6e-498d-9b54-7f33981ac8e0
+    healthy: true
+    lastUpdated: "2026-04-09T15:28:52Z"
+  - catalogSourceRef:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: CatalogSource
+      name: oadp-operator-catalog
+      namespace: openshift-marketplace
+      resourceVersion: "1006617"
+      uid: c9b746b3-bafe-4148-b5ee-ab1a0a6b7fa4
+    healthy: true
+    lastUpdated: "2026-04-09T15:28:52Z"
+  - catalogSourceRef:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: CatalogSource
+      name: redhat-marketplace
+      namespace: openshift-marketplace
+      resourceVersion: "1003689"
+      uid: 346d1554-e059-448d-abcb-03dd6f659416
+    healthy: true
+    lastUpdated: "2026-04-09T15:28:52Z"
+  - catalogSourceRef:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: CatalogSource
+      name: redhat-operators
+      namespace: openshift-marketplace
+      resourceVersion: "1003739"
+      uid: 6efaecdb-0bdf-4b4c-a815-1ac1d00b3e31
+    healthy: true
+    lastUpdated: "2026-04-09T15:28:52Z"
+  - catalogSourceRef:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: CatalogSource
+      name: configure-alertmanager-operator-registry
+      namespace: openshift-monitoring
+      resourceVersion: "1007826"
+      uid: 61abf4ce-d290-4dec-8dad-6f22294450ee
+    healthy: true
+    lastUpdated: "2026-04-09T15:28:52Z"
+  conditions:
+  - lastTransitionTime: "2026-04-09T15:28:55Z"
+    message: all available catalogsources are healthy
+    reason: AllCatalogSourcesHealthy
+    status: "False"
+    type: CatalogSourcesUnhealthy
+  currentCSV: configure-alertmanager-operator.v0.1.826-g81d9d24
+  installPlanGeneration: 2
+  installPlanRef:
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: install-29ktp
+    namespace: openshift-monitoring
+    resourceVersion: "112203940"
+    uid: a4336424-7ab4-4390-a50b-1c1468c97b34
+  installedCSV: configure-alertmanager-operator.v0.1.826-g81d9d24
+  installplan:
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: install-29ktp
+    uuid: a4336424-7ab4-4390-a50b-1c1468c97b34
+  lastUpdated: "2026-04-17T16:16:50Z"
+  state: AtLatestKnown
