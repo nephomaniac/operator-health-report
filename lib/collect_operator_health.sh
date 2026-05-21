@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="b7e9e1e"
+SCRIPT_VERSION="057c133"
 
 # Default values
 NAMESPACE="openshift-monitoring"
@@ -1751,7 +1751,7 @@ if [ "$pod_count" -gt 0 ]; then
                     probe_url: (.metric.probe_url // ""),
                     values: .values
                 }]' 2>/dev/null || echo "[]")
-                probe_target_count=$(echo "$probe_ts_data" | jq '.data.result | length' 2>/dev/null | tr -d '[:space:]')
+                probe_target_count=$(echo "$probe_ts_data" | jq_int '.data.result | length')
                 probe_target_names=$(echo "$probe_ts_data" | jq -r '[.data.result[] | if .metric.probe_url then (if (.metric.probe_url | test("console")) then "console" elif (.metric.probe_url | test("api|livez")) then "api" else .metric.probe_url end) else "unknown" end] | join(", ")' 2>/dev/null)
                 echo "  Probe success: $probe_target_count endpoint(s): $probe_target_names"
             else
@@ -1778,7 +1778,7 @@ if [ "$pod_count" -gt 0 ]; then
                     probe_url: (.metric.probe_url // ""),
                     values: .values
                 }]' 2>/dev/null || echo "[]")
-                echo "  Probe duration: $(echo "$duration_ts_data" | jq '.data.result | length' 2>/dev/null | tr -d '[:space:]') endpoint(s)"
+                echo "  Probe duration: $(echo "$duration_ts_data" | jq_int '.data.result | length') endpoint(s)"
             else
                 echo "  ℹ Probe duration: no data returned"
             fi
@@ -3391,7 +3391,8 @@ EOF
 
         if [ "$stale_job_count" -gt 0 ]; then
             current_epoch=$(date +%s)
-            hung_jobs=$(echo "$olm_cleanup_jobs" | jq --argjson now "$current_epoch" -r '[.[] | select(.status.active > 0) | select(($now - (.metadata.creationTimestamp | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)) > 300)] | length' 2>/dev/null || echo "0")
+            hung_jobs=$(echo "$olm_cleanup_jobs" | jq --argjson now "$current_epoch" -r '[.[] | select(.status.active > 0) | select(($now - (.metadata.creationTimestamp | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)) > 300)] | length' 2>/dev/null | head -1 | tr -d '[:space:]')
+            [ -z "$hung_jobs" ] && hung_jobs=0
             failed_jobs=$(echo "$olm_cleanup_jobs" | jq_int '[.[] | select(.status.failed > 0)] | length')
 
             echo "  OLM cleanup jobs: $stale_job_count total, $hung_jobs hung, $failed_jobs failed"
@@ -3793,11 +3794,11 @@ EOF
     monitor_count=0
     cum_count=0
     if [ -n "$routemonitors" ] && echo "$routemonitors" | jq -e '.items' >/dev/null 2>&1; then
-        monitor_count=$(echo "$routemonitors" | jq '.items | length' 2>/dev/null | tr -d '[:space:]')
+        monitor_count=$(echo "$routemonitors" | jq_int '.items | length')
         [ -z "$monitor_count" ] && monitor_count=0
     fi
     if [ -n "$clusterurlmonitors" ] && echo "$clusterurlmonitors" | jq -e '.items' >/dev/null 2>&1; then
-        cum_count=$(echo "$clusterurlmonitors" | jq '.items | length' 2>/dev/null | tr -d '[:space:]')
+        cum_count=$(echo "$clusterurlmonitors" | jq_int '.items | length')
         [ -z "$cum_count" ] && cum_count=0
     fi
     total_monitors=$((monitor_count + cum_count))
@@ -3906,18 +3907,18 @@ EOF
     fi
 
     if [ -n "$routemonitors" ] && echo "$routemonitors" | jq -e '.items' >/dev/null 2>&1; then
-        rm_count=$(echo "$routemonitors" | jq '.items | length' 2>/dev/null | tr -d '[:space:]')
+        rm_count=$(echo "$routemonitors" | jq_int '.items | length')
         [ -z "$rm_count" ] && rm_count=0
 
         console_check=$(echo "$routemonitors" | jq -r '.items[] | select(.metadata.name == "console" and .metadata.namespace == "openshift-route-monitor-operator")' 2>/dev/null)
         [ -n "$console_check" ] && console_rm_exists=true
 
         if [ "$rm_count" -gt 0 ]; then
-            rm_errors=$(echo "$routemonitors" | jq '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null | tr -d '[:space:]')
+            rm_errors=$(echo "$routemonitors" | jq_int '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length')
             [ -z "$rm_errors" ] && rm_errors=0
-            rm_missing_url=$(echo "$routemonitors" | jq '[.items[] | select(.status.routeURL == null or .status.routeURL == "")] | length' 2>/dev/null | tr -d '[:space:]')
+            rm_missing_url=$(echo "$routemonitors" | jq_int '[.items[] | select(.status.routeURL == null or .status.routeURL == "")] | length')
             [ -z "$rm_missing_url" ] && rm_missing_url=0
-            rm_missing_sm=$(echo "$routemonitors" | jq '[.items[] | select(.status.serviceMonitorRef.name == null or .status.serviceMonitorRef.name == "")] | length' 2>/dev/null | tr -d '[:space:]')
+            rm_missing_sm=$(echo "$routemonitors" | jq_int '[.items[] | select(.status.serviceMonitorRef.name == null or .status.serviceMonitorRef.name == "")] | length')
             [ -z "$rm_missing_sm" ] && rm_missing_sm=0
         fi
     elif [ $rm_query_rc -ne 0 ]; then
@@ -3925,14 +3926,14 @@ EOF
     fi
 
     if [ -n "$clusterurlmonitors" ] && echo "$clusterurlmonitors" | jq -e '.items' >/dev/null 2>&1; then
-        cum_count_detail=$(echo "$clusterurlmonitors" | jq '.items | length' 2>/dev/null | tr -d '[:space:]')
+        cum_count_detail=$(echo "$clusterurlmonitors" | jq_int '.items | length')
         [ -z "$cum_count_detail" ] && cum_count_detail=0
 
         api_check=$(echo "$clusterurlmonitors" | jq -r '.items[] | select(.metadata.name == "api" and .metadata.namespace == "openshift-route-monitor-operator")' 2>/dev/null)
         [ -n "$api_check" ] && api_cum_exists=true
 
         if [ "$cum_count_detail" -gt 0 ]; then
-            cum_errors=$(echo "$clusterurlmonitors" | jq '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length' 2>/dev/null | tr -d '[:space:]')
+            cum_errors=$(echo "$clusterurlmonitors" | jq_int '[.items[] | select(.status.errorStatus != null and .status.errorStatus != "")] | length')
             [ -z "$cum_errors" ] && cum_errors=0
             rm_errors=$((rm_errors + cum_errors))
         fi
@@ -4663,11 +4664,11 @@ EOF
         # Query RHOBS Prometheus for HCP probe data
         rhobs_probe_raw=$(query_rhobs_prometheus "HCP probe_success (all)" 'probe_success')
         if [ -n "$rhobs_probe_raw" ]; then
-            hpc_total_probes=$(echo "$rhobs_probe_raw" | jq '.data.result | length' 2>/dev/null | tr -d '[:space:]')
+            hpc_total_probes=$(echo "$rhobs_probe_raw" | jq_int '.data.result | length')
             [ -z "$hpc_total_probes" ] && hpc_total_probes=0
-            hpc_probes_ok=$(echo "$rhobs_probe_raw" | jq '[.data.result[] | select(.value[1] == "1")] | length' 2>/dev/null | tr -d '[:space:]')
+            hpc_probes_ok=$(echo "$rhobs_probe_raw" | jq_int '[.data.result[] | select(.value[1] == "1")] | length')
             [ -z "$hpc_probes_ok" ] && hpc_probes_ok=0
-            hpc_probes_failing=$(echo "$rhobs_probe_raw" | jq '[.data.result[] | select(.value[1] == "0")] | length' 2>/dev/null | tr -d '[:space:]')
+            hpc_probes_failing=$(echo "$rhobs_probe_raw" | jq_int '[.data.result[] | select(.value[1] == "0")] | length')
             [ -z "$hpc_probes_failing" ] && hpc_probes_failing=0
             hpc_failing_urls=$(echo "$rhobs_probe_raw" | jq -r '[.data.result[] | select(.value[1] == "0") | .metric.probe_url] | join(", ")' 2>/dev/null)
         fi
@@ -5469,7 +5470,7 @@ EOF
         wget -q -T 30 -O- "http://localhost:9090/api/v1/query?query=$(printf 'identity_provider{name="osd_exporter"}' | jq -sRr @uri)"
     if [ $__oc_rc -eq 0 ] && [ -n "$__oc_out" ] && echo "$__oc_out" | jq -e '.data.result[0]' >/dev/null 2>&1; then
         ome_idp_types=$(echo "$__oc_out" | jq -r '[.data.result[] | select(.value[1] != "0") | .metric.provider + "=" + .value[1]] | join(", ")' 2>/dev/null)
-        ome_idp_count=$(echo "$__oc_out" | jq '[.data.result[] | select(.value[1] != "0")] | length' 2>/dev/null | tr -d '[:space:]')
+        ome_idp_count=$(echo "$__oc_out" | jq_int '[.data.result[] | select(.value[1] != "0")] | length')
         [ -z "$ome_idp_count" ] && ome_idp_count=0
         ome_idp_message="${ome_idp_count} identity provider type(s) configured: ${ome_idp_types}"
         echo "  ℹ IDPs: $ome_idp_types"
