@@ -2206,11 +2206,124 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                     '</div>';
                 }
 
-                content.innerHTML = `<div class="content">${targetSummaryHTML}<div class="clusters-table-wrapper"><table class="clusters-table"><thead id="header-${op}"></thead><tbody id="body-${op}"></tbody></table></div></div>`;
+                // Build pipeline diagram HTML
+                let pipelineHTML = '';
+                const pipeline = saasMetaEntry?.pipeline;
+                if (pipeline && pipeline.nodes && pipeline.nodes.length > 0) {
+                    pipelineHTML = renderPipelineDiagram(pipeline, opData);
+                }
+
+                content.innerHTML = `<div class="content">${targetSummaryHTML}${pipelineHTML}<div class="clusters-table-wrapper"><table class="clusters-table"><thead id="header-${op}"></thead><tbody id="body-${op}"></tbody></table></div></div>`;
                 contentsContainer.appendChild(content);
 
                 renderOperatorTable(opData, document.getElementById(`header-${op}`), document.getElementById(`body-${op}`), op);
             });
+        }
+
+        function renderPipelineDiagram(pipeline, opData) {
+            if (!pipeline || !pipeline.stages || pipeline.stages.length === 0) return '';
+
+            const nodeMap = {};
+            pipeline.nodes.forEach(n => { nodeMap[n.name] = n; });
+
+            // Count checked clusters per deploy node
+            const checkedCounts = {};
+            opData.forEach(c => {
+                const vc = (c.health_checks || []).find(ch => ch.check === 'version_verification');
+                const target = vc?.details?.saas_target || '';
+                if (target) checkedCounts[target] = (checkedCounts[target] || 0) + 1;
+            });
+
+            // Determine node health status from check results
+            const nodeHealth = {};
+            opData.forEach(c => {
+                const vc = (c.health_checks || []).find(ch => ch.check === 'version_verification');
+                const target = vc?.details?.saas_target || '';
+                if (!target) return;
+                const status = c.health_summary?.overall_status || 'UNKNOWN';
+                if (!nodeHealth[target] || status === 'CRITICAL') nodeHealth[target] = status;
+                else if (status === 'WARNING' && nodeHealth[target] === 'HEALTHY') nodeHealth[target] = status;
+            });
+
+            let html = '<div style="margin:0 0 16px;padding:12px 14px;background:var(--bg-card);border:1px solid var(--border-light);border-radius:6px;overflow-x:auto;">';
+            html += '<div style="font-weight:600;font-size:0.9em;margin-bottom:12px;color:var(--text-secondary);">Promotion Pipeline</div>';
+            html += '<div style="display:flex;gap:8px;align-items:flex-start;min-width:max-content;padding-bottom:8px;">';
+
+            pipeline.stages.forEach((stage, stageIdx) => {
+                // Stage column
+                html += '<div style="display:flex;flex-direction:column;align-items:center;min-width:140px;">';
+                html += `<div style="font-size:0.75em;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">${stage.name}</div>`;
+
+                stage.nodes.forEach(nodeName => {
+                    const node = nodeMap[nodeName];
+                    if (!node) return;
+
+                    const isE2E = node.type === 'e2e';
+                    const checked = checkedCounts[nodeName] || 0;
+                    const health = nodeHealth[nodeName];
+
+                    // Color coding
+                    let borderColor = 'var(--border-light)';
+                    let bgColor = 'var(--bg-secondary)';
+                    let dotColor = '#555';
+                    if (isE2E) {
+                        borderColor = '#667eea';
+                        bgColor = 'rgba(102,126,234,0.08)';
+                    }
+                    if (checked > 0) {
+                        if (health === 'HEALTHY') { borderColor = '#28a745'; dotColor = '#28a745'; }
+                        else if (health === 'WARNING') { borderColor = '#ffc107'; dotColor = '#ffc107'; }
+                        else if (health === 'CRITICAL') { borderColor = '#dc3545'; dotColor = '#dc3545'; }
+                    }
+
+                    // Short ref display
+                    let refDisplay = node.ref || '';
+                    if (node.image_tag && !node.image_tag.startsWith('branch:')) refDisplay = node.image_tag;
+                    else if (refDisplay.length > 12) refDisplay = refDisplay.substring(0, 7);
+
+                    const autoBadge = node.auto
+                        ? '<span style="font-size:0.65em;padding:1px 3px;border-radius:2px;background:#5eecc030;color:#5eecc0;">auto</span>'
+                        : '<span style="font-size:0.65em;padding:1px 3px;border-radius:2px;background:rgba(255,255,255,0.06);color:var(--text-muted);">manual</span>';
+
+                    const typeBadge = isE2E
+                        ? '<span style="font-size:0.65em;padding:1px 3px;border-radius:2px;background:rgba(102,126,234,0.2);color:#667eea;">e2e</span>'
+                        : `<span style="font-size:0.65em;padding:1px 3px;border-radius:2px;background:${node.method === 'PKO' ? '#5eecc020' : '#fdd76b20'};color:${node.method === 'PKO' ? '#5eecc0' : '#fdd76b'};">${node.method || '?'}</span>`;
+
+                    const checkedBadge = checked > 0
+                        ? `<div style="font-size:0.7em;margin-top:3px;"><span style="color:${dotColor};">●</span> ${checked} checked</div>`
+                        : '';
+
+                    // Clickable node card
+                    const nodeId = `pipeline-node-${nodeName.replace(/[^a-z0-9]/gi, '-')}`;
+                    html += `<div id="${nodeId}" onclick="document.getElementById('${nodeId}-detail').style.display = document.getElementById('${nodeId}-detail').style.display === 'none' ? 'block' : 'none'" style="cursor:pointer;border:1.5px solid ${borderColor};border-radius:6px;padding:6px 8px;margin:3px 0;background:${bgColor};width:130px;font-size:0.78em;transition:all 0.15s;" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform='scale(1)'">`;
+                    html += `<div style="font-weight:600;color:var(--text-primary);word-break:break-all;line-height:1.2;">${nodeName}</div>`;
+                    html += `<div style="margin-top:3px;display:flex;gap:3px;flex-wrap:wrap;">${typeBadge} ${autoBadge}</div>`;
+                    html += `<div style="font-family:var(--font-mono,monospace);font-size:0.85em;color:var(--text-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;">${refDisplay}</div>`;
+                    html += checkedBadge;
+                    html += '</div>';
+
+                    // Expandable detail panel
+                    const subChannels = (node.subscribe || []).map(ch => ch.replace(/.*channel-/, '')).join(', ') || '—';
+                    const pubChannels = (node.publish || []).map(ch => ch.replace(/.*channel-/, '')).join(', ') || '—';
+                    html += `<div id="${nodeId}-detail" style="display:none;border:1px solid var(--border-light);border-radius:4px;padding:6px;margin:2px 0;background:var(--bg-primary);width:130px;font-size:0.72em;">`;
+                    html += `<div><strong>Subscribes:</strong> ${subChannels}</div>`;
+                    html += `<div><strong>Publishes:</strong> ${pubChannels}</div>`;
+                    html += `<div><strong>SAAS:</strong> ${node.saas_file || '—'}</div>`;
+                    if (node.test_config) html += `<div><strong>Config:</strong> ${node.test_config}</div>`;
+                    if (node.soak_days) html += `<div><strong>Soak:</strong> ${node.soak_days}d</div>`;
+                    html += '</div>';
+                });
+
+                html += '</div>';
+
+                // Arrow between stages
+                if (stageIdx < pipeline.stages.length - 1) {
+                    html += '<div style="display:flex;align-items:center;padding-top:20px;color:var(--text-muted);font-size:1.2em;">→</div>';
+                }
+            });
+
+            html += '</div></div>';
+            return html;
         }
 
         window.addEventListener('DOMContentLoaded', generateReport);

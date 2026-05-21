@@ -247,143 +247,84 @@ func buildEdges(nodes []PipelineNode) []PipelineEdge {
 	return edges
 }
 
-// buildStages groups nodes into ordered promotion stages
+// stageOrder defines the canonical promotion pipeline order.
+// Nodes are placed into stages by their environment and type.
+var stageOrder = []struct {
+	name  string
+	env   string
+	isE2E bool
+}{
+	{"Integration", "integration", false},
+	{"Int E2E", "integration", true},
+	{"Stage", "stage", false},
+	{"Stage E2E", "stage", true},
+	{"Prod Canary", "prod-canary", false},
+	{"Prod Phase 2", "production", false},  // first wave (no subscribe or subscribes to canary)
+	{"Prod Phase 3", "production", false},  // second wave (subscribes to phase-2)
+}
+
+// buildStages groups nodes into the canonical promotion pipeline order
 func buildStages(nodes []PipelineNode, edges []PipelineEdge) []PipelineStage {
-	// Build adjacency for topological ordering
-	inDegree := map[string]int{}
-	outEdges := map[string][]string{}
-	nodeEnv := map[string]string{}
+	// Index subscribe channels per node for phase-2 vs phase-3 distinction
+	nodeByName := map[string]*PipelineNode{}
+	for i := range nodes {
+		nodeByName[nodes[i].Name] = &nodes[i]
+	}
 
+	// For production nodes, distinguish phase-2 (subscribes to canary or nothing)
+	// from phase-3 (subscribes to phase-2 deploy channels)
+	prodPhase := map[string]int{} // 2 or 3
 	for _, n := range nodes {
-		inDegree[n.Name] = 0
-		nodeEnv[n.Name] = n.Env
-	}
-	for _, e := range edges {
-		inDegree[e.To]++
-		outEdges[e.From] = append(outEdges[e.From], e.To)
-	}
-
-	// Topological sort (BFS) to determine stage ordering
-	nodeDepth := map[string]int{}
-	queue := []string{}
-	for name, deg := range inDegree {
-		if deg == 0 {
-			queue = append(queue, name)
-			nodeDepth[name] = 0
-		}
-	}
-
-	for len(queue) > 0 {
-		curr := queue[0]
-		queue = queue[1:]
-		for _, next := range outEdges[curr] {
-			if nodeDepth[curr]+1 > nodeDepth[next] {
-				nodeDepth[next] = nodeDepth[curr] + 1
-			}
-			inDegree[next]--
-			if inDegree[next] == 0 {
-				queue = append(queue, next)
-			}
-		}
-	}
-
-	// Group by depth, then sub-group by env+type to keep different pipelines separate
-	maxDepth := 0
-	for _, d := range nodeDepth {
-		if d > maxDepth {
-			maxDepth = d
-		}
-	}
-
-	type stageKey struct {
-		depth int
-		env   string
-		isE2E bool
-	}
-
-	nodeType := map[string]bool{}
-	for _, n := range nodes {
-		nodeType[n.Name] = n.Type == "e2e"
-	}
-
-	stageMap := map[stageKey][]string{}
-	var stageOrder []stageKey
-
-	for depth := 0; depth <= maxDepth; depth++ {
-		subGroups := map[stageKey][]string{}
-		for name, d := range nodeDepth {
-			if d != depth {
-				continue
-			}
-			key := stageKey{depth: depth, env: nodeEnv[name], isE2E: nodeType[name]}
-			subGroups[key] = append(subGroups[key], name)
-		}
-		for key, names := range subGroups {
-			if _, exists := stageMap[key]; !exists {
-				stageOrder = append(stageOrder, key)
-			}
-			stageMap[key] = names
-		}
-	}
-
-	var stages []PipelineStage
-	for _, key := range stageOrder {
-		names := stageMap[key]
-		if len(names) == 0 {
+		if n.Env != "production" || n.Type == "e2e" {
 			continue
 		}
-		stageName := inferStageName(names, nodeEnv)
-		stages = append(stages, PipelineStage{
-			Name:  stageName,
-			Nodes: names,
-		})
+		if len(n.Subscribe) == 0 {
+			prodPhase[n.Name] = 2
+		} else {
+			// Check if subscribing to canary channels or phase-2 channels
+			subscribesToCanary := false
+			for _, ch := range n.Subscribe {
+				if strings.Contains(ch, "canary") || strings.Contains(ch, "p03") || strings.Contains(ch, "p04") {
+					subscribesToCanary = true
+				}
+			}
+			if subscribesToCanary {
+				prodPhase[n.Name] = 2
+			} else {
+				prodPhase[n.Name] = 3
+			}
+		}
+	}
+
+	// Build stages in canonical order
+	var stages []PipelineStage
+	for _, so := range stageOrder {
+		var stageNodes []string
+		for _, n := range nodes {
+			isE2E := n.Type == "e2e"
+			if n.Env != so.env || isE2E != so.isE2E {
+				continue
+			}
+			// For production, match phase
+			if so.env == "production" && so.name == "Prod Phase 2" && prodPhase[n.Name] != 2 {
+				continue
+			}
+			if so.env == "production" && so.name == "Prod Phase 3" && prodPhase[n.Name] != 3 {
+				continue
+			}
+			stageNodes = append(stageNodes, n.Name)
+		}
+		if len(stageNodes) > 0 {
+			stages = append(stages, PipelineStage{
+				Name:  so.name,
+				Nodes: stageNodes,
+			})
+		}
 	}
 
 	return stages
 }
 
-func inferStageName(names []string, nodeEnv map[string]string) string {
-	hasE2E := false
-	envs := map[string]bool{}
-	for _, n := range names {
-		env := nodeEnv[n]
-		envs[env] = true
-		if strings.Contains(n, "e2e") {
-			hasE2E = true
-		}
-	}
-
-	if hasE2E {
-		for env := range envs {
-			switch env {
-			case "integration":
-				return "Int E2E"
-			case "stage":
-				return "Stage E2E"
-			}
-		}
-		return "E2E Tests"
-	}
-
-	for env := range envs {
-		switch env {
-		case "integration":
-			return "Integration"
-		case "stage":
-			return "Stage"
-		case "prod-canary":
-			return "Prod Canary"
-		case "prod-2":
-			return "Prod Phase 2"
-		case "prod-3":
-			return "Prod Phase 3"
-		case "production":
-			return "Production"
-		}
-	}
-
-	return "Deploy"
-}
 
 // classifyEnv determines the environment from a target name
 func classifyEnv(name string) string {

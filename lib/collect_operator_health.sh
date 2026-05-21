@@ -62,7 +62,7 @@ OCM_ENV=$(detect_ocm_environment)
 # This allows regenerating HTML from JSON by checking out the matching commit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AUTO-UPDATED by post-commit hook — do not edit manually
-SCRIPT_VERSION="f184453"
+SCRIPT_VERSION="01de096"
 
 # Default values
 NAMESPACE="openshift-monitoring"

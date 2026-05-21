@@ -45,6 +45,7 @@ func main() {
 		listClusters   string
 		excludePattern string
 		includePattern string
+		saasOnly       bool
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", "", "File with cluster IDs (one per line)")
@@ -61,6 +62,7 @@ func main() {
 	flag.StringVar(&listClusters, "list-clusters", "", "List clusters and exit (all, rosa, osd, hypershift, or custom OCM search)")
 	flag.StringVar(&excludePattern, "exclude", "", "Regex to exclude clusters by name (e.g., 'osde2e|cse2e')")
 	flag.StringVar(&includePattern, "include", "", "Regex to include only clusters matching by name")
+	flag.BoolVar(&saasOnly, "saas-only", false, "Show SAAS targets and pipeline only (no cluster checks)")
 	flag.Parse()
 
 	// Configure logging
@@ -92,8 +94,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	if clusterList == "" {
-		fmt.Fprintln(os.Stderr, "Error: --cluster-list is required")
+	if clusterList == "" && !saasOnly {
+		fmt.Fprintln(os.Stderr, "Error: --cluster-list is required (or use --saas-only)")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -114,11 +116,15 @@ func main() {
 		opConfigs = append(opConfigs, cfg)
 	}
 
-	// Read cluster IDs first so we can estimate runtime for token check
-	clusterIDs, err := readClusterList(clusterList)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading cluster list: %v\n", err)
-		os.Exit(1)
+	// Read cluster IDs (skip if saas-only mode)
+	var clusterIDs []string
+	if !saasOnly {
+		var readErr error
+		clusterIDs, readErr = readClusterList(clusterList)
+		if readErr != nil {
+			fmt.Fprintf(os.Stderr, "Error reading cluster list: %v\n", readErr)
+			os.Exit(1)
+		}
 	}
 
 	if parallel < 1 {
