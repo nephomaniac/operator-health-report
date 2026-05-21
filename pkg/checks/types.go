@@ -11,12 +11,13 @@ import (
 type Status string
 
 const (
-	StatusPass    Status = "PASS"
-	StatusFail    Status = "FAIL"
-	StatusWarning Status = "WARNING"
-	StatusInfo    Status = "INFO"
-	StatusSkip    Status = "SKIP"
-	StatusUnknown Status = "UNKNOWN"
+	StatusPass         Status = "PASS"
+	StatusFail         Status = "FAIL"
+	StatusWarning      Status = "WARNING"
+	StatusInfo         Status = "INFO"
+	StatusSkip         Status = "SKIP"
+	StatusUnknown      Status = "UNKNOWN"
+	StatusAccessDenied Status = "ACCESS_DENIED"
 )
 
 // Severity indicates the importance of a check failure
@@ -162,6 +163,30 @@ func (cc *ClusterContext) RecordError(operation string, err error) {
 		ExitCode:     1,
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// ElevationSkipResult returns a Result for checks that can't run due to elevation issues.
+// Uses ACCESS_DENIED for access-request and forbidden clusters, SKIP when elevation is
+// simply disabled via --no-elevate.
+func (cc *ClusterContext) ElevationSkipResult(checkName string) Result {
+	r := Result{
+		Check:    checkName,
+		Severity: SeverityInfo,
+		Details:  map[string]any{},
+	}
+	reason := cc.Client.ElevationDeniedReason()
+	switch reason {
+	case "access_request":
+		r.Status = StatusAccessDenied
+		r.Message = "Access request required — run 'ocm-backplane accessrequest create'"
+	case "forbidden":
+		r.Status = StatusAccessDenied
+		r.Message = "Elevation denied — insufficient permissions on this cluster"
+	default:
+		r.Status = StatusSkip
+		r.Message = "Skipped — elevation not enabled (use --reason to enable)"
+	}
+	return r
 }
 
 // OverallStatus returns CRITICAL, WARNING, or HEALTHY

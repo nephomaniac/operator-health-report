@@ -41,7 +41,8 @@ type ClusterClient struct {
 	dynamicClient  dynamic.Interface
 	elevatedDynamic dynamic.Interface
 
-	elevationBroken bool
+	elevationBroken      bool
+	elevationDeniedReason string // "access_request", "forbidden", or ""
 }
 
 const (
@@ -296,16 +297,35 @@ func (cc *ClusterClient) CanElevate() bool {
 	return !cc.NoElevate && !cc.elevationBroken && cc.elevatedClient != nil
 }
 
+// ElevationDeniedReason returns the reason elevation is broken, if any.
+// "access_request" means the cluster requires an explicit access request.
+// "forbidden" means elevation was rejected by the API server.
+// "" means elevation is available.
+func (cc *ClusterClient) ElevationDeniedReason() string {
+	return cc.elevationDeniedReason
+}
+
 // checkElevatedError inspects an error from an elevated API call. If it's a
-// Forbidden/unknown error, marks elevation as broken so subsequent checks skip.
+// Forbidden/unknown/access-request error, marks elevation as broken.
 func (cc *ClusterClient) checkElevatedError(err error) {
 	if err == nil {
 		return
 	}
 	msg := err.Error()
+
+	if strings.Contains(msg, "access request") || strings.Contains(msg, "accessrequest") {
+		if !cc.elevationBroken {
+			cc.elevationBroken = true
+			cc.elevationDeniedReason = "access_request"
+			logging.Log.Warn("Cluster requires access request — disabling elevation")
+		}
+		return
+	}
+
 	if strings.Contains(msg, "Forbidden") || strings.Contains(msg, "unknown (get") || strings.Contains(msg, "unknown (list") {
 		if !cc.elevationBroken {
 			cc.elevationBroken = true
+			cc.elevationDeniedReason = "forbidden"
 			logging.Log.Warn("Elevated API call failed — disabling elevation for remaining checks on this cluster")
 		}
 	}

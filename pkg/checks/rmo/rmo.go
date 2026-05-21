@@ -244,9 +244,7 @@ func checkRouteMonitorStatus(ctx context.Context, cc *checks.ClusterContext, rmL
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -361,9 +359,7 @@ func checkSREProbeExpectations(ctx context.Context, cc *checks.ClusterContext, r
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -421,9 +417,7 @@ func checkProbeHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cu
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -500,10 +494,14 @@ func checkServiceMonitorHealth(ctx context.Context, cc *checks.ClusterContext, r
 	}
 
 	totalCRs := countItems(rmList) + countItems(cumList)
-	if totalCRs == 0 || !cc.Client.CanElevate() {
+	if totalCRs == 0 {
 		r.Status = checks.StatusSkip
-		r.Message = "Skipped — no monitors or requires elevation"
+		r.Message = "Skipped — no monitors configured"
 		cc.AddResult(r)
+		return
+	}
+	if !cc.Client.CanElevate() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -579,10 +577,14 @@ func checkPrometheusRuleHealth(ctx context.Context, cc *checks.ClusterContext, r
 	}
 
 	totalCRs := countItems(rmList) + countItems(cumList)
-	if totalCRs == 0 || !cc.Client.CanElevate() {
+	if totalCRs == 0 {
 		r.Status = checks.StatusSkip
-		r.Message = "Skipped — no monitors or requires elevation"
+		r.Message = "Skipped — no monitors configured"
 		cc.AddResult(r)
+		return
+	}
+	if !cc.Client.CanElevate() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -655,9 +657,7 @@ func checkOperatorMetrics(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -856,9 +856,7 @@ func checkHCPProbeCoverage(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -921,9 +919,7 @@ func checkHCPState(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -968,9 +964,7 @@ func checkRHOBSAPIHealth(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -1193,9 +1187,7 @@ func checkLimitedSupportDisagreement(ctx context.Context, cc *checks.ClusterCont
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 

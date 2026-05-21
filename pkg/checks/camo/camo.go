@@ -327,9 +327,7 @@ func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -424,9 +422,7 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation for Thanos query"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 

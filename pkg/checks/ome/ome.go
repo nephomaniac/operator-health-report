@@ -79,9 +79,7 @@ func checkMetricsHealth(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation for Thanos query"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -235,9 +233,7 @@ func checkPullSecretHealth(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -281,9 +277,7 @@ func checkProxyCAHealth(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
@@ -401,9 +395,7 @@ func checkIdentityProviders(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — requires elevation"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 

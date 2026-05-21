@@ -658,6 +658,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'SKIP': '-',
                 'UNKNOWN': '?',
                 'NO_ACCESS': '🔒',
+                'ACCESS_DENIED': '🚫',
                 'N/A': '-'
             }[status] || '?';
         }
@@ -672,6 +673,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                 'SKIP': 'na',
                 'UNKNOWN': 'unknown',
                 'NO_ACCESS': 'no-access',
+                'ACCESS_DENIED': 'no-access',
                 'N/A': 'na'
             }[status] || 'na';
         }
@@ -2421,6 +2423,9 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
 
         window.addEventListener('DOMContentLoaded', generateReport);
     </script>
+    <footer style="text-align:center;padding:20px;margin-top:20px;border-top:1px solid var(--border-light);color:var(--text-muted);font-size:0.8em;">
+        <a href="https://github.com/nephomaniac/operator-health-report" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;">operator-health-report</a> — SRE operator health monitoring
+    </footer>
 </body>
 </html>
 HTMLEOF

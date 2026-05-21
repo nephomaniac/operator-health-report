@@ -238,9 +238,7 @@ func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
 	}
 
 	if !cc.Client.CanElevate() {
-		r.Status = StatusSkip
-		r.Message = "Skipped — requires elevation for Thanos query"
-		cc.AddResult(r)
+		cc.AddResult(cc.ElevationSkipResult("resource_leak_detection"))
 		return
 	}
 
