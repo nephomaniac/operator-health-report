@@ -1313,6 +1313,7 @@
                     '<div class="stat-card" style="border-color: var(--text-muted);">' +
                         '<div class="stat-label">Skipped / Unreachable</div>' +
                         '<div class="stat-number" style="color: var(--text-muted);">' + (totalSkipped + noAccessCount) + '</div>' +
+                        '<div class="stat-label">' + pct(totalSkipped + noAccessCount) + '</div>' +
                         '<div style="font-size:0.75em;color:var(--text-muted);line-height:1.6;margin-top:4px;">' +
                             (skippedLimitedSupport > 0 ? '<div>🛡 Limited Support: ' + skippedLimitedSupport + '</div>' : '') +
                             (skippedNotReady > 0 ? '<div>⏸ Not Ready: ' + skippedNotReady + '</div>' : '') +
