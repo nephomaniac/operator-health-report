@@ -2241,7 +2241,7 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
 
                         const pipelineNodeId = 'pipeline-node-' + (t.target || '').replace(/[^a-z0-9]/gi, '-');
                         return '<tr class="saas-target-row" style="opacity:' + rowOpacity + ';' + rowBg + 'cursor:pointer;" onclick="var el=document.getElementById(\'' + pipelineNodeId + '\'); if(el){el.scrollIntoView({behavior:\'smooth\',block:\'center\'}); el.style.boxShadow=\'0 0 12px var(--accent)\'; setTimeout(function(){el.style.boxShadow=\'\';},2000); var d=document.getElementById(\'' + pipelineNodeId + '-detail\'); if(d) d.style.display=\'block\';}" title="Click to view in pipeline">' +
-                            '<td style="padding:4px 10px;">' + (t.target || '') + envBadge + '</td>' +
+                            '<td style="padding:4px 10px;white-space:nowrap;">' + (t.target || '') + envBadge + '</td>' +
                             '<td style="padding:4px 10px;"><span style="display:inline-block;background:' + methodColor + ';color:#111;font-size:0.75em;padding:1px 6px;border-radius:3px;font-weight:600;">' + (t.method || '?') + '</span></td>' +
                             '<td style="padding:4px 10px;font-family:var(--font-mono);font-size:0.85em;">' + (() => {
                                 const tag = t.image_tag || '';
@@ -2273,13 +2273,13 @@ cat >> "$OUTPUT_HTML" <<'HTMLEOF'
                         '<div style="font-weight:600;font-size:0.9em;margin-bottom:8px;color:var(--text-secondary);">SAAS Targets (app-interface)</div>' +
                         '<table style="width:100%;border-collapse:collapse;font-size:0.85em;table-layout:auto;">' +
                             '<thead><tr style="color:var(--text-muted);border-bottom:1px solid var(--border-light);">' +
-                                '<th style="padding:4px 10px;text-align:left;">Target</th>' +
-                                '<th style="padding:4px 10px;text-align:left;">Method</th>' +
-                                '<th style="padding:4px 10px;text-align:left;">Version</th>' +
-                                '<th style="padding:4px 10px;text-align:center;">Promotion</th>' +
+                                '<th style="padding:4px 10px;text-align:left;white-space:nowrap;">Target</th>' +
+                                '<th style="padding:4px 10px;text-align:left;white-space:nowrap;">Method</th>' +
+                                '<th style="padding:4px 10px;text-align:left;white-space:nowrap;">Version</th>' +
+                                '<th style="padding:4px 10px;text-align:center;white-space:nowrap;">Promotion</th>' +
                                 '<th style="padding:4px 10px;text-align:left;">Subscribes To</th>' +
                                 '<th style="padding:4px 10px;text-align:left;">Publishes To</th>' +
-                                '<th style="padding:4px 10px;text-align:center;" title="Clusters checked in this run that resolved to this SAAS target">Checked</th>' +
+                                '<th style="padding:4px 10px;text-align:center;white-space:nowrap;" title="Clusters checked in this run that resolved to this SAAS target">Checked</th>' +
                             '</tr></thead>' +
                             '<tbody>' + targetRows + '</tbody>' +
                         '</table>' +
