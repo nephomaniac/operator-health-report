@@ -110,13 +110,14 @@
         // rather than an actual operator health issue
         function getEffectiveStatus(cluster, check) {
             if (check.status === 'ACCESS_DENIED') return check.status;
-            if (check.status !== 'FAIL' && check.status !== 'WARNING') return check.status;
+            if (check.status === 'PASS' || check.status === 'INFO' || check.status === 'SKIP') return check.status;
             const apiErrors = (cluster.api_errors || []).filter(e => e.check === check.check);
+            if (apiErrors.length === 0) return check.status;
             // Check if errors are RBAC/access related
             const hasAccessError = apiErrors.some(e =>
-                (e.error_message || '').match(/forbidden|cannot get resource|cannot list resource|Unauthorized/i));
+                (e.error_message || '').match(/forbidden|cannot get resource|cannot list resource|cannot create resource|Unauthorized|access request/i));
             if (hasAccessError) return 'ACCESS_DENIED';
-            if (apiErrors.length > 0 && check.status === 'FAIL') return 'ERROR';
+            if (check.status === 'FAIL' || check.status === 'UNKNOWN') return 'ERROR';
             return check.status;
         }
 

@@ -293,8 +293,8 @@ func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
 		`container_memory_working_set_bytes{namespace="%s",pod=~"%s-.*",container="%s"}`,
 		cc.Operator.Namespace, cc.Operator.Deployment, containerName))
 
-	memData, err := cc.Client.QueryThanosRange(ctx, memQuery, start, now, step)
-	cc.RecordError("Memory timeseries query", err)
+	memData, memErr := cc.Client.QueryThanosRange(ctx, memQuery, start, now, step)
+	cc.RecordError("Memory timeseries query", memErr)
 	memPoints, _ := thanos.Timeseries(memData)
 
 	// CPU query
@@ -302,8 +302,8 @@ func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
 		`rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"%s-.*",container="%s"}[5m])`,
 		cc.Operator.Namespace, cc.Operator.Deployment, containerName))
 
-	cpuData, err := cc.Client.QueryThanosRange(ctx, cpuQuery, start, now, step)
-	cc.RecordError("CPU timeseries query", err)
+	cpuData, cpuErr := cc.Client.QueryThanosRange(ctx, cpuQuery, start, now, step)
+	cc.RecordError("CPU timeseries query", cpuErr)
 	cpuPoints, _ := thanos.Timeseries(cpuData)
 
 	memFirst, memLast, memPctChange := thanos.Trend(memPoints)
@@ -344,8 +344,13 @@ func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
 
 	switch {
 	case len(memPoints) == 0 && len(cpuPoints) == 0:
-		r.Status = StatusUnknown
-		r.Message = "Unable to query resource metrics from Prometheus"
+		if IsAccessError(memErr) || IsAccessError(cpuErr) {
+			r.Status = StatusAccessDenied
+			r.Message = "Cannot query resource metrics — access denied"
+		} else {
+			r.Status = StatusUnknown
+			r.Message = "Unable to query resource metrics from Prometheus"
+		}
 	case memTrend == "increasing" && cpuTrend == "increasing":
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("Both CPU and memory increased >%.0f%% (CPU: %.1f%%, Mem: %.1f%%)",
