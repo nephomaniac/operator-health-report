@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/openshift/operator-health-report/pkg/checks"
 	"github.com/openshift/operator-health-report/pkg/logging"
@@ -518,7 +519,7 @@ func checkAuditExporter(ctx context.Context, cc *checks.ClusterContext) {
 	cc.AddResult(r)
 }
 
-// checkForwarderMetrics queries Prometheus for splunk forwarder health metrics
+// checkForwarderMetrics queries Prometheus for splunk forwarder health and throughput metrics
 func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
 	cc.CurrentCheck = "sfo_forwarder_metrics"
 
@@ -540,63 +541,113 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 		return
 	}
 
-	// Query for unhealthy forwarder components
+	// --- Instant: component health ---
 	query := thanos.EncodeQuery(`splunk_forwarder_component_unhealthy`)
 	body, err := cc.Client.QueryThanos(ctx, query)
-	cc.RecordError("Query splunk forwarder metrics", err)
+	cc.RecordError("Query splunk forwarder health", err)
 
-	if err != nil {
-		if checks.IsAccessError(err) {
-			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
-		} else {
-			r.Status = checks.StatusSkip
-			r.Message = "Could not query splunk forwarder metrics from Thanos"
-			cc.AddResult(r)
-		}
-		return
-	}
-
-	if !thanos.HasResults(body) {
-		r.Status = checks.StatusInfo
-		r.Message = "No splunk_forwarder_component_unhealthy metrics found — forwarder may not expose metrics yet"
-		cc.AddResult(r)
-		return
-	}
-
-	resp, _ := thanos.Parse(body)
 	unhealthyCount := 0
 	var unhealthyComponents []string
 
-	for _, result := range resp.Data.Result {
-		val := ""
-		if len(result.Value) >= 2 {
-			val = fmt.Sprintf("%v", result.Value[1])
-		}
-		if val == "1" {
-			unhealthyCount++
-			component := result.Metric["component"]
-			if component != "" {
-				unhealthyComponents = append(unhealthyComponents, component)
+	if err == nil && thanos.HasResults(body) {
+		resp, _ := thanos.Parse(body)
+		r.Details["total_component_metrics"] = len(resp.Data.Result)
+		for _, result := range resp.Data.Result {
+			if len(result.Value) >= 2 && fmt.Sprintf("%v", result.Value[1]) == "1" {
+				unhealthyCount++
+				if c := result.Metric["component"]; c != "" {
+					unhealthyComponents = append(unhealthyComponents, c)
+				}
 			}
 		}
 	}
 
-	r.Details["total_metrics"] = len(resp.Data.Result)
 	r.Details["unhealthy_count"] = unhealthyCount
 	if len(unhealthyComponents) > 0 {
 		r.Details["unhealthy_components"] = unhealthyComponents
 	}
 
+	// --- Timeseries: errors over 7 days (30min intervals, errors only) ---
+	now := timeNow()
+	start := now - 604800
+	step := 1800 // 30 min intervals
+
+	// Forwarder component unhealthy over time (only error points matter)
+	unhealthyTS := thanos.EncodeQuery(`max(splunk_forwarder_component_unhealthy) by (component)`)
+	tsData, tsErr := cc.Client.QueryThanosRange(ctx, unhealthyTS, start, now, step)
+	if tsErr == nil {
+		points, _ := thanos.Timeseries(tsData)
+		r.Details["component_unhealthy_timeseries"] = thanos.PointsToJSON(points)
+	}
+
+	// Audit filter errors over time (rate per 30min)
+	errRateQuery := thanos.EncodeQuery(`rate(splunkforwarder_audit_filter_errors_total[30m])`)
+	errData, errErr := cc.Client.QueryThanosRange(ctx, errRateQuery, start, now, step)
+	if errErr == nil {
+		points, _ := thanos.Timeseries(errData)
+		r.Details["audit_errors_timeseries"] = thanos.PointsToJSON(points)
+	}
+
+	// Audit filter forwarded events rate (events/sec averaged over 1h intervals)
+	fwdQuery := thanos.EncodeQuery(`sum(rate(splunkforwarder_audit_filter_events_processed_total{decision="forward"}[1h]))`)
+	fwdData, fwdErr := cc.Client.QueryThanosRange(ctx, fwdQuery, start, now, 3600) // 1h intervals
+	if fwdErr == nil {
+		points, _ := thanos.Timeseries(fwdData)
+		r.Details["audit_forward_rate_timeseries"] = thanos.PointsToJSON(points)
+	}
+
+	// Audit filter total event throughput (events/sec over 1h)
+	totalQuery := thanos.EncodeQuery(`sum(rate(splunkforwarder_audit_filter_events_total[1h]))`)
+	totalData, totalErr := cc.Client.QueryThanosRange(ctx, totalQuery, start, now, 3600)
+	if totalErr == nil {
+		points, _ := thanos.Timeseries(totalData)
+		r.Details["audit_total_rate_timeseries"] = thanos.PointsToJSON(points)
+	}
+
+	// --- Instant: current forwarding rate ---
+	fwdInstant := thanos.EncodeQuery(`sum(rate(splunkforwarder_audit_filter_events_processed_total{decision="forward"}[5m]))`)
+	fwdNow, fwdNowErr := cc.Client.QueryThanos(ctx, fwdInstant)
+	if fwdNowErr == nil {
+		if val, _, ok := thanos.InstantValue(fwdNow); ok {
+			r.Details["current_forward_rate"] = val + " events/sec"
+		}
+	}
+
+	// --- Instant: current error rate ---
+	errInstant := thanos.EncodeQuery(`sum(rate(splunkforwarder_audit_filter_errors_total[5m]))`)
+	errNow, errNowErr := cc.Client.QueryThanos(ctx, errInstant)
+	currentErrRate := 0.0
+	if errNowErr == nil {
+		if f, ok := thanos.InstantFloat(errNow); ok {
+			currentErrRate = f
+			r.Details["current_error_rate"] = fmt.Sprintf("%.4f errors/sec", f)
+		}
+	}
+
+	// --- Verdict ---
 	switch {
+	case err != nil && checks.IsAccessError(err):
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
 	case unhealthyCount > 0:
 		r.Status = checks.StatusWarning
 		r.Message = fmt.Sprintf("%d unhealthy forwarder component(s): %s", unhealthyCount, strings.Join(unhealthyComponents, ", "))
+	case currentErrRate > 0.01:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Audit filter errors detected (%.4f errors/sec)", currentErrRate)
+	case err != nil:
+		r.Status = checks.StatusSkip
+		r.Message = "Could not query splunk forwarder metrics"
 	default:
 		r.Status = checks.StatusPass
-		r.Message = fmt.Sprintf("All forwarder components healthy (%d metrics)", len(resp.Data.Result))
+		r.Message = "All forwarder components healthy, audit filter operating normally"
 	}
 
 	cc.AddResult(r)
+}
+
+func timeNow() int64 {
+	return time.Now().Unix()
 }
 
 // checkServiceMonitor verifies the splunk forwarder ServiceMonitor exists
