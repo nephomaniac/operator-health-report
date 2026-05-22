@@ -93,6 +93,9 @@ health_*.html
 # OS
 .DS_Store
 
+# Claude (track skills, ignore local settings)
+.claude/settings.local.json
+
 # IDE
 .vscode/
 .idea/
