@@ -77,7 +77,7 @@
         function getStatusIcon(status) {
             return {
                 'PASS': '✓',
-                'FAIL': '✗',
+                'FAIL': '❗',
                 'WARNING': '⚠',
                 'WARN': '⚠',
                 'INFO': 'ℹ',
@@ -85,6 +85,7 @@
                 'UNKNOWN': '?',
                 'NO_ACCESS': '🔒',
                 'ACCESS_DENIED': '🚫',
+                'ERROR': '🔧',
                 'N/A': '-'
             }[status] || '?';
         }
@@ -100,8 +101,18 @@
                 'UNKNOWN': 'unknown',
                 'NO_ACCESS': 'no-access',
                 'ACCESS_DENIED': 'no-access',
+                'ERROR': 'error',
                 'N/A': 'na'
             }[status] || 'na';
+        }
+
+        // Determine if a check failure was caused by API/script errors
+        // rather than an actual operator health issue
+        function getEffectiveStatus(cluster, check) {
+            if (check.status !== 'FAIL' && check.status !== 'WARNING') return check.status;
+            const apiErrors = (cluster.api_errors || []).filter(e => e.check === check.check);
+            if (apiErrors.length > 0 && check.status === 'FAIL') return 'ERROR';
+            return check.status;
         }
 
         function formatApiError(err) {
@@ -1558,12 +1569,15 @@
                 let rowHTML = `<td class="cluster-name-cell">${cluster.cluster_name || 'Unknown'}</td>`;
                 rowHTML += `<td class="check-status-cell"><span class="status-icon ${loginClass}">${loginIcon}</span></td>`;
                 checkTypes.forEach(checkType => {
-                    const status = getCheckStatus(cluster, checkType);
-                    const statusClass = getStatusClass(status);
-                    const icon = getStatusIcon(status);
+                    const check = (cluster.health_checks || []).find(c => c.check === checkType);
+                    const rawStatus = getCheckStatus(cluster, checkType);
+                    const effectiveStatus = check ? getEffectiveStatus(cluster, check) : rawStatus;
+                    const statusClass = getStatusClass(effectiveStatus);
+                    const icon = getStatusIcon(effectiveStatus);
                     const checkIndex = (cluster.health_checks || []).findIndex(c => c.check === checkType);
                     const checkId = `${clusterIdx}-${checkIndex}`;
-                    rowHTML += `<td class="check-status-cell" onclick="event.stopPropagation(); expandToCheck('${clusterIdx}', '${checkId}')"><span class="status-icon ${statusClass}" title="${checkType}: ${status}">${icon}</span></td>`;
+                    const titleSuffix = effectiveStatus === 'ERROR' ? ' (API/script error — not an operator issue)' : '';
+                    rowHTML += `<td class="check-status-cell" onclick="event.stopPropagation(); expandToCheck('${clusterIdx}', '${checkId}')"><span class="status-icon ${statusClass}" title="${checkType}: ${rawStatus}${titleSuffix}">${icon}</span></td>`;
                 });
                 rowHTML += `<td class="resource-cell">${restarts}</td>`;
                 rowHTML += `<td class="resource-cell">${errors}</td>`;
