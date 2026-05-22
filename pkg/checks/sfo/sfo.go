@@ -572,20 +572,25 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 	start := now - 604800
 	step := 1800 // 30 min intervals
 
-	// Forwarder component unhealthy over time (only error points matter)
+	// Forwarder component unhealthy over time — only store error points (value > 0)
+	// An empty timeseries means "healthy for the entire period"
 	unhealthyTS := thanos.EncodeQuery(`max(splunk_forwarder_component_unhealthy) by (component)`)
 	tsData, tsErr := cc.Client.QueryThanosRange(ctx, unhealthyTS, start, now, step)
 	if tsErr == nil {
 		points, _ := thanos.Timeseries(tsData)
-		r.Details["component_unhealthy_timeseries"] = thanos.PointsToJSON(points)
+		errorPoints := thanos.FilterNonZero(points)
+		r.Details["component_unhealthy_timeseries"] = thanos.PointsToJSON(errorPoints)
+		r.Details["component_unhealthy_error_count"] = len(errorPoints)
 	}
 
-	// Audit filter errors over time (rate per 30min)
+	// Audit filter errors over time — only store non-zero error rates
 	errRateQuery := thanos.EncodeQuery(`rate(splunkforwarder_audit_filter_errors_total[30m])`)
 	errData, errErr := cc.Client.QueryThanosRange(ctx, errRateQuery, start, now, step)
 	if errErr == nil {
 		points, _ := thanos.Timeseries(errData)
-		r.Details["audit_errors_timeseries"] = thanos.PointsToJSON(points)
+		errorPoints := thanos.FilterNonZero(points)
+		r.Details["audit_errors_timeseries"] = thanos.PointsToJSON(errorPoints)
+		r.Details["audit_errors_error_count"] = len(errorPoints)
 	}
 
 	// Audit filter forwarded events rate (events/sec averaged over 1h intervals)

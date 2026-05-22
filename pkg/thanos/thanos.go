@@ -214,6 +214,19 @@ func PointsToJSON(points [][2]float64) [][]any {
 	return result
 }
 
+// FilterNonZero removes zero-value points from a timeseries.
+// Use for binary/error metrics where healthy periods are all zeros.
+// An empty result means "healthy for the entire period."
+func FilterNonZero(points [][2]float64) [][2]float64 {
+	var result [][2]float64
+	for _, p := range points {
+		if p[1] != 0 {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 // Round rounds a float to n decimal places
 func Round(f float64, n int) float64 {
 	pow := math.Pow(10, float64(n))
