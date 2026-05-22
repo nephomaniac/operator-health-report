@@ -1326,7 +1326,7 @@
                     '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);">' +
                         '<div class="stat-label">Script/API Errors</div>' +
                         '<div class="stat-number" style="color: #dc3545;">' + totalApiErrors + '</div>' +
-                        '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO') + ': ' + n).join(', ') + '</div>' +
+                        '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO').replace(/osd-metrics-exporter/, 'OME') + ': ' + n).join(', ') + '</div>' +
                     '</div>' : '') +
                 '</div>' +
                 // CVE Security Section (optional)
