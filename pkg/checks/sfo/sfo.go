@@ -28,11 +28,33 @@ var (
 )
 
 func (c *SFOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
-	checkDaemonSetHealth(ctx, cc)
-	checkForwarderPods(ctx, cc)
-	checkSplunkForwarderCR(ctx, cc)
-	checkSecrets(ctx, cc)
 	checkControllerAvailability(ctx, cc)
+
+	// The dependency chain is: Secret → CR → Operator reconciles → DaemonSet → Pods
+	// If no CR exists, DaemonSet and pods won't exist — that's expected.
+	hasCR := checkSplunkForwarderCR(ctx, cc)
+	checkSecrets(ctx, cc, hasCR)
+
+	if hasCR {
+		checkDaemonSetHealth(ctx, cc)
+		checkForwarderPods(ctx, cc)
+	} else {
+		// No CR — skip DaemonSet/pod checks with clear explanation
+		cc.CurrentCheck = "sfo_daemonset_health"
+		cc.AddResult(checks.Result{
+			Check:    "sfo_daemonset_health",
+			Status:   checks.StatusSkip,
+			Severity: checks.SeverityInfo,
+			Message:  fmt.Sprintf("Skipped — no SplunkForwarder CR in %s (DaemonSet is created by operator from CR)", cc.Operator.Namespace),
+		})
+		cc.CurrentCheck = "sfo_forwarder_pods"
+		cc.AddResult(checks.Result{
+			Check:    "sfo_forwarder_pods",
+			Status:   checks.StatusSkip,
+			Severity: checks.SeverityInfo,
+			Message:  fmt.Sprintf("Skipped — no SplunkForwarder CR in %s (pods are created by DaemonSet from CR)", cc.Operator.Namespace),
+		})
+	}
 }
 
 // checkDaemonSetHealth verifies the splunk forwarder DaemonSet exists and is healthy
@@ -89,7 +111,7 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
 	switch {
 	case len(splunkDS) == 0:
 		r.Status = checks.StatusWarning
-		r.Message = "No splunk forwarder DaemonSet found — operator may not have reconciled yet"
+		r.Message = fmt.Sprintf("No splunk forwarder DaemonSet found in %s — operator may not have reconciled yet", cc.Operator.Namespace)
 	default:
 		allHealthy := true
 		var issues []string
@@ -181,7 +203,7 @@ func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext) {
 	switch {
 	case podCount == 0:
 		r.Status = checks.StatusWarning
-		r.Message = "No forwarder pods found — DaemonSet may not exist or operator hasn't reconciled"
+		r.Message = fmt.Sprintf("No forwarder pods (label: name=splunk-forwarder) in %s", cc.Operator.Namespace)
 	case notRunning > 0:
 		r.Status = checks.StatusWarning
 		r.Message = fmt.Sprintf("%d/%d forwarder pod(s) not running", notRunning, podCount)
@@ -196,8 +218,9 @@ func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext) {
 	cc.AddResult(r)
 }
 
-// checkSplunkForwarderCR verifies the SplunkForwarder custom resource exists
-func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) {
+// checkSplunkForwarderCR verifies the SplunkForwarder custom resource exists.
+// Returns true if at least one CR was found.
+func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) bool {
 	cc.CurrentCheck = "sfo_splunkforwarder_cr"
 
 	r := checks.Result{
@@ -208,7 +231,7 @@ func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) {
 
 	if !cc.Client.CanElevate() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
-		return
+		return false
 	}
 
 	list, err := cc.Client.ListResources(ctx, splunkForwarderGVR, cc.Operator.Namespace, true)
@@ -222,17 +245,17 @@ func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) {
 			r.Message = fmt.Sprintf("Could not query SplunkForwarder CRs: %v", err)
 			cc.AddResult(r)
 		}
-		return
+		return false
 	}
 
 	crCount := len(list.Items)
 	r.Details["cr_count"] = crCount
 
 	if crCount == 0 {
-		r.Status = checks.StatusWarning
-		r.Message = "No SplunkForwarder CR found — forwarder not configured"
+		r.Status = checks.StatusInfo
+		r.Message = fmt.Sprintf("No SplunkForwarder CR in %s — forwarder not configured on this cluster", cc.Operator.Namespace)
 		cc.AddResult(r)
-		return
+		return false
 	}
 
 	// Extract key fields from the first CR
@@ -247,7 +270,7 @@ func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) {
 
 	inputs, _, _ := unstructured.NestedSlice(cr.Object, "spec", "splunkInputs")
 
-	r.Details["cr_name"] = crName
+	r.Details["cr_name"] = fmt.Sprintf("%s/%s", cc.Operator.Namespace, crName)
 	r.Details["image"] = image
 	if imageDigest != "" {
 		r.Details["image_digest"] = imageDigest[:min(len(imageDigest), 19)]
@@ -258,14 +281,16 @@ func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) {
 	r.Details["input_count"] = len(inputs)
 
 	r.Status = checks.StatusPass
-	r.Message = fmt.Sprintf("SplunkForwarder CR '%s' configured (%d inputs, image: %s)",
-		crName, len(inputs), truncateImage(image, imageDigest))
+	r.Message = fmt.Sprintf("SplunkForwarder CR '%s/%s' configured (%d inputs, image: %s)",
+		cc.Operator.Namespace, crName, len(inputs), truncateImage(image, imageDigest))
 
 	cc.AddResult(r)
+	return true
 }
 
-// checkSecrets verifies the splunk auth and HEC token secrets exist
-func checkSecrets(ctx context.Context, cc *checks.ClusterContext) {
+// checkSecrets verifies the splunk auth and HEC token secrets exist.
+// If hasCR is false, missing secrets are INFO (not configured) rather than FAIL.
+func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
 	cc.CurrentCheck = "sfo_secrets"
 	log := logging.WithCheck("sfo_secrets")
 
@@ -292,6 +317,7 @@ func checkSecrets(ctx context.Context, cc *checks.ClusterContext) {
 	missing := []string{}
 
 	for _, s := range secrets {
+		secretRef := fmt.Sprintf("%s/%s", cc.Operator.Namespace, s.name)
 		_, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, s.name, metav1.GetOptions{})
 		if err == nil {
 			found++
@@ -299,7 +325,7 @@ func checkSecrets(ctx context.Context, cc *checks.ClusterContext) {
 		} else {
 			r.Details[s.name] = "missing"
 			if s.required {
-				missing = append(missing, s.name)
+				missing = append(missing, secretRef)
 			}
 		}
 	}
@@ -307,9 +333,13 @@ func checkSecrets(ctx context.Context, cc *checks.ClusterContext) {
 	log.WithField("found", found).WithField("missing", len(missing)).Debug("SFO secrets check")
 
 	switch {
-	case len(missing) > 0:
+	case len(missing) > 0 && hasCR:
 		r.Status = checks.StatusFail
-		r.Message = fmt.Sprintf("Required secret(s) missing: %s", strings.Join(missing, ", "))
+		r.Message = fmt.Sprintf("Required secret(s) missing: %s — operator cannot reconcile SplunkForwarder CR without this", strings.Join(missing, ", "))
+	case len(missing) > 0 && !hasCR:
+		r.Status = checks.StatusInfo
+		r.Severity = checks.SeverityInfo
+		r.Message = fmt.Sprintf("Secret(s) not present: %s (expected — no SplunkForwarder CR configured)", strings.Join(missing, ", "))
 	default:
 		r.Status = checks.StatusPass
 		r.Message = fmt.Sprintf("%d secret(s) present", found)
@@ -352,12 +382,14 @@ func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext)
 
 	r.Details["available"] = available
 
+	r.Details["deployment"] = fmt.Sprintf("%s/%s", cc.Operator.Namespace, cc.Operator.Deployment)
+
 	if available == "True" {
 		r.Status = checks.StatusPass
-		r.Message = "Controller is available"
+		r.Message = fmt.Sprintf("Controller %s/%s is available", cc.Operator.Namespace, cc.Operator.Deployment)
 	} else {
 		r.Status = checks.StatusFail
-		r.Message = "Controller not available"
+		r.Message = fmt.Sprintf("Controller %s/%s not available", cc.Operator.Namespace, cc.Operator.Deployment)
 	}
 
 	cc.AddResult(r)
