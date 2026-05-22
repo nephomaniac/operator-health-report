@@ -1571,6 +1571,39 @@
                 detailsRow.appendChild(detailsCell);
                 tableBody.appendChild(detailsRow);
             });
+
+            // Append skipped/failed clusters at the bottom
+            const allEntries = Array.isArray(healthDataRaw) ? (Array.isArray(healthDataRaw[0]) ? healthDataRaw[0] : healthDataRaw) : [];
+            const skippedList = allEntries.filter(e => e.type === 'skipped_cluster');
+            if (skippedList.length > 0) {
+                const sepRow = document.createElement('tr');
+                sepRow.innerHTML = `<td colspan="${totalColumns}" style="padding:8px 14px;font-weight:600;color:var(--text-muted);font-size:0.85em;letter-spacing:0.04em;border-top:2px solid var(--border-light);">Skipped / Unreachable (${skippedList.length})</td>`;
+                tableBody.appendChild(sepRow);
+
+                skippedList.forEach(sc => {
+                    const statusIcons = {
+                        'limited_support': '🛡',
+                        'not_ready': '⏸',
+                        'connection_failed': '🔌',
+                        'metadata_failed': '❓'
+                    };
+                    const statusLabels = {
+                        'limited_support': 'Limited Support',
+                        'not_ready': 'Not Ready',
+                        'connection_failed': 'Connection Failed',
+                        'metadata_failed': 'Metadata Failed'
+                    };
+                    const icon = statusIcons[sc.skip_status] || '⏭';
+                    const label = statusLabels[sc.skip_status] || sc.skip_status;
+
+                    const skipRow = document.createElement('tr');
+                    skipRow.style.opacity = '0.5';
+                    skipRow.innerHTML = `<td class="cluster-name-cell" style="color:var(--text-muted);">${sc.cluster_name || sc.cluster_id}</td>` +
+                        `<td class="check-status-cell"><span class="status-icon no-access">${icon}</span></td>` +
+                        `<td colspan="${totalColumns - 2}" style="padding:4px 10px;font-size:0.82em;color:var(--text-muted);"><span style="background:rgba(255,255,255,0.04);padding:2px 8px;border-radius:3px;border:1px solid var(--border-light);">${label}</span> <span style="margin-left:8px;font-size:0.9em;">${sc.reason || ''}</span></td>`;
+                    tableBody.appendChild(skipRow);
+                });
+            }
         }
 
         function switchTab(operatorName) {
