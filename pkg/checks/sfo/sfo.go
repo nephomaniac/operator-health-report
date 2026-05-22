@@ -7,7 +7,9 @@ import (
 
 	"github.com/openshift/operator-health-report/pkg/checks"
 	"github.com/openshift/operator-health-report/pkg/logging"
+	"github.com/openshift/operator-health-report/pkg/thanos"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -21,64 +23,243 @@ type SFOChecker struct{}
 
 func (c *SFOChecker) Name() string { return "sfo" }
 
+const (
+	// The operator runs in its own namespace but manages resources in openshift-security
+	securityNamespace = "openshift-security"
+)
+
 var (
 	splunkForwarderGVR = schema.GroupVersionResource{
 		Group: "splunkforwarder.managed.openshift.io", Version: "v1alpha1", Resource: "splunkforwarders",
+	}
+	serviceMonitorGVR = schema.GroupVersionResource{
+		Group: "monitoring.coreos.com", Version: "v1", Resource: "servicemonitors",
+	}
+	prometheusRuleGVR = schema.GroupVersionResource{
+		Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules",
 	}
 )
 
 func (c *SFOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	checkControllerAvailability(ctx, cc)
-
-	// The dependency chain is: Secret → CR → Operator reconciles → DaemonSet → Pods
-	// If no CR exists, DaemonSet and pods won't exist — that's expected.
 	hasCR := checkSplunkForwarderCR(ctx, cc)
 	checkSecrets(ctx, cc, hasCR)
-
-	if hasCR {
-		checkDaemonSetHealth(ctx, cc)
-		checkForwarderPods(ctx, cc)
-	} else {
-		// No CR — skip DaemonSet/pod checks with explanation of dependency chain
-		cc.CurrentCheck = "sfo_daemonset_health"
-		cc.AddResult(checks.Result{
-			Check:    "sfo_daemonset_health",
-			Status:   checks.StatusSkip,
-			Severity: checks.SeverityInfo,
-			Message:  fmt.Sprintf("Skipped — no SplunkForwarder CR in %s", cc.Operator.Namespace),
-			Details:  map[string]any{"dependency": "SplunkForwarder CR → operator reconcile → DaemonSet creation"},
-		})
-		cc.CurrentCheck = "sfo_forwarder_pods"
-		cc.AddResult(checks.Result{
-			Check:    "sfo_forwarder_pods",
-			Status:   checks.StatusSkip,
-			Severity: checks.SeverityInfo,
-			Message:  fmt.Sprintf("Skipped — no SplunkForwarder CR in %s", cc.Operator.Namespace),
-			Details:  map[string]any{"dependency": "SplunkForwarder CR → DaemonSet → forwarder pods on each node"},
-		})
-	}
+	checkDaemonSetHealth(ctx, cc, hasCR)
+	checkForwarderPods(ctx, cc, hasCR)
+	checkConfigMaps(ctx, cc, hasCR)
+	checkAuditExporter(ctx, cc)
+	checkForwarderMetrics(ctx, cc, hasCR)
+	checkServiceMonitor(ctx, cc)
+	checkPrometheusRule(ctx, cc)
 }
 
-// checkDaemonSetHealth verifies the splunk forwarder DaemonSet exists and is healthy
-func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "sfo_daemonset_health"
+// checkControllerAvailability checks the operator deployment Available condition
+func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "sfo_controller_availability"
 
 	r := checks.Result{
-		Check:    "sfo_daemonset_health",
+		Check:    "sfo_controller_availability",
 		Severity: checks.SeverityCritical,
 		Details:  map[string]any{},
 	}
 
-	// The operator creates DaemonSets in its namespace with label name=splunk-forwarder
-	dsList, err := cc.Client.Clientset().AppsV1().DaemonSets(cc.Operator.Namespace).List(ctx, metav1.ListOptions{})
-	cc.RecordError("List DaemonSets", err)
+	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
+	cc.RecordError("Get SFO deployment", err)
 
 	if err != nil {
 		if checks.IsAccessError(err) {
 			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		} else {
 			r.Status = checks.StatusFail
-			r.Message = fmt.Sprintf("Could not list DaemonSets: %v", err)
+			r.Message = fmt.Sprintf("Cannot access deployment %s/%s: %v", cc.Operator.Namespace, cc.Operator.Deployment, err)
+			cc.AddResult(r)
+		}
+		return
+	}
+
+	available := ""
+	for _, cond := range deploy.Status.Conditions {
+		if string(cond.Type) == "Available" {
+			available = string(cond.Status)
+			break
+		}
+	}
+
+	r.Details["deployment"] = fmt.Sprintf("%s/%s", cc.Operator.Namespace, cc.Operator.Deployment)
+	r.Details["available"] = available
+
+	if available == "True" {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Controller %s/%s is available", cc.Operator.Namespace, cc.Operator.Deployment)
+	} else {
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Controller %s/%s not available", cc.Operator.Namespace, cc.Operator.Deployment)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkSplunkForwarderCR verifies the SplunkForwarder CR exists in openshift-security.
+// Returns true if at least one CR was found.
+func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) bool {
+	cc.CurrentCheck = "sfo_splunkforwarder_cr"
+
+	r := checks.Result{
+		Check:    "sfo_splunkforwarder_cr",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{},
+	}
+
+	if !cc.Client.CanElevate() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return false
+	}
+
+	// CR is deployed in openshift-security, not the operator namespace
+	list, err := cc.Client.ListResources(ctx, splunkForwarderGVR, securityNamespace, true)
+	cc.RecordError("List SplunkForwarder CRs", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		} else {
+			r.Status = checks.StatusSkip
+			r.Message = fmt.Sprintf("Could not query SplunkForwarder CRs in %s: %v", securityNamespace, err)
+			cc.AddResult(r)
+		}
+		return false
+	}
+
+	crCount := len(list.Items)
+	r.Details["cr_count"] = crCount
+	r.Details["namespace"] = securityNamespace
+
+	if crCount == 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("No SplunkForwarder CR in %s — CR is deployed via SSS, absence may indicate a Hive ClusterSync issue", securityNamespace)
+		r.Details["investigation"] = "The SplunkForwarder CR is bundled in the operator's SSS template. If the operator namespace exists but the CR is missing, check Hive ClusterSync status."
+		cc.AddResult(r)
+		return false
+	}
+
+	cr := list.Items[0]
+	crName := cr.GetName()
+
+	image, _, _ := unstructured.NestedString(cr.Object, "spec", "image")
+	imageDigest, _, _ := unstructured.NestedString(cr.Object, "spec", "imageDigest")
+	clusterID, _, _ := unstructured.NestedString(cr.Object, "spec", "clusterID")
+	licenseAccepted, _, _ := unstructured.NestedBool(cr.Object, "spec", "splunkLicenseAccepted")
+	useHeavy, _, _ := unstructured.NestedBool(cr.Object, "spec", "useHeavyForwarder")
+	inputs, _, _ := unstructured.NestedSlice(cr.Object, "spec", "splunkInputs")
+	filters, _, _ := unstructured.NestedSlice(cr.Object, "spec", "filters")
+
+	r.Details["cr_name"] = fmt.Sprintf("%s/%s", securityNamespace, crName)
+	r.Details["image"] = image
+	if imageDigest != "" {
+		r.Details["image_digest"] = truncate(imageDigest, 19)
+	}
+	r.Details["cluster_id"] = clusterID
+	r.Details["license_accepted"] = licenseAccepted
+	r.Details["use_heavy_forwarder"] = useHeavy
+	r.Details["input_count"] = len(inputs)
+	r.Details["filter_count"] = len(filters)
+
+	r.Status = checks.StatusPass
+	r.Message = fmt.Sprintf("SplunkForwarder CR %s/%s configured (%d inputs, heavy=%v)",
+		securityNamespace, crName, len(inputs), useHeavy)
+
+	cc.AddResult(r)
+	return true
+}
+
+// checkSecrets verifies splunk auth and HEC token secrets in openshift-security
+func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
+	cc.CurrentCheck = "sfo_secrets"
+	log := logging.WithCheck("sfo_secrets")
+
+	r := checks.Result{
+		Check:    "sfo_secrets",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{"namespace": securityNamespace},
+	}
+
+	if !cc.Client.CanElevate() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	secrets := []struct {
+		name     string
+		required bool
+		desc     string
+	}{
+		{"splunk-auth", true, "mTLS certificate for Splunk connection"},
+		{"splunk-hec-token", false, "HTTP Event Collector token (alternative to mTLS)"},
+	}
+
+	found := 0
+	var missing []string
+
+	for _, s := range secrets {
+		ref := fmt.Sprintf("%s/%s", securityNamespace, s.name)
+		_, err := cc.Client.ElevatedClientset().CoreV1().Secrets(securityNamespace).Get(ctx, s.name, metav1.GetOptions{})
+		if err == nil {
+			found++
+			r.Details[s.name] = "present"
+		} else {
+			r.Details[s.name] = "missing"
+			if s.required {
+				missing = append(missing, ref)
+			}
+		}
+	}
+
+	log.WithField("found", found).Debug("SFO secrets check")
+
+	switch {
+	case len(missing) > 0 && hasCR:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("Required secret(s) missing: %s — operator cannot reconcile without auth credentials", strings.Join(missing, ", "))
+	case len(missing) > 0 && !hasCR:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Secret(s) missing: %s (CR also missing — possible SSS sync issue)", strings.Join(missing, ", "))
+		r.Details["investigation"] = "Both secrets and CR are deployed via SSS. Check Hive ClusterSync."
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d auth secret(s) present in %s", found, securityNamespace)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkDaemonSetHealth verifies the splunk forwarder DaemonSet in openshift-security
+func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
+	cc.CurrentCheck = "sfo_daemonset_health"
+
+	r := checks.Result{
+		Check:    "sfo_daemonset_health",
+		Severity: checks.SeverityCritical,
+		Details:  map[string]any{"namespace": securityNamespace},
+	}
+
+	if !hasCR {
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Skipped — no SplunkForwarder CR in %s", securityNamespace)
+		r.Details["dependency"] = "SplunkForwarder CR → operator reconcile → DaemonSet creation"
+		cc.AddResult(r)
+		return
+	}
+
+	dsList, err := cc.Client.Clientset().AppsV1().DaemonSets(securityNamespace).List(ctx, metav1.ListOptions{})
+	cc.RecordError("List DaemonSets in "+securityNamespace, err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		} else {
+			r.Status = checks.StatusFail
+			r.Message = fmt.Sprintf("Could not list DaemonSets in %s: %v", securityNamespace, err)
 			cc.AddResult(r)
 		}
 		return
@@ -91,48 +272,41 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
 		}
 		desired := int(ds.Status.DesiredNumberScheduled)
 		ready := int(ds.Status.NumberReady)
-		available := int(ds.Status.NumberAvailable)
 
 		dsInfo := map[string]any{
-			"name":      fmt.Sprintf("%s/%s", cc.Operator.Namespace, ds.Name),
-			"desired":   desired,
-			"ready":     ready,
-			"available": available,
+			"name":    fmt.Sprintf("%s/%s", securityNamespace, ds.Name),
+			"desired": desired,
+			"ready":   ready,
 		}
-
 		if ds.Status.NumberUnavailable > 0 {
 			dsInfo["unavailable"] = int(ds.Status.NumberUnavailable)
 		}
-
 		splunkDS = append(splunkDS, dsInfo)
 	}
 
 	r.Details["daemonsets"] = splunkDS
-	r.Details["count"] = len(splunkDS)
 
 	switch {
 	case len(splunkDS) == 0:
-		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("No splunk forwarder DaemonSet found in %s — operator may not have reconciled yet", cc.Operator.Namespace)
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("No splunk DaemonSet found in %s — operator reconciliation may have failed", securityNamespace)
+		r.Details["investigation"] = "CR exists but no DaemonSet was created. Check operator logs for reconciliation errors."
 	default:
 		allHealthy := true
 		var issues []string
+		totalPods := 0
 		for _, ds := range splunkDS {
 			desired := ds["desired"].(int)
 			ready := ds["ready"].(int)
-			name := ds["name"].(string)
+			totalPods += desired
 			if ready != desired {
 				allHealthy = false
-				issues = append(issues, fmt.Sprintf("%s: %d/%d ready", name, ready, desired))
+				issues = append(issues, fmt.Sprintf("%s: %d/%d ready", ds["name"], ready, desired))
 			}
 		}
 		if allHealthy {
 			r.Status = checks.StatusPass
-			total := 0
-			for _, ds := range splunkDS {
-				total += ds["desired"].(int)
-			}
-			r.Message = fmt.Sprintf("%d DaemonSet(s) healthy (%d pods scheduled)", len(splunkDS), total)
+			r.Message = fmt.Sprintf("%d DaemonSet(s) healthy (%d pods across all nodes)", len(splunkDS), totalPods)
 		} else {
 			r.Status = checks.StatusWarning
 			r.Message = fmt.Sprintf("DaemonSet not fully ready: %s", strings.Join(issues, "; "))
@@ -143,24 +317,32 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 // checkForwarderPods verifies forwarder pods are running on nodes
-func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext) {
+func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
 	cc.CurrentCheck = "sfo_forwarder_pods"
 
 	r := checks.Result{
 		Check:    "sfo_forwarder_pods",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details:  map[string]any{"namespace": securityNamespace},
 	}
 
-	pods, err := cc.Client.GetPods(ctx, cc.Operator.Namespace, "name=splunk-forwarder")
-	cc.RecordError("Get forwarder pods", err)
+	if !hasCR {
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Skipped — no SplunkForwarder CR in %s", securityNamespace)
+		r.Details["dependency"] = "SplunkForwarder CR → DaemonSet → forwarder pods"
+		cc.AddResult(r)
+		return
+	}
+
+	pods, err := cc.Client.GetPods(ctx, securityNamespace, "name=splunk-forwarder")
+	cc.RecordError("Get forwarder pods in "+securityNamespace, err)
 
 	if err != nil {
 		if checks.IsAccessError(err) {
 			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		} else {
 			r.Status = checks.StatusSkip
-			r.Message = "Could not retrieve forwarder pods"
+			r.Message = fmt.Sprintf("Could not retrieve forwarder pods in %s", securityNamespace)
 			cc.AddResult(r)
 		}
 		return
@@ -172,10 +354,10 @@ func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext) {
 	var podIssues []map[string]any
 
 	for _, pod := range pods.Items {
-		if pod.Status.Phase != "Running" {
+		if pod.Status.Phase != corev1.PodRunning {
 			notRunning++
 			issue := map[string]any{
-				"pod":   fmt.Sprintf("%s/%s", cc.Operator.Namespace, pod.Name),
+				"pod":   fmt.Sprintf("%s/%s", securityNamespace, pod.Name),
 				"phase": string(pod.Status.Phase),
 				"node":  pod.Spec.NodeName,
 			}
@@ -204,102 +386,270 @@ func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext) {
 
 	switch {
 	case podCount == 0:
-		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("No forwarder pods (label: name=splunk-forwarder) in %s", cc.Operator.Namespace)
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("No forwarder pods (label: name=splunk-forwarder) in %s — DaemonSet may have failed", securityNamespace)
 	case notRunning > 0:
 		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("%d/%d forwarder pod(s) not running", notRunning, podCount)
+		r.Message = fmt.Sprintf("%d/%d forwarder pod(s) not running in %s", notRunning, podCount, securityNamespace)
 	case totalRestarts > 10:
 		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("%d forwarder pods running (%d total restarts)", podCount, totalRestarts)
+		r.Message = fmt.Sprintf("%d forwarder pods (%d total restarts) in %s", podCount, totalRestarts, securityNamespace)
 	default:
 		r.Status = checks.StatusPass
-		r.Message = fmt.Sprintf("%d forwarder pods running on %d nodes (%d restarts)", podCount, podCount, totalRestarts)
+		r.Message = fmt.Sprintf("%d forwarder pods running across nodes (%d restarts)", podCount, totalRestarts)
 	}
 
 	cc.AddResult(r)
 }
 
-// checkSplunkForwarderCR verifies the SplunkForwarder custom resource exists.
-// Returns true if at least one CR was found.
-func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) bool {
-	cc.CurrentCheck = "sfo_splunkforwarder_cr"
+// checkConfigMaps verifies the splunk configuration ConfigMaps in openshift-security
+func checkConfigMaps(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
+	cc.CurrentCheck = "sfo_configmaps"
 
 	r := checks.Result{
-		Check:    "sfo_splunkforwarder_cr",
+		Check:    "sfo_configmaps",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{"namespace": securityNamespace},
+	}
+
+	if !hasCR {
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Skipped — no SplunkForwarder CR in %s", securityNamespace)
+		r.Details["dependency"] = "SplunkForwarder CR → operator reconcile → ConfigMap creation"
+		cc.AddResult(r)
+		return
+	}
+
+	expectedCMs := []struct {
+		name string
+		desc string
+	}{
+		{"osd-monitored-logs-local", "Splunk input configuration (inputs.conf, props.conf)"},
+		{"osd-monitored-logs-metadata", "Splunk app metadata (local.meta)"},
+	}
+
+	found := 0
+	var missing []string
+	var cmDetails []map[string]any
+
+	for _, cm := range expectedCMs {
+		ref := fmt.Sprintf("%s/%s", securityNamespace, cm.name)
+		obj, err := cc.Client.Clientset().CoreV1().ConfigMaps(securityNamespace).Get(ctx, cm.name, metav1.GetOptions{})
+		if err == nil {
+			found++
+			detail := map[string]any{
+				"name":   ref,
+				"status": "present",
+				"keys":   len(obj.Data),
+			}
+			cmDetails = append(cmDetails, detail)
+		} else {
+			missing = append(missing, ref)
+			cmDetails = append(cmDetails, map[string]any{
+				"name":   ref,
+				"status": "missing",
+				"desc":   cm.desc,
+			})
+		}
+	}
+
+	r.Details["configmaps"] = cmDetails
+
+	switch {
+	case len(missing) > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("ConfigMap(s) missing: %s — operator may not have reconciled", strings.Join(missing, ", "))
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d configuration ConfigMap(s) present in %s", found, securityNamespace)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkAuditExporter verifies the audit-exporter DaemonSet runs on master nodes
+func checkAuditExporter(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "sfo_audit_exporter"
+
+	r := checks.Result{
+		Check:    "sfo_audit_exporter",
+		Severity: checks.SeverityWarning,
+		Details:  map[string]any{"namespace": securityNamespace},
+	}
+
+	ds, err := cc.Client.Clientset().AppsV1().DaemonSets(securityNamespace).Get(ctx, "audit-exporter", metav1.GetOptions{})
+	cc.RecordError("Get audit-exporter DaemonSet", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		} else {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("audit-exporter DaemonSet not found in %s — audit log filtering not active", securityNamespace)
+			r.Details["investigation"] = "audit-exporter is deployed via SSS to filter KAS audit logs before forwarding to Splunk."
+			cc.AddResult(r)
+		}
+		return
+	}
+
+	desired := int(ds.Status.DesiredNumberScheduled)
+	ready := int(ds.Status.NumberReady)
+
+	r.Details["daemonset"] = fmt.Sprintf("%s/audit-exporter", securityNamespace)
+	r.Details["desired"] = desired
+	r.Details["ready"] = ready
+
+	// Check audit policy ConfigMap
+	_, policyErr := cc.Client.Clientset().CoreV1().ConfigMaps(securityNamespace).Get(ctx, "osd-audit-policy", metav1.GetOptions{})
+	r.Details["audit_policy_configmap"] = policyErr == nil
+
+	switch {
+	case ready != desired:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("audit-exporter %s/audit-exporter not fully ready (%d/%d on master nodes)", securityNamespace, ready, desired)
+	case policyErr != nil:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("audit-exporter running (%d/%d) but %s/osd-audit-policy ConfigMap missing", ready, desired, securityNamespace)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("audit-exporter healthy (%d/%d master nodes), audit policy configured", ready, desired)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkForwarderMetrics queries Prometheus for splunk forwarder health metrics
+func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
+	cc.CurrentCheck = "sfo_forwarder_metrics"
+
+	r := checks.Result{
+		Check:    "sfo_forwarder_metrics",
 		Severity: checks.SeverityWarning,
 		Details:  map[string]any{},
 	}
 
-	if !cc.Client.CanElevate() {
-		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
-		return false
+	if !hasCR {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — no SplunkForwarder CR configured"
+		cc.AddResult(r)
+		return
 	}
 
-	list, err := cc.Client.ListResources(ctx, splunkForwarderGVR, cc.Operator.Namespace, true)
-	cc.RecordError("List SplunkForwarder CRs", err)
+	if !cc.Client.CanElevate() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Query for unhealthy forwarder components
+	query := thanos.EncodeQuery(`splunk_forwarder_component_unhealthy`)
+	body, err := cc.Client.QueryThanos(ctx, query)
+	cc.RecordError("Query splunk forwarder metrics", err)
 
 	if err != nil {
 		if checks.IsAccessError(err) {
 			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		} else {
 			r.Status = checks.StatusSkip
-			r.Message = fmt.Sprintf("Could not query SplunkForwarder CRs: %v", err)
+			r.Message = "Could not query splunk forwarder metrics from Thanos"
 			cc.AddResult(r)
 		}
-		return false
+		return
 	}
 
-	crCount := len(list.Items)
-	r.Details["cr_count"] = crCount
-
-	if crCount == 0 {
-		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("No SplunkForwarder CR in %s — CR is deployed via SSS with the operator package, absence may indicate a Hive ClusterSync issue", cc.Operator.Namespace)
-		r.Details["investigation"] = "The SplunkForwarder CR is bundled in the operator's SSS template. If the operator namespace exists but the CR is missing, check Hive ClusterSync status on the hive shard for this cluster."
+	if !thanos.HasResults(body) {
+		r.Status = checks.StatusInfo
+		r.Message = "No splunk_forwarder_component_unhealthy metrics found — forwarder may not expose metrics yet"
 		cc.AddResult(r)
-		return false
+		return
 	}
 
-	// Extract key fields from the first CR
-	cr := list.Items[0]
-	crName := cr.GetName()
+	resp, _ := thanos.Parse(body)
+	unhealthyCount := 0
+	var unhealthyComponents []string
 
-	image, _, _ := unstructured.NestedString(cr.Object, "spec", "image")
-	imageDigest, _, _ := unstructured.NestedString(cr.Object, "spec", "imageDigest")
-	clusterID, _, _ := unstructured.NestedString(cr.Object, "spec", "clusterID")
-	licenseAccepted, _, _ := unstructured.NestedBool(cr.Object, "spec", "splunkLicenseAccepted")
-	useHeavy, _, _ := unstructured.NestedBool(cr.Object, "spec", "useHeavyForwarder")
-
-	inputs, _, _ := unstructured.NestedSlice(cr.Object, "spec", "splunkInputs")
-
-	r.Details["cr_name"] = fmt.Sprintf("%s/%s", cc.Operator.Namespace, crName)
-	r.Details["image"] = image
-	if imageDigest != "" {
-		r.Details["image_digest"] = imageDigest[:min(len(imageDigest), 19)]
+	for _, result := range resp.Data.Result {
+		val := ""
+		if len(result.Value) >= 2 {
+			val = fmt.Sprintf("%v", result.Value[1])
+		}
+		if val == "1" {
+			unhealthyCount++
+			component := result.Metric["component"]
+			if component != "" {
+				unhealthyComponents = append(unhealthyComponents, component)
+			}
+		}
 	}
-	r.Details["cluster_id"] = clusterID
-	r.Details["license_accepted"] = licenseAccepted
-	r.Details["use_heavy_forwarder"] = useHeavy
-	r.Details["input_count"] = len(inputs)
 
-	r.Status = checks.StatusPass
-	r.Message = fmt.Sprintf("SplunkForwarder CR '%s/%s' configured (%d inputs, image: %s)",
-		cc.Operator.Namespace, crName, len(inputs), truncateImage(image, imageDigest))
+	r.Details["total_metrics"] = len(resp.Data.Result)
+	r.Details["unhealthy_count"] = unhealthyCount
+	if len(unhealthyComponents) > 0 {
+		r.Details["unhealthy_components"] = unhealthyComponents
+	}
+
+	switch {
+	case unhealthyCount > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d unhealthy forwarder component(s): %s", unhealthyCount, strings.Join(unhealthyComponents, ", "))
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All forwarder components healthy (%d metrics)", len(resp.Data.Result))
+	}
 
 	cc.AddResult(r)
-	return true
 }
 
-// checkSecrets verifies the splunk auth and HEC token secrets exist.
-// If hasCR is false, missing secrets are INFO (not configured) rather than FAIL.
-func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
-	cc.CurrentCheck = "sfo_secrets"
-	log := logging.WithCheck("sfo_secrets")
+// checkServiceMonitor verifies the splunk forwarder ServiceMonitor exists
+func checkServiceMonitor(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "sfo_servicemonitor"
 
 	r := checks.Result{
-		Check:    "sfo_secrets",
-		Severity: checks.SeverityWarning,
+		Check:    "sfo_servicemonitor",
+		Severity: checks.SeverityInfo,
+		Details:  map[string]any{"namespace": securityNamespace},
+	}
+
+	if !cc.Client.CanElevate() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Check for splunk-forwarder ServiceMonitor
+	_, smErr := cc.Client.GetResource(ctx, serviceMonitorGVR, securityNamespace, "splunk-forwarder", true)
+	sfSM := smErr == nil
+
+	// Check for audit-exporter ServiceMonitor
+	_, aeErr := cc.Client.GetResource(ctx, serviceMonitorGVR, securityNamespace, "audit-exporter", true)
+	aeSM := aeErr == nil
+
+	r.Details["splunk_forwarder_sm"] = sfSM
+	r.Details["audit_exporter_sm"] = aeSM
+
+	if sfSM && aeSM {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Both ServiceMonitors present in %s (splunk-forwarder, audit-exporter)", securityNamespace)
+	} else if sfSM || aeSM {
+		r.Status = checks.StatusInfo
+		present := "splunk-forwarder"
+		if !sfSM {
+			present = "audit-exporter"
+		}
+		r.Message = fmt.Sprintf("Partial: %s ServiceMonitor present, other missing in %s", present, securityNamespace)
+	} else {
+		r.Status = checks.StatusInfo
+		r.Message = fmt.Sprintf("No ServiceMonitors found in %s — metrics may not be scraped", securityNamespace)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkPrometheusRule verifies the SplunkForwarderComponentUnhealthy alert rule exists
+func checkPrometheusRule(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "sfo_prometheusrule"
+
+	r := checks.Result{
+		Check:    "sfo_prometheusrule",
+		Severity: checks.SeverityInfo,
 		Details:  map[string]any{},
 	}
 
@@ -308,110 +658,31 @@ func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
 		return
 	}
 
-	secrets := []struct {
-		name     string
-		required bool
-	}{
-		{"splunk-auth", true},
-		{"splunk-hec-token", false},
-	}
-
-	found := 0
-	missing := []string{}
-
-	for _, s := range secrets {
-		secretRef := fmt.Sprintf("%s/%s", cc.Operator.Namespace, s.name)
-		_, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, s.name, metav1.GetOptions{})
-		if err == nil {
-			found++
-			r.Details[s.name] = "present"
-		} else {
-			r.Details[s.name] = "missing"
-			if s.required {
-				missing = append(missing, secretRef)
-			}
-		}
-	}
-
-	log.WithField("found", found).WithField("missing", len(missing)).Debug("SFO secrets check")
-
-	switch {
-	case len(missing) > 0 && hasCR:
-		r.Status = checks.StatusFail
-		r.Message = fmt.Sprintf("Required secret(s) missing: %s — operator cannot reconcile SplunkForwarder CR without this", strings.Join(missing, ", "))
-	case len(missing) > 0 && !hasCR:
-		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("Secret(s) not present: %s (CR also missing — possible SSS sync issue)", strings.Join(missing, ", "))
-		r.Details["investigation"] = "Both the SplunkForwarder CR and secrets are deployed via the operator's SSS. If the operator pod is running but these are missing, check Hive ClusterSync."
-	default:
+	// The PrometheusRule is typically in openshift-security
+	_, err := cc.Client.GetResource(ctx, prometheusRuleGVR, securityNamespace, "splunk-forwarder-component-unhealthy", true)
+	if err == nil {
 		r.Status = checks.StatusPass
-		r.Message = fmt.Sprintf("%d secret(s) present", found)
-	}
-
-	cc.AddResult(r)
-}
-
-// checkControllerAvailability checks the operator deployment Available condition
-func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "sfo_controller_availability"
-
-	r := checks.Result{
-		Check:    "sfo_controller_availability",
-		Severity: checks.SeverityCritical,
-		Details:  map[string]any{},
-	}
-
-	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
-	cc.RecordError("Get SFO deployment", err)
-
-	if err != nil {
-		if checks.IsAccessError(err) {
-			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
-		} else {
-			r.Status = checks.StatusFail
-			r.Message = fmt.Sprintf("Cannot access deployment: %v", err)
-			cc.AddResult(r)
-		}
-		return
-	}
-
-	available := ""
-	for _, cond := range deploy.Status.Conditions {
-		if string(cond.Type) == "Available" {
-			available = string(cond.Status)
-			break
-		}
-	}
-
-	r.Details["available"] = available
-
-	r.Details["deployment"] = fmt.Sprintf("%s/%s", cc.Operator.Namespace, cc.Operator.Deployment)
-
-	if available == "True" {
-		r.Status = checks.StatusPass
-		r.Message = fmt.Sprintf("Controller %s/%s is available", cc.Operator.Namespace, cc.Operator.Deployment)
+		r.Message = fmt.Sprintf("PrometheusRule %s/splunk-forwarder-component-unhealthy exists — SplunkForwarderComponentUnhealthy alert configured", securityNamespace)
+		r.Details["prometheusrule"] = fmt.Sprintf("%s/splunk-forwarder-component-unhealthy", securityNamespace)
 	} else {
-		r.Status = checks.StatusFail
-		r.Message = fmt.Sprintf("Controller %s/%s not available", cc.Operator.Namespace, cc.Operator.Deployment)
+		// Try openshift-monitoring as fallback
+		_, err2 := cc.Client.GetResource(ctx, prometheusRuleGVR, "openshift-monitoring", "splunk-forwarder-component-unhealthy", true)
+		if err2 == nil {
+			r.Status = checks.StatusPass
+			r.Message = "PrometheusRule openshift-monitoring/splunk-forwarder-component-unhealthy exists"
+			r.Details["prometheusrule"] = "openshift-monitoring/splunk-forwarder-component-unhealthy"
+		} else {
+			r.Status = checks.StatusInfo
+			r.Message = "No SplunkForwarderComponentUnhealthy PrometheusRule found — alert not configured"
+		}
 	}
 
 	cc.AddResult(r)
 }
 
-func truncateImage(image, digest string) string {
-	if digest != "" {
-		if len(digest) > 12 {
-			return digest[:12]
-		}
-		return digest
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
 	}
-	parts := strings.Split(image, "/")
-	return parts[len(parts)-1]
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return s[:max] + "..."
 }
