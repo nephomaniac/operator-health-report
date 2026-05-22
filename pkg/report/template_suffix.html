@@ -1288,7 +1288,7 @@
 
             const pct = (n) => totalClusters > 0 ? ((n/totalClusters)*100).toFixed(1) + '%' : '0%';
 
-            summaryEl.innerHTML = '<h2>📊 Summary Overview</h2>' +
+            summaryEl.innerHTML = '<h3 style="margin:0 0 8px;font-size:1em;">📊 Summary Overview</h3>' +
                 '<div class="stats-grid">' +
                     '<div class="stat-card">' +
                         '<div class="stat-label">Total Clusters</div>' +
@@ -1317,7 +1317,7 @@
                         '<div style="font-size:0.75em;color:var(--text-muted);line-height:1.6;margin-top:4px;">' +
                             (skippedLimitedSupport > 0 ? '<div>🛡 Limited Support: ' + skippedLimitedSupport + '</div>' : '') +
                             (skippedNotReady > 0 ? '<div>⏸ Not Ready: ' + skippedNotReady + '</div>' : '') +
-                            (skippedConnectionFailed > 0 ? '<div>🔌 Connection Failed: ' + skippedConnectionFailed + '</div>' : '') +
+                            (skippedConnectionFailed > 0 ? '<div><span style="text-shadow:0 0 6px rgba(255,200,50,0.7);">⚡</span> Connection Failed: ' + skippedConnectionFailed + '</div>' : '') +
                             (noAccessCount > 0 ? '<div>🔒 No Access: ' + noAccessCount + '</div>' : '') +
                             (skippedAccessDenied > 0 ? '<div>🚫 Access Denied: ' + skippedAccessDenied + '</div>' : '') +
                         '</div>' +
