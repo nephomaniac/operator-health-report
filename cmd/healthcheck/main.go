@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/openshift/operator-health-report/pkg/checks"
+	"github.com/openshift/operator-health-report/pkg/config"
 	"github.com/openshift/operator-health-report/pkg/kube"
 	"github.com/openshift/operator-health-report/pkg/logging"
 	"github.com/openshift/operator-health-report/pkg/ocm"
@@ -32,17 +33,31 @@ import (
 var version = "dev"
 
 func main() {
+	// Load config file defaults (CLI flags override)
+	var configFile string
+	// Pre-scan for --config flag before full flag parsing
+	for i, arg := range os.Args[1:] {
+		if arg == "--config" && i+1 < len(os.Args[1:])-1 {
+			configFile = os.Args[i+2]
+		}
+	}
+	cfg, cfgPath, cfgErr := config.Load(configFile)
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", cfgErr)
+		os.Exit(1)
+	}
+
 	var (
-		clusterList  string
-		reason       string
-		operators    stringSlice
-		noElevate    bool
-		parallel     int
-		outputFile   string
-		noHTML       bool
-		logLevel     string
-		logDir       string
-		ocmConfig      string
+		clusterList    string
+		reason         string
+		operators      stringSlice
+		noElevate      bool
+		parallel       int
+		outputFile     string
+		noHTML         bool
+		logLevel       string
+		logDir         string
+		ocmConfigPath  string
 		ocmURL         string
 		listClusters   string
 		excludePattern string
@@ -50,22 +65,32 @@ func main() {
 		saasOnly       bool
 	)
 
-	flag.StringVar(&clusterList, "cluster-list", "", "File with cluster IDs (one per line)")
-	flag.StringVar(&reason, "reason", "", "OCM elevation reason (JIRA ticket)")
+	flag.StringVar(&clusterList, "cluster-list", cfg.ClusterList, "File with cluster IDs (one per line)")
+	flag.StringVar(&reason, "reason", cfg.Reason, "OCM elevation reason (JIRA ticket)")
 	flag.Var(&operators, "oper", "Operator to check: camo, rmo, ome (repeatable)")
-	flag.BoolVar(&noElevate, "no-elevate", false, "Skip all backplane elevation commands")
-	flag.IntVar(&parallel, "parallel", 1, "Number of clusters to process concurrently")
+	flag.BoolVar(&noElevate, "no-elevate", cfg.NoElevate, "Skip all backplane elevation commands")
+	flag.IntVar(&parallel, "parallel", max(cfg.Parallel, 1), "Number of clusters to process concurrently")
 	flag.StringVar(&outputFile, "output", "", "Output JSON file (default: health_TIMESTAMP.json)")
-	flag.BoolVar(&noHTML, "no-html", false, "Skip HTML report generation")
-	flag.StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
-	flag.StringVar(&logDir, "log-dir", "", "Directory for debug log file (captures all levels)")
-	flag.StringVar(&ocmConfig, "ocm-config", "", "Path to OCM config file (default: $OCM_CONFIG or ~/.config/ocm/ocm.json)")
-	flag.StringVar(&ocmURL, "ocm-url", "", "OCM API URL override (e.g., https://api.stage.openshift.com)")
-	flag.StringVar(&listClusters, "list-clusters", "", "List clusters and exit (all, rosa, osd, hypershift, or custom OCM search)")
-	flag.StringVar(&excludePattern, "exclude", "", "Regex to exclude clusters by name (e.g., 'osde2e|cse2e')")
-	flag.StringVar(&includePattern, "include", "", "Regex to include only clusters matching by name")
-	flag.BoolVar(&saasOnly, "saas-only", false, "Show SAAS targets and pipeline only (no cluster checks)")
+	flag.BoolVar(&noHTML, "no-html", cfg.NoHTML, "Skip HTML report generation")
+	flag.StringVar(&logLevel, "log-level", orDefault(cfg.LogLevel, "info"), "Log level: debug, info, warn, error")
+	flag.StringVar(&logDir, "log-dir", cfg.LogDir, "Directory for debug log file (captures all levels)")
+	flag.StringVar(&ocmConfigPath, "ocm-config", cfg.OCMConfig, "Path to OCM config file (default: $OCM_CONFIG or ~/.config/ocm/ocm.json)")
+	flag.StringVar(&ocmURL, "ocm-url", cfg.OCMURL, "OCM API URL override")
+	flag.StringVar(&listClusters, "list-clusters", cfg.ListClusters, "List clusters and exit (all, rosa, osd, hypershift, managed)")
+	flag.StringVar(&excludePattern, "exclude", cfg.Exclude, "Regex to exclude clusters by name")
+	flag.StringVar(&includePattern, "include", cfg.Include, "Regex to include only clusters matching by name")
+	flag.BoolVar(&saasOnly, "saas-only", cfg.SaasOnly, "Show SAAS targets and pipeline only (no cluster checks)")
+	flag.StringVar(&configFile, "config", "", "Path to config file (default: .healthcheck.yaml)")
 	flag.Parse()
+
+	if cfgPath != "" {
+		fmt.Fprintf(os.Stderr, "Config: %s\n", cfgPath)
+	}
+
+	// Apply operators from config if none provided via CLI
+	if len(operators) == 0 && len(cfg.Operators) > 0 {
+		operators = cfg.Operators
+	}
 
 	// Configure logging
 	logging.SetLevel(logLevel)
@@ -83,7 +108,7 @@ func main() {
 
 	// List clusters mode — query OCM and exit
 	if listClusters != "" {
-		ocmClient, err := ocm.NewClientWithOptions(ocm.Options{ConfigFile: ocmConfig, URL: ocmURL})
+		ocmClient, err := ocm.NewClientWithOptions(ocm.Options{ConfigFile: ocmConfigPath, URL: ocmURL})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -138,7 +163,7 @@ func main() {
 
 	// Create OCM SDK connection — checks token validity based on workload size and concurrency
 	ocmClient, err := ocm.NewClientWithOptions(ocm.Options{
-		ConfigFile:    ocmConfig,
+		ConfigFile:    ocmConfigPath,
 		URL:           ocmURL,
 		ClusterCount:  len(clusterIDs),
 		OperatorCount: len(opConfigs),
@@ -585,4 +610,11 @@ func runListClusters(ocmClient *ocm.Client, filter, exclude, include string) err
 		printed, filtered, total, len(searches), ocmClient.Environment())
 
 	return nil
+}
+
+func orDefault(val, def string) string {
+	if val != "" {
+		return val
+	}
+	return def
 }
