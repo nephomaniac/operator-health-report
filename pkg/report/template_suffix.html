@@ -1572,13 +1572,24 @@
                 tableBody.appendChild(detailsRow);
             });
 
-            // Append skipped/failed clusters at the bottom
+            // Append skipped/failed clusters at the bottom — collapsible
             const allEntries = Array.isArray(healthDataRaw) ? (Array.isArray(healthDataRaw[0]) ? healthDataRaw[0] : healthDataRaw) : [];
             const skippedList = allEntries.filter(e => e.type === 'skipped_cluster');
             if (skippedList.length > 0) {
+                const toggleId = `skipped-${idPrefix}`;
+
                 const sepRow = document.createElement('tr');
-                sepRow.innerHTML = `<td colspan="${totalColumns}" style="padding:8px 14px;font-weight:600;color:var(--text-muted);font-size:0.85em;letter-spacing:0.04em;border-top:2px solid var(--border-light);">Skipped / Unreachable (${skippedList.length})</td>`;
+                sepRow.innerHTML = `<td colspan="${totalColumns}" onclick="var el=document.getElementById('${toggleId}'); el.style.display = el.style.display === 'none' ? '' : 'none';" style="padding:0;border-top:2px solid var(--border-light);cursor:pointer;">` +
+                    `<div class="pipeline-node" style="display:inline-flex;align-items:center;gap:8px;margin:8px 14px;padding:6px 16px;border-radius:6px;background:linear-gradient(135deg,#2a2d3a,#3a3f52);border:1px solid rgba(255,255,255,0.1);box-shadow:0 1px 4px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.06);font-size:0.82em;font-weight:600;color:var(--text-secondary);letter-spacing:0.03em;">` +
+                    `<span style="font-size:1.1em;">⏭</span> Skipped / Unreachable Clusters (${skippedList.length})` +
+                    `<span style="font-size:0.85em;color:var(--text-muted);margin-left:4px;">▼</span>` +
+                    `</div></td>`;
                 tableBody.appendChild(sepRow);
+
+                const skippedBody = document.createElement('tbody');
+                skippedBody.id = toggleId;
+                skippedBody.style.display = 'none';
+                skippedBody.onclick = function() { this.style.display = 'none'; };
 
                 skippedList.forEach(sc => {
                     const statusIcons = {
@@ -1597,12 +1608,14 @@
                     const label = statusLabels[sc.skip_status] || sc.skip_status;
 
                     const skipRow = document.createElement('tr');
-                    skipRow.style.opacity = '0.5';
+                    skipRow.style.opacity = '0.7';
                     skipRow.innerHTML = `<td class="cluster-name-cell" style="color:var(--text-muted);">${sc.cluster_name || sc.cluster_id}</td>` +
                         `<td class="check-status-cell"><span class="status-icon no-access">${icon}</span></td>` +
                         `<td colspan="${totalColumns - 2}" style="padding:4px 10px;font-size:0.82em;color:var(--text-muted);"><span style="background:rgba(255,255,255,0.04);padding:2px 8px;border-radius:3px;border:1px solid var(--border-light);">${label}</span> <span style="margin-left:8px;font-size:0.9em;">${sc.reason || ''}</span></td>`;
-                    tableBody.appendChild(skipRow);
+                    skippedBody.appendChild(skipRow);
                 });
+
+                tableBody.parentElement.appendChild(skippedBody);
             }
         }
 
