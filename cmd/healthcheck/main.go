@@ -26,6 +26,7 @@ import (
 	_ "github.com/openshift/operator-health-report/pkg/checks/camo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/ome"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rmo"
+	_ "github.com/openshift/operator-health-report/pkg/checks/sfo"
 )
 
 // version is set at build time via:

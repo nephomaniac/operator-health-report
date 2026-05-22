@@ -229,13 +229,13 @@ func fetchE2ETargets(ctx context.Context, e2ePath string) ([]PipelineNode, error
 			}
 
 			// Extract test-specific parameters
-			testImage := rt.Parameters["TEST_IMAGE"]
-			testConfig := rt.Parameters["OSDE2E_CONFIGS"]
+			testImage, _ := rt.Parameters["TEST_IMAGE"].(string)
+			testConfig, _ := rt.Parameters["OSDE2E_CONFIGS"].(string)
 			// Target-level parameters override template-level
-			if v, ok := st.Parameters["TEST_IMAGE"]; ok {
+			if v, ok := st.Parameters["TEST_IMAGE"].(string); ok {
 				testImage = v
 			}
-			if v, ok := st.Parameters["OSDE2E_CONFIGS"]; ok {
+			if v, ok := st.Parameters["OSDE2E_CONFIGS"].(string); ok {
 				testConfig = v
 			}
 

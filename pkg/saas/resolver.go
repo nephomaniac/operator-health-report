@@ -46,7 +46,7 @@ type resourceTemplate struct {
 	Name       string            `yaml:"name"`
 	URL        string            `yaml:"url"`
 	Targets    []saasTarget      `yaml:"targets"`
-	Parameters map[string]string `yaml:"parameters"`
+	Parameters map[string]any `yaml:"parameters"`
 }
 
 type saasTarget struct {
@@ -55,7 +55,7 @@ type saasTarget struct {
 	Delete     bool              `yaml:"delete"`
 	Disable    bool              `yaml:"disable"`
 	Promotion  saasPromotion     `yaml:"promotion"`
-	Parameters map[string]string `yaml:"parameters"`
+	Parameters map[string]any `yaml:"parameters"`
 	Namespace  saasNamespace     `yaml:"namespace"`
 }
 

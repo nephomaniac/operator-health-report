@@ -269,9 +269,19 @@ var (
 		OLMSaas:    "saas-osd-metrics-exporter.yaml",
 	}
 
+	SFOConfig = OperatorConfig{
+		Name:       "splunk-forwarder-operator",
+		ShortName:  "sfo",
+		Namespace:  "openshift-splunk-forwarder-operator",
+		Deployment: "splunk-forwarder-operator",
+		PKOSaas:    "saas-splunk-forwarder-operator-pko.yaml",
+		OLMSaas:    "saas-splunk-forwarder-operator.yaml",
+	}
+
 	AllOperators = map[string]OperatorConfig{
 		"camo": CAMOConfig,
 		"rmo":  RMOConfig,
 		"ome":  OMEConfig,
+		"sfo":  SFOConfig,
 	}
 )
