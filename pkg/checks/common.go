@@ -96,11 +96,27 @@ func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 	podCount := 0
 	podsNotRunning := 0
 
+	var podIssues []map[string]any
 	if err == nil {
 		podCount = len(pods.Items)
 		for _, pod := range pods.Items {
 			if pod.Status.Phase != corev1.PodRunning {
 				podsNotRunning++
+				issue := map[string]any{
+					"pod":   fmt.Sprintf("%s/%s", cc.Operator.Namespace, pod.Name),
+					"phase": string(pod.Status.Phase),
+				}
+				for _, cs := range pod.Status.ContainerStatuses {
+					if cs.State.Waiting != nil {
+						issue["waiting_reason"] = cs.State.Waiting.Reason
+						issue["waiting_message"] = cs.State.Waiting.Message
+					}
+					if cs.State.Terminated != nil {
+						issue["terminated_reason"] = cs.State.Terminated.Reason
+						issue["exit_code"] = cs.State.Terminated.ExitCode
+					}
+				}
+				podIssues = append(podIssues, issue)
 			}
 			for _, cs := range pod.Status.ContainerStatuses {
 				totalRestarts += int(cs.RestartCount)
@@ -111,6 +127,9 @@ func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 	r.Details["pod_count"] = podCount
 	r.Details["total_restarts"] = totalRestarts
 	r.Details["pods_not_running"] = podsNotRunning
+	if len(podIssues) > 0 {
+		r.Details["pod_issues"] = podIssues
+	}
 
 	switch {
 	case podCount == 0:
@@ -168,10 +187,17 @@ func CheckPKOHealth(ctx context.Context, cc *ClusterContext) {
 	progressingMsg := conditionMessage(conditions, "Progressing")
 	availableMsg := conditionMessage(conditions, "Available")
 
+	r.Details["package"] = fmt.Sprintf("clusterpackage/%s", packageName)
 	r.Details["available"] = available
 	r.Details["progressing"] = progressing
 	r.Details["unpacked"] = unpacked
 	r.Details["cluster_package_exists"] = true
+	if availableMsg != "" {
+		r.Details["available_message"] = availableMsg
+	}
+	if progressingMsg != "" {
+		r.Details["progressing_message"] = progressingMsg
+	}
 
 	switch {
 	case available == "True" && progressing == "False" && unpacked == "True":
@@ -680,31 +706,95 @@ func CheckPKOJobHealth(ctx context.Context, cc *ClusterContext) {
 	hungJobs := 0
 	failedJobs := 0
 	totalJobs := 0
+	var jobDetails []map[string]any
 
 	for _, job := range jobs.Items {
 		if !strings.Contains(job.Name, "olm-cleanup") && !strings.Contains(job.Name, "pko") {
 			continue
 		}
 		totalJobs++
-		if job.Status.Active > 0 {
+
+		isHung := job.Status.Active > 0
+		isFailed := job.Status.Failed > 0
+
+		if !isHung && !isFailed {
+			continue
+		}
+
+		if isHung {
 			hungJobs++
 		}
-		if job.Status.Failed > 0 {
+		if isFailed {
 			failedJobs++
 		}
+
+		detail := map[string]any{
+			"name":      fmt.Sprintf("%s/%s", cc.Operator.Namespace, job.Name),
+			"active":    job.Status.Active,
+			"failed":    job.Status.Failed,
+			"succeeded": job.Status.Succeeded,
+		}
+
+		// Capture conditions for failure reason
+		for _, cond := range job.Status.Conditions {
+			if cond.Type == "Failed" && cond.Status == "True" {
+				detail["failure_reason"] = cond.Reason
+				detail["failure_message"] = cond.Message
+			}
+		}
+
+		// Try to get logs from the most recent failed pod
+		if isFailed {
+			pods, podErr := cc.Client.GetPods(ctx, cc.Operator.Namespace, fmt.Sprintf("job-name=%s", job.Name))
+			if podErr == nil && len(pods.Items) > 0 {
+				for _, pod := range pods.Items {
+					if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+						logs, logErr := cc.Client.GetPodLogs(ctx, cc.Operator.Namespace, pod.Name, 20)
+						if logErr == nil && logs != "" {
+							detail["pod_name"] = pod.Name
+							detail["pod_phase"] = string(pod.Status.Phase)
+							// Truncate to last 500 chars
+							if len(logs) > 500 {
+								logs = "..." + logs[len(logs)-500:]
+							}
+							detail["pod_logs"] = logs
+						}
+						// Get termination reason from container status
+						for _, cs := range pod.Status.ContainerStatuses {
+							if cs.State.Terminated != nil {
+								detail["exit_code"] = cs.State.Terminated.ExitCode
+								detail["termination_reason"] = cs.State.Terminated.Reason
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+
+		jobDetails = append(jobDetails, detail)
 	}
 
 	r.Details["total_cleanup_jobs"] = totalJobs
 	r.Details["hung_jobs"] = hungJobs
 	r.Details["failed_jobs"] = failedJobs
+	if len(jobDetails) > 0 {
+		r.Details["job_details"] = jobDetails
+	}
+
+	// Build message with job names
+	jobNames := make([]string, len(jobDetails))
+	for i, d := range jobDetails {
+		jobNames[i] = d["name"].(string)
+	}
 
 	switch {
 	case hungJobs > 0:
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("%d PKO cleanup job(s) still active (may be hung)", hungJobs)
+		r.Message = fmt.Sprintf("%d PKO cleanup job(s) still active (may be hung): %s", hungJobs, strings.Join(jobNames, ", "))
 	case failedJobs > 0:
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("%d PKO cleanup job(s) failed", failedJobs)
+		r.Message = fmt.Sprintf("%d PKO cleanup job(s) failed: %s", failedJobs, strings.Join(jobNames, ", "))
 	case totalJobs > 3:
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("%d stale cleanup jobs", totalJobs)
