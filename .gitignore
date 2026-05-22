@@ -9,6 +9,8 @@
 results_*/
 health_*.json
 health_*.html
+*_results.json
+*_results.html
 *.out
 *.log
 
@@ -29,27 +31,24 @@ health_*.html
 /rhobs-synthetics-api
 /route-monitor-operator
 
-# Scratch — one-off investigation scripts not part of the tool
+# Scratch scripts
 /scratch/
 /analyze_*.sh
 /check_*.sh
-/collect_ebs_*.sh
+/collect_*.sh
 /debug_*.sh
 /filter_*.sh
 /find_*.sh
 /get_*.sh
-!/lib/get_app_interface_saas_refs.sh
-!/lib/get_app_interface_saas_refs_with_images.sh
+/get-*.sh
 /investigate_*.sh
 /map_*.sh
 /run_*.sh
-!/run.sh
 /simple_*.sh
 /test_*.sh
 /verify_*.sh
-/get-*.sh
 
-# Scratch — one-off investigation docs
+# Scratch docs
 /ALERT_*.md
 /ANALYSIS_*.md
 /ARCHITECTURE.md
@@ -70,8 +69,17 @@ health_*.html
 /PROPOSED_*.md
 /RECOMMENDED_*.md
 /RUN_ON_*.md
+/VERSION_*.md
+/DEBUG_*.md
+/ELEVATION_*.md
+/FILES_*.md
+/HEALTH_CHECK_*.md
+/HTML_*.md
+/PUBLIC_*.md
+/READY_*.md
+/SANITIZATION_*.md
 
-# Scratch — one-off YAML/data artifacts
+# Scratch data
 /100-*.yaml
 /camo_*.yaml
 /cluster_*.md
@@ -89,9 +97,6 @@ health_*.html
 .vscode/
 .idea/
 *.swp
-
-# Claude skills (user-specific)
-.claude/skills/
 
 # Environment config
 .env
