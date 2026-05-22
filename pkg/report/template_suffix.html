@@ -1479,6 +1479,7 @@
             tableHeader.innerHTML = headerHTML;
 
             let currentShard = null;
+            let shardIdx = 0;
             const totalColumns = checkTypes.length + 7;
             operatorData.forEach((cluster, idx) => {
                 const clusterIdx = `${idPrefix}-${idx}`;
@@ -1486,10 +1487,10 @@
 
                 if (clusterShard !== currentShard) {
                     currentShard = clusterShard;
+                    shardIdx++;
+                    const shardGroupId = `shard-group-${idPrefix}-${shardIdx}`;
                     const shardClusters = operatorData.filter(c => (c.hive_shard || c.health_checks?.find(ch => ch.check === 'version_verification')?.details?.target_name || 'unknown') === clusterShard);
 
-                    // Collect all expected versions seen across clusters in this shard
-                    // SAAS targets can update mid-run, so different clusters may have different expected versions
                     const versionGroups = {};
                     let shardTarget = '';
                     shardClusters.forEach(c => {
@@ -1505,7 +1506,7 @@
                     });
                     const versionEntries = Object.entries(versionGroups);
 
-                    let shardInfo = `Hive Shard: ${clusterShard} (${shardClusters.length} clusters)`;
+                    let shardInfo = `<span style="cursor:pointer;user-select:none;">▼</span> Hive Shard: ${clusterShard} (${shardClusters.length} clusters)`;
                     if (versionEntries.length === 1) {
                         shardInfo += `<span style="margin-left:16px;font-weight:400;font-size:0.9em;">` +
                             `Expected Version: <span style="color:#5eecc0;font-weight:600;">${versionEntries[0][0]}</span>` +
@@ -1523,6 +1524,16 @@
 
                     const shardRow = document.createElement('tr');
                     shardRow.className = 'shard-group-header';
+                    shardRow.style.cursor = 'pointer';
+                    shardRow.onclick = function() {
+                        const rows = document.querySelectorAll(`.${shardGroupId}`);
+                        const arrow = this.querySelector('span');
+                        const isHidden = rows.length > 0 && rows[0].style.display === 'none';
+                        rows.forEach(r => r.style.display = isHidden ? '' : 'none');
+                        if (arrow) arrow.textContent = isHidden ? '▼' : '▶';
+                    };
+                    shardRow.onmouseover = function() { this.style.background = 'var(--bg-hover)'; };
+                    shardRow.onmouseout = function() { this.style.background = ''; };
                     shardRow.innerHTML = `<td colspan="${totalColumns}" style="padding: 8px 14px; font-weight: 600; letter-spacing: 0.04em;">${shardInfo}</td>`;
                     tableBody.appendChild(shardRow);
                 }
@@ -1532,9 +1543,10 @@
                 const errors = getLogErrors(cluster);
                 const warnings = getLogWarnings(cluster);
 
+                const currentShardGroupId = `shard-group-${idPrefix}-${shardIdx}`;
                 const mainRow = document.createElement('tr');
                 mainRow.id = `cluster-row-${clusterIdx}`;
-                mainRow.className = 'main-row';
+                mainRow.className = `main-row ${currentShardGroupId}`;
                 mainRow.onclick = () => toggleClusterDetails(clusterIdx);
 
                 // If cluster has health checks, connection succeeded (native Go backplane)
@@ -1563,7 +1575,7 @@
 
                 const detailsRow = document.createElement('tr');
                 detailsRow.id = `cluster-details-${clusterIdx}`;
-                detailsRow.className = 'cluster-details-row';
+                detailsRow.className = `cluster-details-row ${currentShardGroupId}`;
                 const detailsCell = document.createElement('td');
                 detailsCell.className = 'cluster-details-cell';
                 detailsCell.colSpan = totalColumns;
@@ -1595,7 +1607,7 @@
                     const statusIcons = {
                         'limited_support': '🛡',
                         'not_ready': '⏸',
-                        'connection_failed': '🔌',
+                        'connection_failed': '⚡',
                         'metadata_failed': '❓'
                     };
                     const statusLabels = {
