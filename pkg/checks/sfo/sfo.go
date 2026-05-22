@@ -39,20 +39,22 @@ func (c *SFOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 		checkDaemonSetHealth(ctx, cc)
 		checkForwarderPods(ctx, cc)
 	} else {
-		// No CR — skip DaemonSet/pod checks with clear explanation
+		// No CR — skip DaemonSet/pod checks with explanation of dependency chain
 		cc.CurrentCheck = "sfo_daemonset_health"
 		cc.AddResult(checks.Result{
 			Check:    "sfo_daemonset_health",
 			Status:   checks.StatusSkip,
 			Severity: checks.SeverityInfo,
-			Message:  fmt.Sprintf("Skipped — no SplunkForwarder CR in %s (DaemonSet is created by operator from CR)", cc.Operator.Namespace),
+			Message:  fmt.Sprintf("Skipped — no SplunkForwarder CR in %s", cc.Operator.Namespace),
+			Details:  map[string]any{"dependency": "SplunkForwarder CR → operator reconcile → DaemonSet creation"},
 		})
 		cc.CurrentCheck = "sfo_forwarder_pods"
 		cc.AddResult(checks.Result{
 			Check:    "sfo_forwarder_pods",
 			Status:   checks.StatusSkip,
 			Severity: checks.SeverityInfo,
-			Message:  fmt.Sprintf("Skipped — no SplunkForwarder CR in %s (pods are created by DaemonSet from CR)", cc.Operator.Namespace),
+			Message:  fmt.Sprintf("Skipped — no SplunkForwarder CR in %s", cc.Operator.Namespace),
+			Details:  map[string]any{"dependency": "SplunkForwarder CR → DaemonSet → forwarder pods on each node"},
 		})
 	}
 }
@@ -252,8 +254,9 @@ func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) bool
 	r.Details["cr_count"] = crCount
 
 	if crCount == 0 {
-		r.Status = checks.StatusInfo
-		r.Message = fmt.Sprintf("No SplunkForwarder CR in %s — forwarder not configured on this cluster", cc.Operator.Namespace)
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("No SplunkForwarder CR in %s — CR is deployed via SSS with the operator package, absence may indicate a Hive ClusterSync issue", cc.Operator.Namespace)
+		r.Details["investigation"] = "The SplunkForwarder CR is bundled in the operator's SSS template. If the operator namespace exists but the CR is missing, check Hive ClusterSync status on the hive shard for this cluster."
 		cc.AddResult(r)
 		return false
 	}
@@ -337,9 +340,9 @@ func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
 		r.Status = checks.StatusFail
 		r.Message = fmt.Sprintf("Required secret(s) missing: %s — operator cannot reconcile SplunkForwarder CR without this", strings.Join(missing, ", "))
 	case len(missing) > 0 && !hasCR:
-		r.Status = checks.StatusInfo
-		r.Severity = checks.SeverityInfo
-		r.Message = fmt.Sprintf("Secret(s) not present: %s (expected — no SplunkForwarder CR configured)", strings.Join(missing, ", "))
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Secret(s) not present: %s (CR also missing — possible SSS sync issue)", strings.Join(missing, ", "))
+		r.Details["investigation"] = "Both the SplunkForwarder CR and secrets are deployed via the operator's SSS. If the operator pod is running but these are missing, check Hive ClusterSync."
 	default:
 		r.Status = checks.StatusPass
 		r.Message = fmt.Sprintf("%d secret(s) present", found)
