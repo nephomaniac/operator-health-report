@@ -1537,7 +1537,9 @@
                 mainRow.className = 'main-row';
                 mainRow.onclick = () => toggleClusterDetails(clusterIdx);
 
-                const loginStatus = cluster.backplane_login?.status || 'UNKNOWN';
+                // If cluster has health checks, connection succeeded (native Go backplane)
+                const hasChecks = (cluster.health_checks || []).length > 0;
+                const loginStatus = cluster.backplane_login?.status || (hasChecks ? 'SUCCESS' : 'UNKNOWN');
                 const loginIcon = loginStatus === 'SUCCESS' ? '✓' : (loginStatus === 'FAILED' ? '✗' : '?');
                 const loginClass = loginStatus === 'SUCCESS' ? 'status-pass' : (loginStatus === 'FAILED' ? 'status-critical' : 'status-unknown');
 

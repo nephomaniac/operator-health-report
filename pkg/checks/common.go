@@ -715,7 +715,7 @@ func CheckPKOJobHealth(ctx context.Context, cc *ClusterContext) {
 		totalJobs++
 
 		isHung := job.Status.Active > 0
-		isFailed := job.Status.Failed > 0
+		isFailed := job.Status.Failed > 0 && job.Status.Succeeded == 0
 
 		if !isHung && !isFailed {
 			continue
