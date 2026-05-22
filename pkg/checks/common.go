@@ -31,6 +31,10 @@ func CheckNamespace(ctx context.Context, cc *ClusterContext) {
 	}
 
 	switch {
+	case err != nil && IsAccessError(err):
+		r.Status = StatusAccessDenied
+		r.Severity = SeverityInfo
+		r.Message = fmt.Sprintf("Cannot access namespace %s: %v", cc.Operator.Namespace, err)
 	case err != nil || phase == "":
 		r.Status = StatusFail
 		r.Message = fmt.Sprintf("Namespace %s does not exist", cc.Operator.Namespace)
@@ -62,9 +66,15 @@ func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 	}
 
 	if err != nil {
-		r.Status = StatusFail
-		r.Severity = SeverityCritical
-		r.Message = fmt.Sprintf("Deployment %s/%s not found: %v", cc.Operator.Namespace, cc.Operator.Deployment, err)
+		if IsAccessError(err) {
+			r.Status = StatusAccessDenied
+			r.Severity = SeverityInfo
+			r.Message = fmt.Sprintf("Cannot access deployment %s/%s: %v", cc.Operator.Namespace, cc.Operator.Deployment, err)
+		} else {
+			r.Status = StatusFail
+			r.Severity = SeverityCritical
+			r.Message = fmt.Sprintf("Deployment %s/%s not found: %v", cc.Operator.Namespace, cc.Operator.Deployment, err)
+		}
 		cc.AddResult(r)
 		return
 	}

@@ -189,6 +189,20 @@ func (cc *ClusterContext) ElevationSkipResult(checkName string) Result {
 	return r
 }
 
+// IsAccessError returns true if the error is an RBAC/auth/forbidden issue
+func IsAccessError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "forbidden") ||
+		strings.Contains(msg, "Forbidden") ||
+		strings.Contains(msg, "Unauthorized") ||
+		strings.Contains(msg, "cannot get resource") ||
+		strings.Contains(msg, "cannot list resource") ||
+		strings.Contains(msg, "access request")
+}
+
 // OverallStatus returns CRITICAL, WARNING, or HEALTHY
 func (cc *ClusterContext) OverallStatus() string {
 	for _, r := range cc.Results {

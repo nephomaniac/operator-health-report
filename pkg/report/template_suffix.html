@@ -109,8 +109,13 @@
         // Determine if a check failure was caused by API/script errors
         // rather than an actual operator health issue
         function getEffectiveStatus(cluster, check) {
+            if (check.status === 'ACCESS_DENIED') return check.status;
             if (check.status !== 'FAIL' && check.status !== 'WARNING') return check.status;
             const apiErrors = (cluster.api_errors || []).filter(e => e.check === check.check);
+            // Check if errors are RBAC/access related
+            const hasAccessError = apiErrors.some(e =>
+                (e.error_message || '').match(/forbidden|cannot get resource|cannot list resource|Unauthorized/i));
+            if (hasAccessError) return 'ACCESS_DENIED';
             if (apiErrors.length > 0 && check.status === 'FAIL') return 'ERROR';
             return check.status;
         }
