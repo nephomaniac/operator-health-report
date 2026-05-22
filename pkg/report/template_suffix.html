@@ -1532,9 +1532,9 @@
                         rows.forEach(r => r.style.display = isHidden ? '' : 'none');
                         if (arrow) arrow.textContent = isHidden ? '▼' : '▶';
                     };
-                    shardRow.onmouseover = function() { this.style.background = 'var(--bg-hover)'; };
-                    shardRow.onmouseout = function() { this.style.background = ''; };
-                    shardRow.innerHTML = `<td colspan="${totalColumns}" style="padding: 8px 14px; font-weight: 600; letter-spacing: 0.04em;">${shardInfo}</td>`;
+                    shardRow.onmouseover = function() { this.querySelector('div').style.background = 'linear-gradient(135deg,#353848,#454a62)'; this.querySelector('div').style.boxShadow = '0 2px 8px rgba(102,126,234,0.2),inset 0 1px 0 rgba(255,255,255,0.08)'; };
+                    shardRow.onmouseout = function() { this.querySelector('div').style.background = 'linear-gradient(135deg,#2a2d3a,#3a3f52)'; this.querySelector('div').style.boxShadow = '0 1px 3px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.05)'; };
+                    shardRow.innerHTML = `<td colspan="${totalColumns}" style="padding:0;"><div style="display:inline-flex;align-items:center;gap:6px;margin:6px 10px;padding:6px 14px;border-radius:6px;background:linear-gradient(135deg,#2a2d3a,#3a3f52);border:1px solid rgba(255,255,255,0.08);box-shadow:0 1px 3px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.05);font-weight:600;letter-spacing:0.04em;font-size:0.88em;transition:all 0.15s;">${shardInfo}</div></td>`;
                     tableBody.appendChild(shardRow);
                 }
 
