@@ -52,12 +52,13 @@ type APIError struct {
 
 // OperatorConfig defines an operator to check
 type OperatorConfig struct {
-	Name       string `json:"name"`
-	ShortName  string `json:"short_name"`
-	Namespace  string `json:"namespace"`
-	Deployment string `json:"deployment"`
-	PKOSaas    string `json:"pko_saas"`
-	OLMSaas    string `json:"olm_saas"`
+	Name             string `json:"name"`
+	ShortName        string `json:"short_name"`
+	Namespace        string `json:"namespace"`
+	Deployment       string `json:"deployment"`
+	PKOSaas          string `json:"pko_saas"`
+	OLMSaas          string `json:"olm_saas"`
+	SkipCommonChecks bool   `json:"skip_common_checks,omitempty"`
 }
 
 // ClusterMetadata holds OCM cluster properties for display in reports
@@ -278,10 +279,19 @@ var (
 		OLMSaas:    "saas-splunk-forwarder-operator.yaml",
 	}
 
+	RHOBSConfig = OperatorConfig{
+		Name:             "rhobs-observability",
+		ShortName:        "rhobs",
+		Namespace:        "openshift-observability-operator",
+		Deployment:       "",
+		SkipCommonChecks: true,
+	}
+
 	AllOperators = map[string]OperatorConfig{
-		"camo": CAMOConfig,
-		"rmo":  RMOConfig,
-		"ome":  OMEConfig,
-		"sfo":  SFOConfig,
+		"camo":  CAMOConfig,
+		"rmo":   RMOConfig,
+		"ome":   OMEConfig,
+		"sfo":   SFOConfig,
+		"rhobs": RHOBSConfig,
 	}
 )

@@ -61,6 +61,8 @@
                             if (chartType === 'cpu') createCPUChart(el.id, chartData, restarts, versions);
                             if (chartType === 'probe') createProbeChart(el.id, chartData, restarts, versions);
                             if (chartType === 'duration') createDurationChart(el.id, chartData, restarts, versions);
+                            if (chartType === 'sfo-throughput') createSFOThroughputChart(el.id, chartData, restarts, versions);
+                            if (chartType === 'sfo-errors') createSFOErrorChart(el.id, chartData, restarts, versions);
                         }, 50);
                     });
                 }
@@ -347,7 +349,27 @@
                 'ome_proxy_ca_health': 'Proxy CA',
                 'ome_servicemonitor_health': 'OME SvcMon',
                 'ome_identity_providers': 'IDPs',
-                'log_error_analysis': 'Log Analysis'
+                'log_error_analysis': 'Log Analysis',
+                'sfo_controller_availability': 'SFO Controller',
+                'sfo_splunkforwarder_cr': 'SplunkFwd CR',
+                'sfo_secrets': 'SFO Secrets',
+                'sfo_daemonset_health': 'Forwarder DS',
+                'sfo_forwarder_pods': 'Forwarder Pods',
+                'sfo_configmaps': 'SFO ConfigMaps',
+                'sfo_audit_exporter': 'Audit Exporter',
+                'sfo_forwarder_metrics': 'SFO Metrics',
+                'sfo_servicemonitor': 'SFO SvcMon',
+                'sfo_prometheusrule': 'SFO PromRule',
+                'rhobs_cluster_type': 'Cluster Type',
+                'rhobs_monitoring_stack': 'MonitoringStack',
+                'rhobs_monitoring_credentials': 'RHOBS Creds',
+                'rhobs_metrics_destination': 'Metrics Dest',
+                'rhobs_log_forwarder': 'Log Forwarder',
+                'rhobs_log_event_collector': 'Event Collector',
+                'rhobs_log_token_refresher': 'Token Refresher',
+                'rhobs_platform_rules_namespace': 'Rules NS',
+                'rhobs_platform_rules': 'Platform Rules',
+                'rhobs_metrics_forwarder': 'HCP Fwd'
             };
 
             if (customNames[checkName]) {
@@ -732,6 +754,122 @@
             });
         }
 
+        function createSFOThroughputChart(canvasId, data, restartEvents, versionEvents) {
+            const ctx = document.getElementById(canvasId);
+            if (!ctx) return;
+            const fwdData = data.audit_forward_rate_timeseries || [];
+            const totalData = data.audit_total_rate_timeseries || [];
+            if (fwdData.length === 0 && totalData.length === 0) return;
+
+            const annotations = {};
+            const allTs = [...fwdData, ...totalData].map(p => parseFloat(p[0]) * 1000);
+            if (allTs.length > 0) {
+                addEventAnnotations(annotations, versionEvents, restartEvents, Math.min(...allTs), Math.max(...allTs));
+            }
+
+            const datasets = [];
+            if (totalData.length > 0) {
+                datasets.push({
+                    label: 'Total Events/sec',
+                    data: totalData.map(p => ({ x: parseFloat(p[0]) * 1000, y: parseFloat(p[1]) })),
+                    borderColor: '#667eea', backgroundColor: 'rgba(102,126,234,0.1)',
+                    tension: 0.4, fill: true, pointRadius: 1, pointHoverRadius: 4, borderWidth: 2
+                });
+            }
+            if (fwdData.length > 0) {
+                datasets.push({
+                    label: 'Forwarded Events/sec',
+                    data: fwdData.map(p => ({ x: parseFloat(p[0]) * 1000, y: parseFloat(p[1]) })),
+                    borderColor: '#28a745', backgroundColor: 'rgba(40,167,69,0.08)',
+                    tension: 0.4, fill: true, pointRadius: 1, pointHoverRadius: 4, borderWidth: 2
+                });
+            }
+            datasets.push({ label: '--- Version Update', data: [], borderColor: '#ff6384', borderDash: [5,5], pointRadius: 0 });
+            datasets.push({ label: '— Abnormal Restart', data: [], borderColor: '#ff9f40', pointRadius: 0 });
+
+            new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true, maintainAspectRatio: true,
+                    plugins: {
+                        legend: { display: true, position: 'top' },
+                        tooltip: {
+                            mode: 'index', intersect: false,
+                            callbacks: {
+                                title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
+                                label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + ' events/sec'
+                            }
+                        },
+                        annotation: { annotations }
+                    },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
+                        y: { beginAtZero: true, title: { display: true, text: 'Events/sec' } }
+                    }
+                }
+            });
+        }
+
+        function createSFOErrorChart(canvasId, data, restartEvents, versionEvents) {
+            const ctx = document.getElementById(canvasId);
+            if (!ctx) return;
+            const unhealthyData = data.component_unhealthy_timeseries || [];
+            const errData = data.audit_errors_timeseries || [];
+            if (unhealthyData.length === 0 && errData.length === 0) return;
+
+            const annotations = {};
+            const allTs = [...unhealthyData, ...errData].map(p => parseFloat(p[0]) * 1000);
+            if (allTs.length > 0) {
+                addEventAnnotations(annotations, versionEvents, restartEvents, Math.min(...allTs), Math.max(...allTs));
+            }
+
+            const datasets = [];
+            if (unhealthyData.length > 0) {
+                datasets.push({
+                    label: 'Component Unhealthy',
+                    data: unhealthyData.map(p => ({ x: parseFloat(p[0]) * 1000, y: parseFloat(p[1]) })),
+                    borderColor: '#e74c3c', backgroundColor: 'rgba(231,76,60,0.3)',
+                    pointRadius: 6, pointHoverRadius: 8, pointStyle: 'crossRot',
+                    showLine: false, borderWidth: 3
+                });
+            }
+            if (errData.length > 0) {
+                datasets.push({
+                    label: 'Audit Filter Errors/sec',
+                    data: errData.map(p => ({ x: parseFloat(p[0]) * 1000, y: parseFloat(p[1]) })),
+                    borderColor: '#f39c12', backgroundColor: 'rgba(243,156,18,0.3)',
+                    pointRadius: 5, pointHoverRadius: 7, pointStyle: 'triangle',
+                    showLine: false, borderWidth: 2
+                });
+            }
+            datasets.push({ label: '--- Version Update', data: [], borderColor: '#ff6384', borderDash: [5,5], pointRadius: 0 });
+            datasets.push({ label: '— Abnormal Restart', data: [], borderColor: '#ff9f40', pointRadius: 0 });
+
+            new Chart(ctx, {
+                type: 'scatter',
+                data: { datasets },
+                options: {
+                    responsive: true, maintainAspectRatio: true,
+                    plugins: {
+                        legend: { display: true, position: 'top' },
+                        tooltip: {
+                            mode: 'nearest', intersect: true,
+                            callbacks: {
+                                title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
+                                label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(4)
+                            }
+                        },
+                        annotation: { annotations }
+                    },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
+                        y: { beginAtZero: true, title: { display: true, text: 'Value' } }
+                    }
+                }
+            });
+        }
+
         function generateClusterDetails(cluster, clusterIdx) {
             const detailsDiv = document.createElement('div');
             detailsDiv.className = 'cluster-section';
@@ -1002,6 +1140,81 @@
 
                 // Legend is now inline in each chart via empty datasets
             }
+
+            // SFO-specific charts (splunk forwarder metrics)
+            const sfoMetricsCheck = (cluster.health_checks || []).find(c => c.check === 'sfo_forwarder_metrics');
+            if (sfoMetricsCheck && sfoMetricsCheck.details) {
+                const sfoDetails = sfoMetricsCheck.details;
+                const restartEvents = cluster.events && cluster.events.pod_restarts ? cluster.events.pod_restarts : [];
+                const versionEvents = cluster.events && cluster.events.version_changes ? cluster.events.version_changes : [];
+
+                const hasThroughput = (sfoDetails.audit_forward_rate_timeseries && sfoDetails.audit_forward_rate_timeseries.length > 0) ||
+                                     (sfoDetails.audit_total_rate_timeseries && sfoDetails.audit_total_rate_timeseries.length > 0);
+                const hasErrors = (sfoDetails.component_unhealthy_timeseries && sfoDetails.component_unhealthy_timeseries.length > 0) ||
+                                  (sfoDetails.audit_errors_timeseries && sfoDetails.audit_errors_timeseries.length > 0);
+
+                if (hasThroughput) {
+                    const throughputDiv = document.createElement('div');
+                    throughputDiv.className = 'chart-wrapper';
+                    throughputDiv.innerHTML = `
+                        <h3>Splunk Audit Filter — Event Throughput (7d)</h3>
+                        <canvas id="sfo-throughput-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="sfo-throughput"
+                            data-chart-data='${JSON.stringify(sfoDetails).replace(/'/g, "&#39;")}'
+                            data-restart-events='${JSON.stringify(restartEvents).replace(/'/g, "&#39;")}'
+                            data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Note:</strong> Total events = all KAS audit log events ingested by the audit filter.
+                            Forwarded events = events that passed filtering and were sent to Splunk.
+                            A healthy ratio means the filter is dropping noisy events as expected.
+                        </div>
+                        <div style="margin-top: 6px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-family: monospace; font-size: 0.75em; color: #333; word-break: break-all;">
+                            <strong>Queries:</strong><br>
+                            Forward: sum(rate(splunkforwarder_audit_filter_events_processed_total{decision="forward"}[1h]))<br>
+                            Total: sum(rate(splunkforwarder_audit_filter_events_total[1h]))
+                        </div>
+                    `;
+                    chartsDiv.appendChild(throughputDiv);
+                }
+
+                if (hasErrors) {
+                    const errorsDiv = document.createElement('div');
+                    errorsDiv.className = 'chart-wrapper';
+                    const unhealthyCount = sfoDetails.component_unhealthy_error_count || 0;
+                    const auditErrCount = sfoDetails.audit_errors_error_count || 0;
+                    const summaryNote = (unhealthyCount === 0 && auditErrCount === 0)
+                        ? 'No errors detected in the 7-day window — all clear.'
+                        : `${unhealthyCount} unhealthy component event(s), ${auditErrCount} audit error event(s) in 7 days.`;
+                    errorsDiv.innerHTML = `
+                        <h3>Splunk Forwarder — Error Events (7d, non-zero only)</h3>
+                        <canvas id="sfo-errors-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="sfo-errors"
+                            data-chart-data='${JSON.stringify(sfoDetails).replace(/'/g, "&#39;")}'
+                            data-restart-events='${JSON.stringify(restartEvents).replace(/'/g, "&#39;")}'
+                            data-version-events='${JSON.stringify(versionEvents).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Note:</strong> ${summaryNote}
+                            Only non-zero data points are shown — an empty chart means healthy for the entire period.
+                            Component Unhealthy (✕) = splunk_forwarder_component_unhealthy metric.
+                            Audit Errors (▲) = rate(splunkforwarder_audit_filter_errors_total).
+                        </div>
+                    `;
+                    chartsDiv.appendChild(errorsDiv);
+                } else if (sfoMetricsCheck.status === 'PASS') {
+                    const healthyDiv = document.createElement('div');
+                    healthyDiv.className = 'chart-wrapper';
+                    healthyDiv.innerHTML = `
+                        <h3>Splunk Forwarder — Error Events (7d)</h3>
+                        <div style="padding: 30px; text-align: center; color: #28a745; font-size: 1.1em;">
+                            ✓ No errors detected — all forwarder components healthy for the entire 7-day window
+                        </div>
+                    `;
+                    chartsDiv.appendChild(healthyDiv);
+                }
+            }
+
             detailsDiv.appendChild(chartsDiv);
 
             // Health checks
@@ -1026,6 +1239,7 @@
                     </div>
                     <div class="check-details" id="check-details-${checkId}">
                         ${check.message ? `<div class="check-message">${check.message}</div>` : ''}
+                        ${check.details?.source_repo ? `<div style="margin:4px 0 6px;"><span style="display:inline-block;padding:2px 8px;background:#667eea;color:#fff;border-radius:3px;font-size:0.75em;font-weight:600;letter-spacing:0.03em;">SOURCE: ${check.details.source_repo}</span></div>` : ''}
                         ${check.details?.description ? `<div style="margin:4px 0 8px;padding:8px 10px;background:rgba(102,126,234,0.08);border-left:3px solid #667eea;border-radius:3px;font-size:0.85em;color:#555;">${check.details.description}</div>` : ''}
                         ${(() => {
                             const checkErrors = (cluster.api_errors || []).filter(e => e.check === check.check);
@@ -1037,7 +1251,7 @@
                         })()}
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
-                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples')) return '';
+                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo') return '';
 
                                 // Custom rendering for OME per-metric table
                                 if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {
@@ -1343,7 +1557,7 @@
                     '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);">' +
                         '<div class="stat-label">Script/API Errors</div>' +
                         '<div class="stat-number" style="color: #dc3545;">' + totalApiErrors + '</div>' +
-                        '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO').replace(/osd-metrics-exporter/, 'OME') + ': ' + n).join(', ') + '</div>' +
+                        '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS') + ': ' + n).join(', ') + '</div>' +
                     '</div>' : '') +
                 '</div>' +
                 // CVE Security Section (optional)
@@ -1687,7 +1901,7 @@
             // Build tabs and tab content for each operator (always show tabs)
             operators.forEach((op, idx) => {
                 const opData = sortClusters(operatorGroups[op]);
-                const shortName = op.replace(/-operator$/, '').replace(/configure-alertmanager/, 'CAMO').replace(/route-monitor/, 'RMO').replace(/osd-metrics-exporter/, 'OME');
+                const shortName = op.replace(/-operator$/, '').replace(/configure-alertmanager/, 'CAMO').replace(/route-monitor/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS');
 
                 // Count statuses for badge — non-exclusive, a cluster can be both crit and warn
                 let okCount = 0, warnCount = 0, critCount = 0;

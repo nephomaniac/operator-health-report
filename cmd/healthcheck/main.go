@@ -25,6 +25,7 @@ import (
 	// Import operator checkers for init() registration
 	_ "github.com/openshift/operator-health-report/pkg/checks/camo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/ome"
+	_ "github.com/openshift/operator-health-report/pkg/checks/rhobs"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rmo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/sfo"
 )
@@ -138,7 +139,7 @@ func main() {
 	for _, op := range operators {
 		cfg, ok := checks.AllOperators[op]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "Error: unknown operator %q (valid: camo, rmo, ome)\n", op)
+			fmt.Fprintf(os.Stderr, "Error: unknown operator %q (valid: camo, rmo, ome, sfo, rhobs)\n", op)
 			os.Exit(1)
 		}
 		opConfigs = append(opConfigs, cfg)

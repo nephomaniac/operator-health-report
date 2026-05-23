@@ -28,10 +28,10 @@ func GetChecker(shortName string) OperatorChecker {
 
 // RunOperatorChecks runs common checks then operator-specific checks
 func RunOperatorChecks(ctx context.Context, cc *ClusterContext) {
-	// Common checks first (all operators)
-	RunAllCommonChecks(ctx, cc)
+	if !cc.Operator.SkipCommonChecks {
+		RunAllCommonChecks(ctx, cc)
+	}
 
-	// Operator-specific checks (if registered)
 	if checker := GetChecker(cc.Operator.ShortName); checker != nil {
 		checker.RunChecks(ctx, cc)
 	}
