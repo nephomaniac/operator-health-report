@@ -62,6 +62,7 @@ func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext)
 	hasRHOBS := checkMonitoringStack(ctx, cc)
 	checkMonitoringCredentials(ctx, cc, hasRHOBS)
 	checkMetricsDestination(ctx, cc, hasRHOBS)
+	checkRemoteWriteConfig(ctx, cc, hasRHOBS)
 	checkPrometheusStatefulSets(ctx, cc, hasRHOBS)
 
 	// Log collection (source: rhobs/configuration)
@@ -69,6 +70,7 @@ func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext)
 	checkLogCollectorDaemonSet(ctx, cc)
 	checkLogEventCollector(ctx, cc)
 	checkLogTokenRefresher(ctx, cc, hasRHOBS)
+	checkLogDestination(ctx, cc)
 
 	// Control plane log forwarding (source: rhobs/configuration)
 	if cc.ClusterType == "management_cluster" {
@@ -80,6 +82,9 @@ func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext)
 		checkPlatformRulesNamespace(ctx, cc)
 		checkPlatformRules(ctx, cc)
 	}
+
+	// CLF conditions (source: rhobs/configuration)
+	checkCLFConditions(ctx, cc)
 
 	// Metrics forwarder — MC only (source: hypershift-dataplane-metrics-forwarder)
 	if cc.ClusterType == "management_cluster" {
@@ -226,6 +231,82 @@ func checkMetricsDestination(ctx context.Context, cc *checks.ClusterContext, has
 	r.Message = "Metrics destination ConfigMap exists"
 	if cm.Data != nil {
 		r.Details["keys"] = mapKeys(cm.Data)
+	}
+	cc.AddResult(r)
+}
+
+func checkRemoteWriteConfig(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
+	cc.CurrentCheck = "rhobs_remote_write_config"
+
+	r := checks.Result{
+		Check:    "rhobs_remote_write_config",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"source_repo": "rhobs/configuration",
+			"namespace":   observabilityNS,
+			"description": "MonitoringStack remote-write configuration to RHOBS cell",
+		},
+	}
+
+	if !hasRHOBS {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — RHOBS metric collection not configured on this cluster"
+		r.Severity = checks.SeverityInfo
+		cc.AddResult(r)
+		return
+	}
+
+	ms, err := cc.Client.GetResource(ctx, monitoringStackGVR, observabilityNS, "rhobs-hypershift-monitoring-stack", false)
+	cc.RecordError("Get MonitoringStack for remote-write", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Cannot access MonitoringStack: %v", err)
+		cc.AddResult(r)
+		return
+	}
+
+	rwConfigs, found, _ := unstructured.NestedSlice(ms.Object, "spec", "prometheusConfig", "remoteWrite")
+	if !found || len(rwConfigs) == 0 {
+		r.Status = checks.StatusFail
+		r.Message = "MonitoringStack has no remoteWrite configuration — metrics are not being forwarded to RHOBS"
+		cc.AddResult(r)
+		return
+	}
+
+	var rwNames []string
+	var rwURLs []string
+	hasOIDC := true
+
+	for _, rw := range rwConfigs {
+		rwMap, ok := rw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := rwMap["name"].(string)
+		url, _ := rwMap["url"].(string)
+		rwNames = append(rwNames, name)
+		rwURLs = append(rwURLs, url)
+		if _, hasAuth := rwMap["oauth2"]; !hasAuth {
+			hasOIDC = false
+		}
+	}
+
+	r.Details["remote_write_count"] = len(rwConfigs)
+	r.Details["remote_write_names"] = rwNames
+	r.Details["remote_write_urls"] = rwURLs
+	r.Details["all_have_oauth2"] = hasOIDC
+
+	if !hasOIDC {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d remote-write config(s) found but some lack OAuth2 authentication", len(rwConfigs))
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d remote-write config(s) with OAuth2 auth: %s", len(rwConfigs), strings.Join(rwNames, ", "))
 	}
 	cc.AddResult(r)
 }
@@ -582,6 +663,50 @@ func checkLogTokenRefresher(ctx context.Context, cc *checks.ClusterContext, hasR
 	cc.AddResult(r)
 }
 
+func checkLogDestination(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rhobs_log_destination"
+
+	r := checks.Result{
+		Check:    "rhobs_log_destination",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"source_repo":       "rhobs/configuration",
+			"namespace":         loggingNS,
+			"resource":          "ConfigMap/rhobs-logs-destination",
+			"expected_annotation": "rhobs.openshift.io/forwarding-destination",
+		},
+	}
+
+	cm, err := cc.Client.Clientset().CoreV1().ConfigMaps(loggingNS).Get(ctx, "rhobs-logs-destination", metav1.GetOptions{})
+	cc.RecordError("Get logs destination ConfigMap", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Log destination ConfigMap not found in %s — RHOBS log forwarding may not be configured", loggingNS)
+		cc.AddResult(r)
+		return
+	}
+
+	dest := ""
+	if cm.Annotations != nil {
+		dest = cm.Annotations["rhobs.openshift.io/forwarding-destination"]
+	}
+	r.Details["forwarding_destination"] = dest
+
+	if dest != "" {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Log destination configured: %s", dest)
+	} else {
+		r.Status = checks.StatusWarning
+		r.Message = "Log destination ConfigMap exists but missing rhobs.openshift.io/forwarding-destination annotation"
+	}
+	cc.AddResult(r)
+}
+
 // --- Control Plane Log Forwarding — MC only (source: rhobs/configuration) ---
 
 const cpLogForwardingNS = "hypershift-control-plane-log-forwarding"
@@ -747,6 +872,107 @@ func checkPlatformRules(ctx context.Context, cc *checks.ClusterContext) {
 	} else {
 		r.Status = checks.StatusWarning
 		r.Message = "No monitoring.rhobs PrometheusRules found — platform recording/alerting rules may not be deployed"
+	}
+	cc.AddResult(r)
+}
+
+// --- CLF Conditions (rhobs/configuration) ---
+
+func checkCLFConditions(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rhobs_clf_conditions"
+
+	r := checks.Result{
+		Check:    "rhobs_clf_conditions",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"source_repo":         "rhobs/configuration",
+			"namespace":           loggingNS,
+			"expected_conditions": "Authorized=True, Valid=True, Ready=True",
+		},
+	}
+
+	clfList, err := cc.Client.ListResources(ctx, clusterLogForwarderGVR, loggingNS, false)
+	cc.RecordError("List CLFs for condition check", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		if isNotFoundOrCRDMissing(err) {
+			r.Status = checks.StatusSkip
+			r.Message = "ClusterLogForwarder CRD not available"
+		} else {
+			r.Status = checks.StatusFail
+			r.Message = fmt.Sprintf("Cannot list CLFs: %v", err)
+		}
+		cc.AddResult(r)
+		return
+	}
+
+	var rhobsCLFs []string
+	allHealthy := true
+	var issues []string
+
+	for _, clf := range clfList.Items {
+		name := clf.GetName()
+		if !strings.HasPrefix(name, "rhobs") {
+			continue
+		}
+		rhobsCLFs = append(rhobsCLFs, name)
+
+		conditions, _, _ := unstructuredConditions(&clf)
+		clfConditions := map[string]string{}
+		for _, c := range conditions {
+			clfConditions[c["type"]] = c["status"]
+		}
+
+		// Check expected conditions from source: Authorized, Valid, Ready all True
+		for _, expected := range []string{"Ready"} {
+			status, exists := clfConditions[expected]
+			if !exists {
+				allHealthy = false
+				issues = append(issues, fmt.Sprintf("%s: %s condition missing", name, expected))
+			} else if status != "True" {
+				allHealthy = false
+				reason := ""
+				for _, c := range conditions {
+					if c["type"] == expected {
+						reason = c["reason"]
+						break
+					}
+				}
+				issues = append(issues, fmt.Sprintf("%s: %s=%s (%s)", name, expected, status, reason))
+			}
+		}
+
+		// Also check Authorized and Valid if present (not all CLFs have these)
+		for _, condType := range []string{
+			"observability.openshift.io/Authorized",
+			"observability.openshift.io/Valid",
+		} {
+			status, exists := clfConditions[condType]
+			if exists && status != "True" {
+				allHealthy = false
+				shortType := strings.TrimPrefix(condType, "observability.openshift.io/")
+				issues = append(issues, fmt.Sprintf("%s: %s=%s", name, shortType, status))
+			}
+		}
+	}
+
+	r.Details["clf_count"] = len(rhobsCLFs)
+
+	switch {
+	case len(rhobsCLFs) == 0:
+		r.Status = checks.StatusSkip
+		r.Message = "No RHOBS ClusterLogForwarders found — condition check skipped"
+	case !allHealthy:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("CLF condition issues: %s", strings.Join(issues, "; "))
+		r.Details["issues"] = issues
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d RHOBS CLF(s) have healthy conditions (Authorized, Valid, Ready)", len(rhobsCLFs))
 	}
 	cc.AddResult(r)
 }
