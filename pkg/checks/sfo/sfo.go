@@ -61,7 +61,10 @@ func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext)
 	r := checks.Result{
 		Check:    "sfo_controller_availability",
 		Severity: checks.SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks the splunk-forwarder-operator deployment's Available condition in openshift-splunk-forwarder-operator. The controller must be running for it to reconcile SplunkForwarder CRs, create DaemonSets, and manage forwarder pods on cluster nodes.",
+			"pass_criteria": "PASS: deployment Available condition is True. FAIL: deployment not available or not found.",
+		},
 	}
 
 	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
@@ -108,7 +111,10 @@ func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) bool
 	r := checks.Result{
 		Check:    "sfo_splunkforwarder_cr",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates that a SplunkForwarder custom resource exists in openshift-security. The CR is deployed via SelectorSyncSet (SSS) from Hive, not by the operator itself. A missing CR indicates a Hive ClusterSync issue, not an operator failure. The CR specifies the forwarder image, Splunk inputs, filters, and whether to use a heavy forwarder.",
+			"pass_criteria": "PASS: SplunkForwarder CR found with valid configuration. WARN: no CR in openshift-security (SSS sync issue). Downstream checks (secrets, DaemonSet, pods, ConfigMaps, metrics) will SKIP if no CR is present.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -181,7 +187,11 @@ func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
 	r := checks.Result{
 		Check:    "sfo_secrets",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{"namespace": securityNamespace},
+		Details: map[string]any{
+			"description":   "Checks for splunk-auth (mTLS certificate, required) and splunk-hec-token (HTTP Event Collector token, optional) secrets in openshift-security. These secrets provide authentication credentials for the forwarder to connect to Splunk. Both are deployed via SSS alongside the CR.",
+			"pass_criteria": "PASS: required splunk-auth secret present. FAIL: splunk-auth missing when CR exists (operator cannot reconcile without auth). WARN: splunk-auth missing when CR also missing (likely SSS sync issue for both).",
+			"namespace":     securityNamespace,
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -241,7 +251,11 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext, hasCR 
 	r := checks.Result{
 		Check:    "sfo_daemonset_health",
 		Severity: checks.SeverityCritical,
-		Details:  map[string]any{"namespace": securityNamespace},
+		Details: map[string]any{
+			"description":   "Validates the splunk forwarder DaemonSet(s) in openshift-security. The operator creates DaemonSet(s) when it reconciles the SplunkForwarder CR, deploying forwarder pods on every node to collect and forward logs to Splunk. Part of the dependency chain: CR -> operator reconcile -> DaemonSet -> pods.",
+			"pass_criteria": "PASS: all splunk DaemonSet(s) have desired=ready pod counts. WARN: DaemonSet exists but not all pods ready. FAIL: no splunk DaemonSet found despite CR existing (reconciliation failure). SKIP: no SplunkForwarder CR present.",
+			"namespace":     securityNamespace,
+		},
 	}
 
 	if !hasCR {
@@ -324,7 +338,11 @@ func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext, hasCR bo
 	r := checks.Result{
 		Check:    "sfo_forwarder_pods",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{"namespace": securityNamespace},
+		Details: map[string]any{
+			"description":   "Checks forwarder pod status and restart counts in openshift-security. Each node should have a running forwarder pod (label: name=splunk-forwarder) that collects logs and forwards them to Splunk. High restart counts may indicate configuration errors, connectivity issues, or resource pressure.",
+			"pass_criteria": "PASS: all forwarder pods running with low restart counts (<=10 total). WARN: some pods not running, or total restart count exceeds 10. FAIL: no forwarder pods found despite CR existing. SKIP: no SplunkForwarder CR present.",
+			"namespace":     securityNamespace,
+		},
 	}
 
 	if !hasCR {
@@ -410,7 +428,11 @@ func checkConfigMaps(ctx context.Context, cc *checks.ClusterContext, hasCR bool)
 	r := checks.Result{
 		Check:    "sfo_configmaps",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{"namespace": securityNamespace},
+		Details: map[string]any{
+			"description":   "Validates that the Splunk configuration ConfigMaps (osd-monitored-logs-local and osd-monitored-logs-metadata) exist in openshift-security. These are created by the operator during CR reconciliation and contain inputs.conf, props.conf, and app metadata that configure which logs the forwarder collects.",
+			"pass_criteria": "PASS: both configuration ConfigMaps present. WARN: one or more ConfigMaps missing (operator may not have reconciled). SKIP: no SplunkForwarder CR present.",
+			"namespace":     securityNamespace,
+		},
 	}
 
 	if !hasCR {
@@ -475,7 +497,11 @@ func checkAuditExporter(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "sfo_audit_exporter",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{"namespace": securityNamespace},
+		Details: map[string]any{
+			"description":   "Checks the audit-exporter DaemonSet in openshift-security, which runs on master nodes to filter Kubernetes API server audit logs before forwarding them to Splunk. Also validates the osd-audit-policy ConfigMap that defines audit log filtering rules. Deployed via SSS independently from the SplunkForwarder CR.",
+			"pass_criteria": "PASS: audit-exporter DaemonSet fully ready on all master nodes and osd-audit-policy ConfigMap present. WARN: DaemonSet not fully ready, audit policy ConfigMap missing, or DaemonSet not found (audit log filtering not active).",
+			"namespace":     securityNamespace,
+		},
 	}
 
 	ds, err := cc.Client.Clientset().AppsV1().DaemonSets(securityNamespace).Get(ctx, "audit-exporter", metav1.GetOptions{})
@@ -526,7 +552,10 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 	r := checks.Result{
 		Check:    "sfo_forwarder_metrics",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Queries Prometheus for splunk forwarder health and throughput metrics. Checks splunk_forwarder_component_unhealthy for component-level health, audit filter error rates, and event forwarding throughput. Includes 7-day timeseries for component health and audit filter activity to identify intermittent issues.",
+			"pass_criteria": "PASS: all forwarder components healthy (unhealthy=0) and audit filter error rate below 0.01 errors/sec. WARN: one or more components unhealthy, or elevated audit filter error rate. SKIP: no SplunkForwarder CR present, or metrics queries failed.",
+		},
 	}
 
 	if !hasCR {
@@ -662,7 +691,11 @@ func checkServiceMonitor(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "sfo_servicemonitor",
 		Severity: checks.SeverityInfo,
-		Details:  map[string]any{"namespace": securityNamespace},
+		Details: map[string]any{
+			"description":   "Validates that both ServiceMonitors (splunk-forwarder and audit-exporter) exist in openshift-security. These tell Prometheus how to scrape metrics from the forwarder pods and audit exporter. Without them, forwarder health metrics and the SplunkForwarderComponentUnhealthy alert cannot function.",
+			"pass_criteria": "PASS: both splunk-forwarder and audit-exporter ServiceMonitors present. INFO: only one ServiceMonitor found (partial configuration), or neither found (metrics not being scraped).",
+			"namespace":     securityNamespace,
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -706,7 +739,10 @@ func checkPrometheusRule(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "sfo_prometheusrule",
 		Severity: checks.SeverityInfo,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates that the SplunkForwarderComponentUnhealthy PrometheusRule exists. This alert rule fires when any splunk forwarder component reports unhealthy status, enabling SRE to detect log forwarding failures. Checks openshift-security first, then falls back to openshift-monitoring.",
+			"pass_criteria": "PASS: PrometheusRule splunk-forwarder-component-unhealthy found in openshift-security or openshift-monitoring. INFO: PrometheusRule not found in either namespace (alert not configured).",
+		},
 	}
 
 	if !cc.Client.CanElevate() {

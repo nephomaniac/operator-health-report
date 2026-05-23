@@ -100,7 +100,10 @@ func checkControllerManager(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "rmo_controller_manager",
 		Severity: checks.SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates the RMO controller-manager pod is running and stable. This is the core controller that reconciles RouteMonitor and ClusterUrlMonitor CRs into blackbox exporter probes. If the controller is down or crash-looping, no probes will be created or updated, leaving endpoint monitoring blind.",
+			"pass_criteria": "PASS: pod is Running with <= 5 restarts and no OOMKill. WARN: 6-10 restarts or last termination was OOMKilled. FAIL: pod not Running or > 10 restarts.",
+		},
 	}
 
 	podList, err := cc.Client.GetPods(ctx, cc.Operator.Namespace, "control-plane=controller-manager")
@@ -177,7 +180,10 @@ func checkBlackboxExporter(ctx context.Context, cc *checks.ClusterContext, rmLis
 	r := checks.Result{
 		Check:    "rmo_blackbox_exporter",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Verifies the blackbox-exporter deployment, Service, and ConfigMap exist and are healthy. The blackbox exporter is the component that actually executes HTTP probes against monitored endpoints. Without it, RouteMonitor and ClusterUrlMonitor CRs exist but no probe_success metrics are produced.",
+			"pass_criteria": "PASS: deployment fully ready and Service exists. WARN: not fully ready, Service missing, or monitors exist but blackbox-exporter is absent. INFO: no blackbox-exporter and no monitors configured (expected state).",
+		},
 	}
 
 	totalMonitors := countItems(rmList) + countItems(cumList)
@@ -240,7 +246,10 @@ func checkRouteMonitorStatus(ctx context.Context, cc *checks.ClusterContext, rmL
 	r := checks.Result{
 		Check:    "rmo_routemonitor_status",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates all RouteMonitor and ClusterUrlMonitor custom resources. Checks that expected SRE probes (console RouteMonitor and api ClusterUrlMonitor) are present, that CRs have no errorStatus, that RouteMonitors have resolved routeURLs, and that ServiceMonitor references are populated. Missing or broken CRs mean endpoints are not being probed.",
+			"pass_criteria": "PASS: all expected CRs present, no errors, all URLs resolved, all ServiceMonitor refs populated. WARN: expected CRs missing, errorStatus set, routeURL empty, or ServiceMonitor ref missing.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -355,7 +364,10 @@ func checkSREProbeExpectations(ctx context.Context, cc *checks.ClusterContext, r
 	r := checks.Result{
 		Check:    "rmo_sre_probe_expectations",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Verifies consistency between SRE probe-missing PrometheusRules and actual probe CRs. SRE deploys PrometheusRules (sre-route-monitor-operator-probe-missing-api/console) that fire alerts when probes disappear. If these rules exist but no probes are configured, route monitoring is completely absent and the probe-missing alerts will fire.",
+			"pass_criteria": "PASS: SRE probe-missing rules exist and matching monitor CRs are present. FAIL: probe-missing rules exist but zero monitors found — route monitoring absent. INFO: no SRE probe-missing PrometheusRules found.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -405,7 +417,10 @@ func checkProbeHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cu
 	r := checks.Result{
 		Check:    "rmo_probe_health",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Queries probe_success metrics from platform Thanos to verify that blackbox exporter probes are actively succeeding. This is the real-time health signal for monitored endpoints (console, API). On management clusters, only ClusterUrlMonitor probes appear in platform Thanos; HCP RouteMonitor probes are checked separately via RHOBS in rmo_hcp_probe_coverage.",
+			"pass_criteria": "PASS: all probes returning probe_success=1 and probe count matches expected monitors. WARN: any probe returning probe_success=0 (endpoint down) or probe count mismatch. SKIP: no monitors configured.",
+		},
 	}
 
 	totalCRs := countItems(rmList) + countItems(cumList)
@@ -490,7 +505,10 @@ func checkServiceMonitorHealth(ctx context.Context, cc *checks.ClusterContext, r
 	r := checks.Result{
 		Check:    "rmo_servicemonitor_health",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates that ServiceMonitor resources referenced in RouteMonitor and ClusterUrlMonitor status fields actually exist. ServiceMonitors tell Prometheus how to scrape probe_success metrics from the blackbox exporter. If a ServiceMonitor is missing, Prometheus will not collect probe data, and probe-missing alerts will fire even though the probes may be running.",
+			"pass_criteria": "PASS: all referenced ServiceMonitors found. WARN: one or more referenced ServiceMonitors missing or no ServiceMonitors referenced despite monitors existing. SKIP: no monitors configured.",
+		},
 	}
 
 	totalCRs := countItems(rmList) + countItems(cumList)
@@ -573,7 +591,10 @@ func checkPrometheusRuleHealth(ctx context.Context, cc *checks.ClusterContext, r
 	r := checks.Result{
 		Check:    "rmo_prometheusrule_health",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates that PrometheusRule resources referenced in monitor CR status fields exist. RMO creates PrometheusRules that define alerting thresholds (e.g., RouteMonitorAvailabilitySRE) based on probe_success metrics. Missing PrometheusRules mean no alerts will fire when endpoints go down, breaking the SRE alerting chain.",
+			"pass_criteria": "PASS: all referenced PrometheusRules found. WARN: one or more referenced PrometheusRules missing. INFO: no PrometheusRules expected (all monitors have skipPrometheusRule set). SKIP: no monitors configured.",
+		},
 	}
 
 	totalCRs := countItems(rmList) + countItems(cumList)
@@ -653,7 +674,10 @@ func checkOperatorMetrics(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "rmo_operator_metrics",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Queries RMO's own operator-level Prometheus metrics (rhobs_route_monitor_operator_info, api_requests_total, probe_deletion_timeout_total) from platform Thanos. These metrics reveal the operator's internal health: whether its RHOBS API calls are succeeding, whether probe deletions are timing out, and what version is running.",
+			"pass_criteria": "PASS: no probe deletion timeouts and RHOBS API calls have at least some successes. WARN: probe deletion timeouts detected or all RHOBS API requests failing with zero successes.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -731,7 +755,10 @@ func checkConfig(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "rmo_config",
 		Severity: checks.SeverityInfo,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Reads the RMO ConfigMap to surface operator configuration settings such as probe-api-url (RHOBS synthetics endpoint), only-public-clusters flag, and skip-infrastructure-health-check flag. This is informational — it reports the active configuration so operators can verify settings match expectations for the cluster type.",
+			"pass_criteria": "PASS: ConfigMap found and settings reported. INFO: no ConfigMap found (operator uses defaults).",
+		},
 	}
 
 	// Try both possible ConfigMap names
@@ -773,7 +800,10 @@ func checkHCPCoverage(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "rmo_hcp_coverage",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "On management clusters, compares the number of HostedControlPlane resources against the number of unique cluster IDs with probe_success metrics in RHOBS Prometheus. Each HCP should have probe coverage via RHOBS synthetics. Unmonitored HCPs represent hosted clusters whose endpoint availability is not being tracked.",
+			"pass_criteria": "PASS: all HCPs have probe coverage in RHOBS. WARN: one or more HCPs without probe coverage. SKIP: cannot retrieve HCP resources or elevation unavailable. INFO: no HCPs found on this management cluster.",
+		},
 	}
 
 	hcpList, err := cc.Client.ListResources(ctx, hostedControlPlaneGVR, "", false)
@@ -852,7 +882,10 @@ func checkHCPProbeCoverage(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "rmo_hcp_probe_coverage",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Queries RHOBS Prometheus for all HCP probe_success metrics and checks whether each probe is succeeding. Unlike rmo_probe_health (which checks platform Thanos for local probes), this check covers HCP-specific probes that are scraped by the RHOBS monitoring stack on management clusters. Failing probes indicate hosted cluster endpoints that are unreachable.",
+			"pass_criteria": "PASS: all HCP probes returning probe_success=1. WARN: one or more HCP probes failing (probe_success=0) or no probes found in RHOBS.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -915,7 +948,10 @@ func checkHCPState(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "rmo_hcp_state",
 		Severity: checks.SeverityInfo,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Queries RHOBS Prometheus for hypershift_cluster_* metrics to provide a breakdown of HostedControlPlane states on a management cluster: provisioned, ready, limited support, deleting, and waiting for initial availability. This is informational context that helps interpret probe coverage gaps — e.g., HCPs in limited support or deleting state may legitimately lack probes.",
+			"pass_criteria": "INFO: always informational. Reports the state distribution of HCPs on the management cluster.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -960,7 +996,10 @@ func checkRHOBSAPIHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "rmo_rhobs_api_health",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Queries RHOBS Prometheus for per-operation RMO API request metrics (get_probe, create_probe, delete_probe, update_probe_labels), OIDC token refresh counters, and probe deletion timeouts. This check validates the operator's ability to communicate with the RHOBS synthetics API on management clusters. API failures prevent probe lifecycle management for HCP endpoints.",
+			"pass_criteria": "PASS: API calls succeeding with zero errors and OIDC refreshes healthy. WARN: some API errors or probe deletion timeouts. FAIL: all API calls failing or OIDC token refresh completely broken.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -1087,7 +1126,10 @@ func checkRHOBSIntegration(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "rmo_rhobs_integration",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks whether RHOBS synthetics integration is configured on the RMO controller by inspecting PROBE_API_URL and OIDC_CLIENT_ID environment variables, then validates OIDC token refresh health via platform Thanos metrics. On management and service clusters, RHOBS integration enables centralized probe management for HCP endpoints. On standard clusters, RHOBS is not applicable.",
+			"pass_criteria": "PASS: RHOBS enabled, OIDC configured, and token refreshes succeeding. WARN: OIDC token refresh failing or RHOBS enabled without OIDC configuration. INFO: RHOBS not configured (expected on standard clusters). SKIP: RHOBS enabled but elevation required for OIDC check.",
+		},
 	}
 
 	// Check if RHOBS is enabled via env vars on the controller-manager
@@ -1182,8 +1224,11 @@ func checkLimitedSupportDisagreement(ctx context.Context, cc *checks.ClusterCont
 	r := checks.Result{
 		Check:       "rmo_limited_support_disagreement",
 		Description: "Checks if the HCP limited-support label and the Prometheus limited_support metric agree",
-		Severity:    checks.SeverityWarning,
-		Details:     map[string]any{},
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Compares the HCP limited-support label (api.openshift.com/limited-support) with the Prometheus limited_support metric for the cluster. When these disagree, RMO may make incorrect decisions about probe lifecycle — e.g., deleting probes for a cluster that is not actually in limited support, or maintaining probes for one that is. This check only runs on non-management clusters.",
+			"pass_criteria": "PASS: HCP label and Prometheus metric agree (both indicate limited support or both indicate fully supported). WARN: label and metric disagree — one says limited support while the other does not.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {

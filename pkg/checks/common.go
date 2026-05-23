@@ -27,7 +27,12 @@ func CheckNamespace(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "namespace_status",
 		Severity: SeverityCritical,
-		Details:  map[string]any{"namespace": cc.Operator.Namespace, "phase": phase},
+		Details: map[string]any{
+			"description":   "Checks the operator namespace exists and is in Active phase. The namespace is a prerequisite for all other checks — if it does not exist or is Terminating, the operator cannot function and remaining checks are skipped.",
+			"pass_criteria": "PASS: Namespace exists and phase is Active. FAIL: Namespace does not exist, is Terminating, or API error (non-RBAC). ACCESS_DENIED: Cannot read namespace due to insufficient permissions. SKIP: n/a.",
+			"namespace":     cc.Operator.Namespace,
+			"phase":         phase,
+		},
 	}
 
 	switch {
@@ -62,7 +67,10 @@ func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "pod_status_and_restarts",
 		Severity: SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks the operator Deployment health in the operator namespace, including replica readiness, pod Running status, container restart counts, and container state details (Waiting/Terminated reasons). A degraded deployment means the operator cannot reconcile its managed resources.",
+			"pass_criteria": "PASS: All desired replicas ready, all pods Running, restarts <= 10. WARN: Not all replicas ready, restarts > 10, or pods not in Running state. FAIL: No pods found or deployment missing. ACCESS_DENIED: Cannot read deployment due to insufficient permissions.",
+		},
 	}
 
 	if err != nil {
@@ -178,7 +186,11 @@ func CheckPKOHealth(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "pko_clusterpackage_health",
 		Severity: SeverityCritical,
-		Details:  map[string]any{"package_name": packageName},
+		Details: map[string]any{
+			"description":   "Checks the PKO ClusterPackage status conditions (Available, Progressing, Unpacked) for the operator. PKO is the primary deployment mechanism — a failed ClusterPackage means the operator will not receive updates and may be running a stale or broken version. If no ClusterPackage exists, falls back to checking OLM Subscription.",
+			"pass_criteria": "PASS: Available=True, Progressing=False, Unpacked=True. WARN: Progressing=True (rollout in progress). FAIL: Available=False, or stuck due to immutable fields / adoption conflicts. SKIP: No ClusterPackage found (falls back to OLM check).",
+			"package_name":  packageName,
+		},
 	}
 
 	if err != nil {
@@ -248,7 +260,11 @@ func checkOLMSubscription(ctx context.Context, cc *ClusterContext, packageName s
 	r := Result{
 		Check:    "olm_subscription_health",
 		Severity: SeverityCritical,
-		Details:  map[string]any{"package_name": packageName},
+		Details: map[string]any{
+			"description":   "Checks for an OLM Subscription in the operator namespace as a fallback when no PKO ClusterPackage is found. The Subscription is the legacy deployment mechanism — if neither OLM nor PKO is present, the operator is not deployed at all.",
+			"pass_criteria": "PASS: OLM Subscription exists. FAIL: Neither OLM Subscription nor PKO ClusterPackage found — operator not deployed.",
+			"package_name":  packageName,
+		},
 	}
 
 	if err != nil {
@@ -270,7 +286,10 @@ func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "resource_leak_detection",
 		Severity: SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Queries Prometheus/Thanos for 7-day CPU and memory timeseries of the operator container to detect resource leaks. Compares first and last values to calculate percentage change. A sustained increase indicates a potential memory leak or unbounded CPU growth that could eventually cause OOMKills or throttling.",
+			"pass_criteria": fmt.Sprintf("PASS: Both CPU and memory trend stable (increase < %.0f%% or absolute values below noise threshold). WARN: CPU or memory increased > %.0f%% over 7 days. UNKNOWN: No metrics data available. ACCESS_DENIED: Cannot query Prometheus. SKIP: Elevation not available (required for Thanos query).", memoryLeakThresholdPercent, memoryLeakThresholdPercent),
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -379,7 +398,10 @@ func CheckVersionVerification(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "version_verification",
 		Severity: SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Compares the running operator container image tag/SHA against the expected version from the SAAS target file (resolved via hive shard and OCM environment). A mismatch means the cluster is running an unexpected version — either a rollout is in progress, a promotion failed, or the cluster was missed during deployment.",
+			"pass_criteria": "PASS: Deployed image tag/SHA matches the SAAS target version. WARN: Version mismatch between deployed and expected, or deployed image could not be determined. SKIP: Hive shard unknown, SAAS target resolution failed, or no expected version in SAAS target.",
+		},
 	}
 
 	if cc.HiveShard == "" || cc.HiveShard == "unknown" {
@@ -481,7 +503,10 @@ func CheckResourceLimits(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "resource_limits_validation",
 		Severity: SeverityInfo,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks CPU and memory resource requests/limits on the operator Deployment's primary container and compares peak 7-day usage (from resource_leak_detection) against configured limits. Missing limits risk unbounded resource consumption; usage near limits risks OOMKills or CPU throttling.",
+			"pass_criteria": "PASS: Limits are set and peak usage is below 80% of limits, or no limits configured (informational). WARN: Peak usage >= 80% of a configured limit, or peak usage exceeds a limit. SKIP: Deployment not found or has no containers.",
+		},
 	}
 
 	if err != nil || len(deploy.Spec.Template.Spec.Containers) == 0 {
@@ -621,7 +646,10 @@ func CheckLeaderElection(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "leader_election",
 		Severity: SeverityInfo,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates that a leader election Lease exists in the operator namespace and has an active holder. Searches for common lease name patterns (<deployment>-lock, <name>-lock, <deployment>-leader-election). A missing or stale lease can indicate the operator is not running or is stuck in leader election contention.",
+			"pass_criteria": "PASS: Leader lease found with an active holder identity. SKIP: No leader lease found (single replica or leader election not used by this operator).",
+		},
 	}
 
 	for _, leaseName := range leaseNames {
@@ -655,7 +683,10 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "image_pull_status",
 		Severity: SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks all pods in the operator namespace for ImagePullBackOff or ErrImagePull container states (both init and regular containers). Image pull failures prevent the operator from starting and typically indicate a missing image, wrong tag, registry authentication failure, or network connectivity issue.",
+			"pass_criteria": "PASS: No pods have image pull errors. FAIL: One or more pods have ImagePullBackOff or ErrImagePull. SKIP: Could not retrieve pod list.",
+		},
 	}
 
 	if err != nil {
@@ -708,7 +739,10 @@ func CheckPKOJobHealth(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "pko_job_health",
 		Severity: SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks PKO-related cleanup Jobs (olm-cleanup, pko) in the operator namespace for failures or hung state. These jobs run during OLM-to-PKO migration to clean up legacy OLM resources. Hung or failed jobs can block the migration and leave the operator in a broken state with conflicting deployment methods.",
+			"pass_criteria": "PASS: All cleanup jobs completed successfully or no jobs present. WARN: Jobs still active (potentially hung), jobs failed, or more than 3 stale cleanup jobs remain. SKIP: Could not retrieve job list.",
+		},
 	}
 
 	if err != nil {
@@ -827,9 +861,13 @@ func CheckLogErrors(ctx context.Context, cc *ClusterContext) {
 
 	// Get deployment to find pods
 	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
+	logCheckDesc := "Analyzes the last 500 lines of the operator pod logs for error and warning patterns. Counts lines containing 'error' (excluding info-level) and 'warning'. Elevated error counts can indicate reconciliation failures, API connectivity issues, or resource conflicts. Note: on managed clusters in production, log retrieval requires elevation (backplane-cluster-admin impersonation)."
+	logCheckCriteria := "PASS: Errors <= 10 (within normal threshold) or no errors found. WARN: More than 10 errors detected in recent logs. SKIP: Could not retrieve deployment, no pods found, or log retrieval failed."
+
 	if err != nil {
 		cc.AddResult(Result{Check: "log_error_analysis", Status: StatusSkip, Severity: SeverityWarning,
-			Message: "Could not retrieve deployment for log analysis"})
+			Message: "Could not retrieve deployment for log analysis",
+			Details: map[string]any{"description": logCheckDesc, "pass_criteria": logCheckCriteria}})
 		return
 	}
 
@@ -837,7 +875,8 @@ func CheckLogErrors(ctx context.Context, cc *ClusterContext) {
 	pods, err := cc.Client.GetPods(ctx, cc.Operator.Namespace, selector.String())
 	if err != nil || len(pods.Items) == 0 {
 		cc.AddResult(Result{Check: "log_error_analysis", Status: StatusSkip, Severity: SeverityWarning,
-			Message: "No pods found for log analysis"})
+			Message: "No pods found for log analysis",
+			Details: map[string]any{"description": logCheckDesc, "pass_criteria": logCheckCriteria}})
 		return
 	}
 
@@ -848,7 +887,10 @@ func CheckLogErrors(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "log_error_analysis",
 		Severity: SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Analyzes the last 500 lines of the operator pod logs for error and warning patterns. Counts lines containing 'error' (excluding info-level) and 'warning'. Elevated error counts can indicate reconciliation failures, API connectivity issues, or resource conflicts. Note: on managed clusters in production, log retrieval requires elevation (backplane-cluster-admin impersonation).",
+			"pass_criteria": "PASS: Errors <= 10 (within normal threshold) or no errors found. WARN: More than 10 errors detected in recent logs. SKIP: Could not retrieve deployment, no pods found, or log retrieval failed.",
+		},
 	}
 
 	if err != nil || logOutput == "" {
@@ -900,7 +942,10 @@ func CheckEvents(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "operator_events",
 		Severity: SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks for Warning-type Kubernetes events associated with the operator deployment in the operator namespace. Warning events indicate issues such as failed scheduling, liveness probe failures, OOMKills, or failed mounts that may affect operator availability.",
+			"pass_criteria": "PASS: No Warning events found for the operator deployment. WARN: One or more Warning events detected.",
+		},
 	}
 
 	warningCount := 0
@@ -940,7 +985,10 @@ func CheckDualInstallation(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "dual_installation_check",
 		Severity: SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Detects whether both OLM (Subscription) and PKO (ClusterPackage) deployment methods exist simultaneously for the same operator. Dual installations cause resource conflicts — both systems attempt to manage the same Deployment, leading to rollback loops, version flapping, and reconciliation errors.",
+			"pass_criteria": "PASS: Exactly one deployment method found (PKO only or OLM only). FAIL: Both OLM Subscription and PKO ClusterPackage exist (conflicting deployment), or neither exists (operator not deployed).",
+		},
 	}
 
 	packageName := cc.Operator.Name
@@ -994,7 +1042,10 @@ func CheckOrphanedOLM(ctx context.Context, cc *ClusterContext) {
 	r := Result{
 		Check:    "orphaned_olm_artifacts",
 		Severity: SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Detects orphaned OLM ClusterServiceVersions (CSVs) in the operator namespace on clusters that have migrated to PKO. Orphaned CSVs indicate an incomplete OLM-to-PKO migration — the OLM cleanup job may have failed, leaving stale resources that can cause confusion during troubleshooting or interfere with future upgrades.",
+			"pass_criteria": "PASS: No orphaned OLM CSVs found (clean PKO migration). FAIL: Orphaned OLM CSVs detected on a PKO-deployed cluster. SKIP: Operator not deployed via PKO (check not applicable).",
+		},
 	}
 
 	packageName := cc.Operator.Name

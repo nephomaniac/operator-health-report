@@ -42,7 +42,10 @@ func checkAlertmanagerPods(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "alertmanager_pods",
 		Severity: checks.SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks AlertManager pod count, readiness, and container restart history. AlertManager is the component that routes firing alerts to PagerDuty and DeadMansSnitch — if pods are not running or crashlooping, alert notifications will be delayed or lost entirely.",
+			"pass_criteria": "PASS: all AM pods are Running/Ready with 3 or fewer total restarts. WARN: all pods are ready but total restarts exceed 3, indicating instability. FAIL: one or more pods are not ready, meaning alert routing is degraded. SKIP: no AM pods found (unexpected — may indicate a larger problem).",
+		},
 	}
 
 	pods, err := cc.Client.GetPods(ctx, cc.Operator.Namespace, "app.kubernetes.io/name=alertmanager")
@@ -138,7 +141,10 @@ func checkAlertmanagerStatefulset(ctx context.Context, cc *checks.ClusterContext
 	r := checks.Result{
 		Check:    "alertmanager_statefulset",
 		Severity: checks.SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Verifies the alertmanager-main StatefulSet has all desired replicas ready. The StatefulSet manages AlertManager pod lifecycle — if ready replicas fall below the desired count, the cluster may lose alert routing redundancy or capacity entirely.",
+			"pass_criteria": "PASS: ready replicas equal desired replicas and desired is greater than zero. FAIL: ready replicas are less than desired, meaning one or more AM instances are down. SKIP: StatefulSet not found (unexpected — cluster may be misconfigured).",
+		},
 	}
 
 	sts, err := cc.Client.Clientset().AppsV1().StatefulSets(cc.Operator.Namespace).Get(ctx, "alertmanager-main", metav1.GetOptions{})
@@ -178,7 +184,10 @@ func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext)
 	r := checks.Result{
 		Check:    "controller_availability",
 		Severity: checks.SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks whether the CAMO deployment has an Available=True condition. CAMO is the controller that reconciles the AlertManager configuration with PagerDuty and DeadMansSnitch routing rules — if the controller is unavailable, configuration drift will go uncorrected and new alert routing changes will not be applied.",
+			"pass_criteria": "PASS: deployment Available condition is True. FAIL: deployment not found, or Available condition is not True.",
+		},
 	}
 
 	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
@@ -222,7 +231,10 @@ func checkReconciliationActivity(ctx context.Context, cc *checks.ClusterContext)
 	r := checks.Result{
 		Check:    "reconciliation_activity",
 		Severity: checks.SeverityInfo,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks whether the CAMO operator is producing log output, indicating active reconciliation. Also detects cluster upgrades in progress which cause elevated reconciliation. An idle operator is normal when no configuration changes are pending, but total silence during an upgrade or after a config change could indicate a stuck controller.",
+			"pass_criteria": "PASS: always passes. Reports log entry count and whether a cluster upgrade is in progress. Zero log entries is expected during quiet periods — this check is informational only.",
+		},
 	}
 
 	// Get recent log count (tail 50 lines)
@@ -293,7 +305,10 @@ func checkReconciliationBehavior(ctx context.Context, cc *checks.ClusterContext,
 	r := checks.Result{
 		Check:    "reconciliation_behavior",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Analyzes the reconciliation rate to detect hot loops or broken watches. CAMO watches cluster-wide secrets and configmaps — on management clusters with many hosted control plane namespaces, elevated log volume is expected. On service clusters, excessive reconciliation may indicate a configuration conflict causing the controller to repeatedly update and revert.",
+			"pass_criteria": "PASS: operator is active or idle within expected bounds. On management clusters, more than 20 log entries in 5 minutes is noted but expected. On service clusters, the same volume would warrant investigation. INFO: always informational severity.",
+		},
 	}
 
 	r.Details["recent_log_count"] = recentLogCount
@@ -323,7 +338,10 @@ func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "alertmanager_secret",
 		Severity: checks.SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates that the alertmanager-main Secret exists and checks for the CAMO ConfigMap and PagerDuty secret. The alertmanager-main secret contains the full AlertManager configuration including all receivers and routes — without it, AlertManager cannot start. The pd-secret contains the PagerDuty integration key required for alert delivery. Requires elevated permissions to read secrets.",
+			"pass_criteria": "PASS: alertmanager-main secret exists with data keys. Also reports whether the configure-alertmanager-operator-config ConfigMap and pd-secret exist. FAIL: alertmanager-main secret not found. SKIP: elevation not available (cannot read secrets without backplane-cluster-admin).",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -368,7 +386,10 @@ func checkConfigurationErrors(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "configuration_errors",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Scans the last 100 lines of CAMO operator logs for configuration-related error patterns (failed, error, invalid config). Configuration errors typically indicate that CAMO cannot parse or apply the desired AlertManager configuration, which can leave alert routing in a stale or broken state.",
+			"pass_criteria": "PASS: 5 or fewer configuration error patterns found in recent logs. WARN: more than 5 configuration error patterns detected, suggesting persistent config issues that may prevent correct alert routing.",
+		},
 	}
 
 	// Find a CAMO pod for log retrieval
@@ -418,7 +439,10 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "prometheus_metrics",
 		Severity: checks.SeverityCritical,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Queries 10 CAMO-specific Prometheus metrics that reflect the health of alert routing configuration. These metrics are emitted by CAMO itself and cover: config validation status, existence of the AM secret, PagerDuty/DeadMansSnitch/GoAlert secrets, namespace configmaps, and whether the AM secret contains the expected receiver configurations. These are the primary signals for detecting silent alerting failures.",
+			"pass_criteria": "PASS: all metrics report healthy values (config validation not failed, AM secret exists, configmaps present). FAIL: config validation failed or AM secret missing — these are critical because alerts will not be delivered. WARN: namespace configmaps missing — alert routing may be incomplete but core delivery is functional. SKIP: elevation not available (Thanos queries require elevated access).",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -508,7 +532,10 @@ func checkAlertmanagerLogs(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "alertmanager_logs",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Analyzes the last 1000 log lines from each AlertManager pod for errors and warnings. DNS warnings ('no such host', 'failed to resolve alertmanager') are filtered out because they are expected during cluster formation when AM peers have not yet registered in DNS. Remaining errors may indicate config reload failures, notification delivery problems, or cluster communication issues that affect alert routing reliability.",
+			"pass_criteria": "PASS: no errors or warnings found (filtered DNS warnings are noted but do not affect status). WARN: errors or non-DNS warnings detected in AM logs — investigate for notification delivery failures or config issues. SKIP: no AlertManager pods available to check.",
+		},
 	}
 
 	// Get AM pods
@@ -584,7 +611,10 @@ func checkAlertmanagerEvents(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "alertmanager_events",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks for Kubernetes Warning events associated with AlertManager pods. Warning events on AM pods (such as Unhealthy, BackOff, FailedScheduling) can indicate infrastructure problems affecting alert delivery — for example, a pod eviction or OOM kill would temporarily reduce AM capacity and could cause missed notifications during the disruption.",
+			"pass_criteria": "PASS: no Warning events found on any AlertManager pod. WARN: one or more Warning events detected — review event reasons and messages to determine if alert routing is affected. SKIP: no AlertManager pods available to check.",
+		},
 	}
 
 	// Get AM pods
@@ -639,7 +669,10 @@ func checkCAMOEvents(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "camo_events",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks for Kubernetes Warning events on the CAMO deployment itself. Events like FailedCreate, ScalingReplicaSet failures, or OOMKilled indicate that the operator controller cannot maintain its desired state — if CAMO is down or restarting, it cannot reconcile AlertManager configuration, leaving alert routing potentially stale or misconfigured.",
+			"pass_criteria": "PASS: no Warning events found on the CAMO deployment. WARN: one or more Warning events detected — review to determine if the controller is operational and able to reconcile.",
+		},
 	}
 
 	events, err := cc.Client.GetEvents(ctx, cc.Operator.Namespace, cc.Operator.Deployment)

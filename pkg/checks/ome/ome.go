@@ -75,7 +75,10 @@ func checkMetricsHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "ome_metrics_health",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates that each OSD metric exported by osd-metrics-exporter is present in Prometheus. Uses trigger-based conditional logic: metrics tied to optional cluster features (proxy, CPMS, OAuth) are only expected when the trigger resource exists. Required metrics (cluster_id, cluster_admin_enabled, limited_support_enabled, pull_secret_valid) must always be present.",
+			"pass_criteria": "PASS: all required metrics present, conditional metrics match trigger state. WARN: one or more required metrics missing with trigger present, or partial query failures due to authorization. SKIP: all metric queries failed (elevation/authorization issue). FAIL: Prometheus is not scraping osd-metrics-exporter at all.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -229,7 +232,10 @@ func checkPullSecretHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "ome_pull_secret_health",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Checks the pull_secret_valid metric exported by OME to verify the cloud.openshift.com pull secret in openshift-config is present and valid. An invalid pull secret prevents the cluster from pulling images from Red Hat registries and breaks telemetry reporting.",
+			"pass_criteria": "PASS: pull_secret_valid=1 with reason=Valid. WARN: pull_secret_valid=0 (invalid pull secret with reason label). SKIP: metric not found, OME may not have reconciled yet.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -273,7 +279,10 @@ func checkProxyCAHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "ome_proxy_ca_health",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates the proxy CA certificate trust bundle when a cluster proxy is configured. OME exports cluster_proxy_ca_valid and cluster_proxy_ca_expiry_timestamp metrics from the user-ca-bundle ConfigMap in openshift-config. An invalid or expired proxy CA causes TLS failures for all egress traffic routed through the proxy.",
+			"pass_criteria": "PASS: cluster_proxy_ca_valid=1 (certificate is valid). FAIL: cluster_proxy_ca_valid=0 (certificate is invalid or expired). INFO: no cluster proxy configured, check not applicable. SKIP: could not determine proxy CA status from metrics.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
@@ -346,7 +355,10 @@ func checkServiceMonitorHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "ome_servicemonitor_health",
 		Severity: checks.SeverityWarning,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Validates that the osd-metrics-exporter ServiceMonitor exists in openshift-osd-metrics. The ServiceMonitor tells Prometheus how to scrape OME's metrics endpoint. Without it, none of OME's custom metrics (pull secret health, proxy CA, identity providers, etc.) are collected.",
+			"pass_criteria": "PASS: ServiceMonitor exists with valid endpoint configuration (port and path). FAIL: ServiceMonitor not found, metrics are not being collected by Prometheus.",
+		},
 	}
 
 	obj, err := cc.Client.GetResource(ctx, serviceMonitorGVR, "openshift-osd-metrics", "osd-metrics-exporter", false)
@@ -391,7 +403,10 @@ func checkIdentityProviders(ctx context.Context, cc *checks.ClusterContext) {
 	r := checks.Result{
 		Check:    "ome_identity_providers",
 		Severity: checks.SeverityInfo,
-		Details:  map[string]any{},
+		Details: map[string]any{
+			"description":   "Reports the identity provider configuration by reading the identity_provider metric exported by OME. This is informational only: it shows which IDP types (LDAP, GitHub, Google, etc.) are configured on the cluster's OAuth CR, which is useful context for understanding cluster access patterns.",
+			"pass_criteria": "INFO: always informational. Reports the count and types of configured identity providers. No identity providers is not an error — some clusters use only kubeadmin or service accounts.",
+		},
 	}
 
 	if !cc.Client.CanElevate() {
