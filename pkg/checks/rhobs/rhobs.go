@@ -62,11 +62,18 @@ func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext)
 	hasRHOBS := checkMonitoringStack(ctx, cc)
 	checkMonitoringCredentials(ctx, cc, hasRHOBS)
 	checkMetricsDestination(ctx, cc, hasRHOBS)
+	checkPrometheusStatefulSets(ctx, cc, hasRHOBS)
 
 	// Log collection (source: rhobs/configuration)
 	checkLogForwarder(ctx, cc)
+	checkLogCollectorDaemonSet(ctx, cc)
 	checkLogEventCollector(ctx, cc)
 	checkLogTokenRefresher(ctx, cc, hasRHOBS)
+
+	// Control plane log forwarding (source: rhobs/configuration)
+	if cc.ClusterType == "management_cluster" {
+		checkControlPlaneLogForwarding(ctx, cc)
+	}
 
 	// Platform rules — MC only (source: hypershift-platform-rhobs-rules)
 	if cc.ClusterType == "management_cluster" {
@@ -223,6 +230,91 @@ func checkMetricsDestination(ctx context.Context, cc *checks.ClusterContext, has
 	cc.AddResult(r)
 }
 
+func checkPrometheusStatefulSets(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
+	cc.CurrentCheck = "rhobs_prometheus_statefulsets"
+
+	r := checks.Result{
+		Check:    "rhobs_prometheus_statefulsets",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"source_repo": "rhobs/configuration",
+			"namespace":   observabilityNS,
+		},
+	}
+
+	if !hasRHOBS {
+		r.Status = checks.StatusSkip
+		r.Message = "Skipped — RHOBS metric collection not configured on this cluster"
+		r.Severity = checks.SeverityInfo
+		cc.AddResult(r)
+		return
+	}
+
+	stsList, err := cc.Client.Clientset().AppsV1().StatefulSets(observabilityNS).List(ctx, metav1.ListOptions{})
+	cc.RecordError("List StatefulSets in observability ns", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Cannot list StatefulSets in %s: %v", observabilityNS, err)
+		cc.AddResult(r)
+		return
+	}
+
+	// Expected: Prometheus and Alertmanager StatefulSets for the RHOBS monitoring stack
+	// Names: prometheus-rhobs-hypershift-monitoring-stack, alertmanager-rhobs-hypershift-monitoring-stack
+	type stsInfo struct {
+		name    string
+		desired int32
+		ready   int32
+	}
+	var rhobsSTS []stsInfo
+	var degradedNames []string
+	totalReady := 0
+	totalDesired := 0
+
+	for _, sts := range stsList.Items {
+		if !strings.Contains(sts.Name, "rhobs") {
+			continue
+		}
+		desired := int32(0)
+		if sts.Spec.Replicas != nil {
+			desired = *sts.Spec.Replicas
+		}
+		ready := sts.Status.ReadyReplicas
+		rhobsSTS = append(rhobsSTS, stsInfo{sts.Name, desired, ready})
+		totalDesired += int(desired)
+		totalReady += int(ready)
+		if ready < desired {
+			degradedNames = append(degradedNames, fmt.Sprintf("%s (%d/%d ready)", sts.Name, ready, desired))
+		}
+	}
+
+	r.Details["statefulset_count"] = len(rhobsSTS)
+	var stsNames []string
+	for _, s := range rhobsSTS {
+		stsNames = append(stsNames, fmt.Sprintf("%s (%d/%d)", s.name, s.ready, s.desired))
+	}
+	r.Details["statefulsets"] = stsNames
+
+	switch {
+	case len(rhobsSTS) == 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("No RHOBS StatefulSets found in %s — Prometheus/Alertmanager may not be deployed", observabilityNS)
+	case len(degradedNames) > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("RHOBS StatefulSets degraded: %s", strings.Join(degradedNames, ", "))
+		r.Details["degraded"] = degradedNames
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d RHOBS StatefulSets healthy (%d/%d pods ready)", len(rhobsSTS), totalReady, totalDesired)
+	}
+	cc.AddResult(r)
+}
+
 // --- Log Collection (rhobs/configuration) ---
 
 func checkLogForwarder(ctx context.Context, cc *checks.ClusterContext) {
@@ -301,6 +393,72 @@ func checkLogForwarder(ctx context.Context, cc *checks.ClusterContext) {
 		r.Status = checks.StatusPass
 		r.Message = fmt.Sprintf("%d RHOBS ClusterLogForwarder(s) Ready: %s",
 			len(rhobsCLFs), strings.Join(rhobsCLFs, ", "))
+	}
+	cc.AddResult(r)
+}
+
+func checkLogCollectorDaemonSet(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rhobs_log_collector_daemonset"
+
+	r := checks.Result{
+		Check:    "rhobs_log_collector_daemonset",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"source_repo":  "rhobs/configuration",
+			"namespace":    loggingNS,
+			"description":  "Vector log collector DaemonSet created by ClusterLogForwarder — runs on every node",
+			"name_pattern": "rhobs*",
+		},
+	}
+
+	// The CLF creates a DaemonSet with the same name in openshift-logging.
+	// Managed by cluster-logging-operator, labeled app.kubernetes.io/managed-by=cluster-logging-operator.
+	dsList, err := cc.Client.Clientset().AppsV1().DaemonSets(loggingNS).List(ctx, metav1.ListOptions{})
+	cc.RecordError("List DaemonSets in logging ns", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Cannot list DaemonSets in %s: %v", loggingNS, err)
+		cc.AddResult(r)
+		return
+	}
+
+	var rhobsDS []string
+	var degradedDS []string
+	allHealthy := true
+
+	for _, ds := range dsList.Items {
+		if !strings.HasPrefix(ds.Name, "rhobs") {
+			continue
+		}
+		desired := ds.Status.DesiredNumberScheduled
+		ready := ds.Status.NumberReady
+		rhobsDS = append(rhobsDS, fmt.Sprintf("%s (%d/%d ready)", ds.Name, ready, desired))
+
+		if ready != desired || ds.Status.NumberMisscheduled > 0 {
+			allHealthy = false
+			degradedDS = append(degradedDS, fmt.Sprintf("%s (%d/%d ready, %d misscheduled)",
+				ds.Name, ready, desired, ds.Status.NumberMisscheduled))
+		}
+	}
+
+	r.Details["collector_daemonsets"] = rhobsDS
+
+	switch {
+	case len(rhobsDS) == 0:
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("No RHOBS log collector DaemonSets found in %s — CLF may not be configured", loggingNS)
+	case !allHealthy:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Log collector DaemonSet degraded: %s", strings.Join(degradedDS, ", "))
+		r.Details["degraded"] = degradedDS
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Log collector DaemonSet healthy: %s", strings.Join(rhobsDS, ", "))
 	}
 	cc.AddResult(r)
 }
@@ -420,6 +578,75 @@ func checkLogTokenRefresher(ctx context.Context, cc *checks.ClusterContext, hasR
 	} else {
 		r.Status = checks.StatusWarning
 		r.Message = fmt.Sprintf("Token refresher degraded — %d/%d replicas ready", deploy.Status.ReadyReplicas, deploy.Status.Replicas)
+	}
+	cc.AddResult(r)
+}
+
+// --- Control Plane Log Forwarding — MC only (source: rhobs/configuration) ---
+
+const cpLogForwardingNS = "hypershift-control-plane-log-forwarding"
+
+func checkControlPlaneLogForwarding(ctx context.Context, cc *checks.ClusterContext) {
+	cc.CurrentCheck = "rhobs_cp_log_forwarding"
+
+	r := checks.Result{
+		Check:    "rhobs_cp_log_forwarding",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"source_repo": "rhobs/configuration",
+			"namespace":   cpLogForwardingNS,
+			"description": "Vector DaemonSet for HCP control plane log forwarding — runs on every node",
+		},
+	}
+
+	_, nsErr := cc.Client.Clientset().CoreV1().Namespaces().Get(ctx, cpLogForwardingNS, metav1.GetOptions{})
+	if nsErr != nil {
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Namespace %s not found — control plane log forwarding not configured", cpLogForwardingNS)
+		cc.AddResult(r)
+		return
+	}
+
+	dsList, err := cc.Client.Clientset().AppsV1().DaemonSets(cpLogForwardingNS).List(ctx, metav1.ListOptions{})
+	cc.RecordError("List control plane log forwarding DaemonSets", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Cannot list DaemonSets in %s: %v", cpLogForwardingNS, err)
+		cc.AddResult(r)
+		return
+	}
+
+	if len(dsList.Items) == 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Namespace %s exists but no DaemonSets found", cpLogForwardingNS)
+		cc.AddResult(r)
+		return
+	}
+
+	ds := dsList.Items[0]
+	desired := ds.Status.DesiredNumberScheduled
+	ready := ds.Status.NumberReady
+	misscheduled := ds.Status.NumberMisscheduled
+
+	r.Details["daemonset"] = ds.Name
+	r.Details["desired"] = desired
+	r.Details["ready"] = ready
+	r.Details["misscheduled"] = misscheduled
+
+	if ready == desired && misscheduled == 0 && desired > 0 {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Control plane log forwarding DaemonSet healthy — %s (%d/%d ready)", ds.Name, ready, desired)
+	} else if desired == 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Control plane log forwarding DaemonSet %s has 0 desired pods", ds.Name)
+	} else {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Control plane log forwarding DaemonSet degraded — %s (%d/%d ready, %d misscheduled)", ds.Name, ready, desired, misscheduled)
 	}
 	cc.AddResult(r)
 }
