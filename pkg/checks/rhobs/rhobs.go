@@ -37,6 +37,9 @@ var (
 	prometheusRuleGVR = schema.GroupVersionResource{
 		Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules",
 	}
+	rhobsPrometheusRuleGVR = schema.GroupVersionResource{
+		Group: "monitoring.rhobs", Version: "v1", Resource: "prometheusrules",
+	}
 	hostedClusterGVR = schema.GroupVersionResource{
 		Group: "hypershift.openshift.io", Version: "v1beta1", Resource: "hostedclusters",
 	}
@@ -471,39 +474,52 @@ func checkPlatformRules(ctx context.Context, cc *checks.ClusterContext) {
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
 			"source_repo": "hypershift-platform-rhobs-rules",
-			"namespace":   rhobsRulesNS,
+			"api_group":   "monitoring.rhobs/v1",
 		},
 	}
 
-	ruleList, err := cc.Client.ListResources(ctx, prometheusRuleGVR, rhobsRulesNS, false)
-	cc.RecordError("List PrometheusRules in RHOBS rules ns", err)
+	// OBO rules use monitoring.rhobs/v1 PrometheusRule, NOT monitoring.coreos.com/v1.
+	// Rules are deployed across two namespaces via SelectorSyncSet from hive.
+	namespaces := []string{rhobsRulesNS, rhobsRulesNS + "-rules"}
+	totalCount := 0
+	rulesByNS := map[string][]string{}
 
-	if err != nil {
-		if checks.IsAccessError(err) {
-			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
-			return
+	for _, ns := range namespaces {
+		ruleList, err := cc.Client.ListResources(ctx, rhobsPrometheusRuleGVR, ns, false)
+		if err != nil {
+			if checks.IsAccessError(err) {
+				cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+				return
+			}
+			if !isNotFoundOrCRDMissing(err) {
+				cc.RecordError(fmt.Sprintf("List monitoring.rhobs PrometheusRules in %s", ns), err)
+			}
+			continue
 		}
-		r.Status = checks.StatusFail
-		r.Message = fmt.Sprintf("Cannot list PrometheusRules in %s: %v", rhobsRulesNS, err)
-		cc.AddResult(r)
-		return
+
+		var names []string
+		for _, rule := range ruleList.Items {
+			names = append(names, rule.GetName())
+		}
+		if len(names) > 0 {
+			rulesByNS[ns] = names
+			totalCount += len(names)
+		}
 	}
 
-	ruleCount := len(ruleList.Items)
-	r.Details["rule_count"] = ruleCount
+	r.Details["total_rule_count"] = totalCount
+	r.Details["rules_by_namespace"] = rulesByNS
 
-	var ruleNames []string
-	for _, rule := range ruleList.Items {
-		ruleNames = append(ruleNames, rule.GetName())
-	}
-	r.Details["rules"] = ruleNames
-
-	if ruleCount > 0 {
+	if totalCount > 0 {
 		r.Status = checks.StatusPass
-		r.Message = fmt.Sprintf("%d PrometheusRule(s) deployed in %s", ruleCount, rhobsRulesNS)
+		var parts []string
+		for ns, names := range rulesByNS {
+			parts = append(parts, fmt.Sprintf("%d in %s", len(names), ns))
+		}
+		r.Message = fmt.Sprintf("%d OBO PrometheusRule(s) deployed: %s", totalCount, strings.Join(parts, ", "))
 	} else {
 		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("No PrometheusRules found in %s — platform alerting/recording rules may be missing", rhobsRulesNS)
+		r.Message = "No monitoring.rhobs PrometheusRules found — platform recording/alerting rules may not be deployed"
 	}
 	cc.AddResult(r)
 }
