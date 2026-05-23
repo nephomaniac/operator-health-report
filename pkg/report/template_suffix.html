@@ -1247,6 +1247,7 @@
                         ${check.message ? `<div class="check-message">${check.message}</div>` : ''}
                         ${check.details?.source_repo ? `<div style="margin:4px 0 6px;"><span style="display:inline-block;padding:2px 8px;background:#667eea;color:#fff;border-radius:3px;font-size:0.75em;font-weight:600;letter-spacing:0.03em;">SOURCE: ${check.details.source_repo}</span></div>` : ''}
                         ${check.details?.description ? `<div style="margin:4px 0 8px;padding:8px 10px;background:rgba(102,126,234,0.08);border-left:3px solid #667eea;border-radius:3px;font-size:0.85em;color:#555;">${check.details.description}</div>` : ''}
+                        ${check.details?.pass_criteria ? `<div style="margin:0 0 8px;padding:6px 10px;background:rgba(40,167,69,0.06);border-left:3px solid #28a745;border-radius:3px;font-size:0.8em;color:#555;font-family:var(--font-mono);">${check.details.pass_criteria}</div>` : ''}
                         ${(() => {
                             const checkErrors = (cluster.api_errors || []).filter(e => e.check === check.check);
                             if (checkErrors.length === 0) return '';
@@ -1257,7 +1258,7 @@
                         })()}
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
-                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo') return '';
+                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria') return '';
 
                                 // Custom rendering for OME per-metric table
                                 if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {

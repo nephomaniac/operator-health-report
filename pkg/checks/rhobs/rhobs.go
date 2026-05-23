@@ -101,9 +101,11 @@ func checkMonitoringStack(ctx context.Context, cc *checks.ClusterContext) bool {
 		Check:    "rhobs_monitoring_stack",
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
-			"source_repo": "rhobs/configuration",
-			"namespace":   observabilityNS,
-			"resource":    "MonitoringStack/rhobs-hypershift-monitoring-stack",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     observabilityNS,
+			"resource":      "MonitoringStack/rhobs-hypershift-monitoring-stack",
+			"description":   "Validates the RHOBS MonitoringStack CR exists and is healthy. This is the central component that deploys Prometheus and Alertmanager for scraping HCP metrics and remote-writing them to the RHOBS cell. Deployed via SelectorSyncSet from hive.",
+			"pass_criteria": "PASS: Available=True condition. WARN: CR exists but Available!=True. SKIP: CRD or CR not found (RHOBS not configured). FAIL: API error.",
 		},
 	}
 
@@ -154,9 +156,11 @@ func checkMonitoringCredentials(ctx context.Context, cc *checks.ClusterContext, 
 		Check:    "rhobs_monitoring_credentials",
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
-			"source_repo": "rhobs/configuration",
-			"namespace":   observabilityNS,
-			"resource":    "Secret/rhobs-hcp-credential",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     observabilityNS,
+			"resource":      "Secret/rhobs-hcp-credential",
+			"description":   "Validates the OIDC credential secret used by Prometheus for OAuth2-authenticated remote-write to the RHOBS cell. Contains client-id and client-secret for sso.redhat.com authentication. Without this, metrics cannot be forwarded.",
+			"pass_criteria": "PASS: Secret exists. SKIP: RHOBS not configured. FAIL: Secret missing (remote-write will fail with 401/403).",
 		},
 	}
 
@@ -199,9 +203,11 @@ func checkMetricsDestination(ctx context.Context, cc *checks.ClusterContext, has
 		Check:    "rhobs_metrics_destination",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo": "rhobs/configuration",
-			"namespace":   observabilityNS,
-			"resource":    "ConfigMap/rhobs-metrics-destination",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     observabilityNS,
+			"resource":      "ConfigMap/rhobs-metrics-destination",
+			"description":   "Validates the metrics destination ConfigMap that identifies which RHOBS cell this MC forwards metrics to. The annotation rhobs.openshift.io/forwarding-destination contains the cell URL (e.g., https://us-west-2-0.rhobs.api.openshift.com).",
+			"pass_criteria": "PASS: ConfigMap exists with keys. SKIP: RHOBS not configured. FAIL: ConfigMap missing.",
 		},
 	}
 
@@ -242,9 +248,10 @@ func checkRemoteWriteConfig(ctx context.Context, cc *checks.ClusterContext, hasR
 		Check:    "rhobs_remote_write_config",
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
-			"source_repo": "rhobs/configuration",
-			"namespace":   observabilityNS,
-			"description": "MonitoringStack remote-write configuration to RHOBS cell",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     observabilityNS,
+			"description":   "Validates the MonitoringStack has remote-write endpoints configured to forward metrics to RHOBS cells. Expected: 2 configs — RHOBS (regional cell) and RHOBS_SLO (global SLO cell), both with OAuth2 auth via rhobs-hcp-credential secret and sso.redhat.com token URL.",
+			"pass_criteria": "PASS: Remote-write configs exist with OAuth2 auth. WARN: Configs exist but missing OAuth2. SKIP: RHOBS not configured. FAIL: No remote-write config (metrics pipeline broken).",
 		},
 	}
 
@@ -318,8 +325,10 @@ func checkPrometheusStatefulSets(ctx context.Context, cc *checks.ClusterContext,
 		Check:    "rhobs_prometheus_statefulsets",
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
-			"source_repo": "rhobs/configuration",
-			"namespace":   observabilityNS,
+			"source_repo":   "rhobs/configuration",
+			"namespace":     observabilityNS,
+			"description":   "Validates the RHOBS Prometheus and Alertmanager StatefulSets are running with all replicas ready. These are created by the MonitoringStack CR. Prometheus scrapes HCP metrics and remote-writes to RHOBS; Alertmanager handles local alert routing.",
+			"pass_criteria": "PASS: All RHOBS StatefulSets have desired==ready replicas. WARN: StatefulSets exist but degraded (replicas not ready) or missing. SKIP: RHOBS not configured.",
 		},
 	}
 
@@ -405,9 +414,11 @@ func checkLogForwarder(ctx context.Context, cc *checks.ClusterContext) {
 		Check:    "rhobs_log_forwarder",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo":  "rhobs/configuration",
-			"namespace":    loggingNS,
-			"name_pattern": "rhobs*",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     loggingNS,
+			"name_pattern":  "rhobs*",
+			"description":   "Validates RHOBS ClusterLogForwarder CRs exist in openshift-logging. The CLF configures Vector log collection pipelines that forward infrastructure and application logs (including HCP eventrouter) to RHOBS Loki via the token-refresher. Name includes a region/sector suffix (e.g., rhobs-us-west-2-tech-preview).",
+			"pass_criteria": "PASS: At least one RHOBS CLF found with Ready=True. WARN: CLF exists but not Ready. SKIP: CLF CRD not found or no RHOBS CLFs.",
 		},
 	}
 
@@ -485,10 +496,11 @@ func checkLogCollectorDaemonSet(ctx context.Context, cc *checks.ClusterContext) 
 		Check:    "rhobs_log_collector_daemonset",
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
-			"source_repo":  "rhobs/configuration",
-			"namespace":    loggingNS,
-			"description":  "Vector log collector DaemonSet created by ClusterLogForwarder — runs on every node",
-			"name_pattern": "rhobs*",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     loggingNS,
+			"name_pattern":  "rhobs*",
+			"description":   "Validates the Vector log collector DaemonSet runs on every node. Automatically created by the cluster-logging-operator when a CLF is deployed. Collects infrastructure and application logs from all nodes and forwards them per the CLF pipeline config.",
+			"pass_criteria": "PASS: DaemonSet exists with desired==ready on all nodes, 0 misscheduled. WARN: DaemonSet exists but not all pods ready or misscheduled pods. SKIP: No RHOBS DaemonSets found.",
 		},
 	}
 
@@ -551,9 +563,11 @@ func checkLogEventCollector(ctx context.Context, cc *checks.ClusterContext) {
 		Check:    "rhobs_log_event_collector",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo":  "rhobs/configuration",
-			"namespace":    eventRouterNS,
-			"name_pattern": "rhobs-eventrouter*",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     eventRouterNS,
+			"name_pattern":  "rhobs-eventrouter*",
+			"description":   "Validates the EventRouter deployment that converts Kubernetes events into structured log entries. Runs in the rhobs-eventrouter namespace, forwarded to RHOBS Loki via the CLF eventrouter input pipeline. Enables event-based alerting and diagnostics.",
+			"pass_criteria": "PASS: EventRouter deployment exists with all replicas ready. WARN: Deployment exists but degraded. SKIP: Namespace or deployment not found.",
 		},
 	}
 
@@ -622,9 +636,11 @@ func checkLogTokenRefresher(ctx context.Context, cc *checks.ClusterContext, hasR
 		Check:    "rhobs_log_token_refresher",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo": "rhobs/configuration",
-			"namespace":   loggingNS,
-			"resource":    "Deployment/rhobs-logs-token-refresher",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     loggingNS,
+			"resource":      "Deployment/rhobs-logs-token-refresher",
+			"description":   "Validates the OIDC token refresher deployment that authenticates log forwarding to RHOBS Loki. Continuously refreshes OAuth2 tokens from sso.redhat.com and exposes them via a local HTTP endpoint for the Vector log collector.",
+			"pass_criteria": "PASS: Deployment exists with 2/2 replicas ready. WARN: Deployment exists but not all replicas ready. SKIP: RHOBS not configured or deployment not found.",
 		},
 	}
 
@@ -670,10 +686,12 @@ func checkLogDestination(ctx context.Context, cc *checks.ClusterContext) {
 		Check:    "rhobs_log_destination",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo":       "rhobs/configuration",
-			"namespace":         loggingNS,
-			"resource":          "ConfigMap/rhobs-logs-destination",
+			"source_repo":         "rhobs/configuration",
+			"namespace":           loggingNS,
+			"resource":            "ConfigMap/rhobs-logs-destination",
 			"expected_annotation": "rhobs.openshift.io/forwarding-destination",
+			"description":         "Validates the log destination ConfigMap that identifies which RHOBS cell this MC forwards logs to. The annotation rhobs.openshift.io/forwarding-destination contains the Loki endpoint URL. Used for cell discovery during incident investigation.",
+			"pass_criteria":       "PASS: ConfigMap exists with forwarding-destination annotation containing cell URL. WARN: ConfigMap exists but annotation missing. SKIP: ConfigMap not found.",
 		},
 	}
 
@@ -718,9 +736,10 @@ func checkControlPlaneLogForwarding(ctx context.Context, cc *checks.ClusterConte
 		Check:    "rhobs_cp_log_forwarding",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo": "rhobs/configuration",
-			"namespace":   cpLogForwardingNS,
-			"description": "Vector DaemonSet for HCP control plane log forwarding — runs on every node",
+			"source_repo":   "rhobs/configuration",
+			"namespace":     cpLogForwardingNS,
+			"description":   "Validates the control plane log forwarding DaemonSet that collects HCP-specific logs. Runs a Vector instance on every node in a dedicated namespace, separate from the main RHOBS log collector. Forwards HCP control plane component logs to RHOBS Loki.",
+			"pass_criteria": "PASS: DaemonSet exists with desired==ready on all nodes, 0 misscheduled. WARN: DaemonSet degraded or 0 desired. SKIP: Namespace not found.",
 		},
 	}
 
@@ -785,9 +804,11 @@ func checkPlatformRulesNamespace(ctx context.Context, cc *checks.ClusterContext)
 		Check:    "rhobs_platform_rules_namespace",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo":      "hypershift-platform-rhobs-rules",
-			"expected_ns":      rhobsRulesNS,
-			"expected_label":   "hypershift.openshift.io/monitoring=true",
+			"source_repo":    "hypershift-platform-rhobs-rules",
+			"expected_ns":    rhobsRulesNS,
+			"expected_label": "hypershift.openshift.io/monitoring=true",
+			"description":    "Validates the namespace where OBO PrometheusRules are deployed exists and has the hypershift.openshift.io/monitoring=true label. This label enables the Observability Operator to discover and load rules from this namespace.",
+			"pass_criteria":  "PASS: Namespace exists with monitoring label. WARN: Namespace exists but label missing (rules won't be loaded). FAIL: Namespace not found.",
 		},
 	}
 
@@ -825,8 +846,10 @@ func checkPlatformRules(ctx context.Context, cc *checks.ClusterContext) {
 		Check:    "rhobs_platform_rules",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo": "hypershift-platform-rhobs-rules",
-			"api_group":   "monitoring.rhobs/v1",
+			"source_repo":   "hypershift-platform-rhobs-rules",
+			"api_group":     "monitoring.rhobs/v1",
+			"description":   "Validates OBO PrometheusRules (monitoring.rhobs/v1, NOT monitoring.coreos.com/v1) are deployed across both openshift-observability-rhobs and openshift-observability-rhobs-rules namespaces. These recording rules compute API server metrics, cluster metrics, and SLO data that are remote-written to RHOBS for alerting.",
+			"pass_criteria": "PASS: At least one PrometheusRule found. WARN: No rules found (alerting/recording rules missing — RHOBS alerts won't fire for this MC's HCPs).",
 		},
 	}
 
@@ -888,6 +911,8 @@ func checkCLFConditions(ctx context.Context, cc *checks.ClusterContext) {
 			"source_repo":         "rhobs/configuration",
 			"namespace":           loggingNS,
 			"expected_conditions": "Authorized=True, Valid=True, Ready=True",
+			"description":         "Validates the status conditions on all RHOBS ClusterLogForwarder CRs. Authorized=True means the SA has correct ClusterRoles for log collection. Valid=True means the CLF spec passes validation. Ready=True means log forwarding is actively reconciled and operational.",
+			"pass_criteria":       "PASS: All RHOBS CLFs have Authorized, Valid, and Ready conditions True. WARN: One or more conditions not True (e.g., RBAC issue, invalid config, or reconciliation failure). SKIP: No RHOBS CLFs found.",
 		},
 	}
 
@@ -986,8 +1011,10 @@ func checkMetricsForwarder(ctx context.Context, cc *checks.ClusterContext) {
 		Check:    "rhobs_metrics_forwarder",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
-			"source_repo": "hypershift-dataplane-metrics-forwarder",
-			"match_label": "app=metrics-forwarder",
+			"source_repo":   "hypershift-dataplane-metrics-forwarder",
+			"match_label":   "app=metrics-forwarder",
+			"description":   "Validates the metrics-forwarder NGINX proxy deployment in HCP namespaces. Deployed via ACM policy → PKO Package into each HCP namespace. The proxy receives remote-write from the hosted cluster's CMO (dataplane metrics) and forwards to the MC's OBO Prometheus. Expected: 2 replicas per HCP, found by label app=metrics-forwarder.",
+			"pass_criteria": "PASS: All PKO-managed HCPs have healthy forwarder (2/2 ready). WARN: Some forwarders degraded. INFO: No PKO ObjectDeployments for forwarder (ACM policy does not target this MC — expected on staging).",
 		},
 	}
 
