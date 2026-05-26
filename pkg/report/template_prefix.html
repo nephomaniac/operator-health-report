@@ -461,6 +461,25 @@
             background: repeating-linear-gradient(90deg, #ff6384 0px, #ff6384 4px, transparent 4px, transparent 8px);
         }
         .legend-marker.restart { background: #ff9f40; }
+        .status-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 16px;
+            padding: 10px 16px;
+            margin-bottom: 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            font-size: 0.82em;
+            align-items: center;
+        }
+        .status-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
         .footer {
             text-align: center;
             padding: 16px;

@@ -365,6 +365,7 @@
                 'rhobs_monitoring_credentials': 'RHOBS Creds',
                 'rhobs_metrics_destination': 'Metrics Dest',
                 'rhobs_remote_write_config': 'Remote Write',
+                'rhobs_prometheus_health': 'Prom CR Health',
                 'rhobs_prometheus_statefulsets': 'Prom/AM STS',
                 'rhobs_log_forwarder': 'Log Forwarder',
                 'rhobs_log_collector_daemonset': 'Log Collector DS',
@@ -2039,8 +2040,20 @@
                     pipelineHTML = renderPipelineDiagram(pipeline, opData);
                 }
 
+                const statusLegendHTML = `<div class="status-legend">` +
+                    `<span class="status-legend-item"><span class="status-icon pass">✓</span> Pass</span>` +
+                    `<span class="status-legend-item"><span class="status-icon fail">✘</span> Fail</span>` +
+                    `<span class="status-legend-item"><span class="status-icon warning">⚠</span> Warning</span>` +
+                    `<span class="status-legend-item"><span class="status-icon info">ℹ</span> Info</span>` +
+                    `<span class="status-legend-item"><span class="status-icon na">-</span> Skipped / N/A</span>` +
+                    `<span class="status-legend-item"><span class="status-icon unknown">?</span> Unknown</span>` +
+                    `<span class="status-legend-item"><span class="status-icon no-access">🔒</span> No Access</span>` +
+                    `<span class="status-legend-item"><span class="status-icon no-access">🚫</span> Access Denied</span>` +
+                    `<span class="status-legend-item"><span class="status-icon error">🔧</span> API/Script Error</span>` +
+                    `</div>`;
+
                 const clusterTableHTML = opData.length > 0
-                    ? `<div class="clusters-table-wrapper"><table class="clusters-table"><thead id="header-${op}"></thead><tbody id="body-${op}"></tbody></table></div>`
+                    ? `${statusLegendHTML}<div class="clusters-table-wrapper"><table class="clusters-table"><thead id="header-${op}"></thead><tbody id="body-${op}"></tbody></table></div>`
                     : '';
                 content.innerHTML = `<div class="content">${targetSummaryHTML}${pipelineHTML}${clusterTableHTML}</div>`;
                 contentsContainer.appendChild(content);
