@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ import (
 	_ "github.com/openshift/operator-health-report/pkg/checks/camo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/ome"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rhobs"
+	_ "github.com/openshift/operator-health-report/pkg/checks/rlr"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rmo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/sfo"
 )
@@ -69,7 +71,7 @@ func main() {
 
 	flag.StringVar(&clusterList, "cluster-list", cfg.ClusterList, "File with cluster IDs (one per line)")
 	flag.StringVar(&reason, "reason", cfg.Reason, "OCM elevation reason (JIRA ticket)")
-	flag.Var(&operators, "oper", "Operator to check: camo, rmo, ome (repeatable)")
+	flag.Var(&operators, "oper", "Operator to check: camo, rmo, ome, sfo, rhobs (repeatable, default: all)")
 	flag.BoolVar(&noElevate, "no-elevate", cfg.NoElevate, "Skip all backplane elevation commands")
 	flag.IntVar(&parallel, "parallel", max(cfg.Parallel, 1), "Number of clusters to process concurrently")
 	flag.StringVar(&outputFile, "output", "", "Output JSON file (default: health_TIMESTAMP.json)")
@@ -129,9 +131,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Default to all operators if none specified
+	// Default to all registered operators if none specified
 	if len(operators) == 0 {
-		operators = []string{"camo", "rmo", "ome"}
+		for name := range checks.AllOperators {
+			operators = append(operators, name)
+		}
+		sort.Strings(operators)
 	}
 
 	// Resolve operator configs
@@ -139,7 +144,12 @@ func main() {
 	for _, op := range operators {
 		cfg, ok := checks.AllOperators[op]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "Error: unknown operator %q (valid: camo, rmo, ome, sfo, rhobs)\n", op)
+			valid := make([]string, 0, len(checks.AllOperators))
+			for name := range checks.AllOperators {
+				valid = append(valid, name)
+			}
+			sort.Strings(valid)
+			fmt.Fprintf(os.Stderr, "Error: unknown operator %q (valid: %s)\n", op, strings.Join(valid, ", "))
 			os.Exit(1)
 		}
 		opConfigs = append(opConfigs, cfg)

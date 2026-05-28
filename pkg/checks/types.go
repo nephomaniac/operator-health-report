@@ -287,11 +287,20 @@ var (
 		SkipCommonChecks: true,
 	}
 
+	RLRConfig = OperatorConfig{
+		Name:             "rosa-log-router",
+		ShortName:        "rlr",
+		Namespace:        "hypershift-control-plane-log-forwarding",
+		Deployment:       "",
+		SkipCommonChecks: true,
+	}
+
 	AllOperators = map[string]OperatorConfig{
 		"camo":  CAMOConfig,
 		"rmo":   RMOConfig,
 		"ome":   OMEConfig,
 		"sfo":   SFOConfig,
 		"rhobs": RHOBSConfig,
+		"rlr":   RLRConfig,
 	}
 )

@@ -63,6 +63,12 @@
                             if (chartType === 'duration') createDurationChart(el.id, chartData, restarts, versions);
                             if (chartType === 'sfo-throughput') createSFOThroughputChart(el.id, chartData, restarts, versions);
                             if (chartType === 'sfo-errors') createSFOErrorChart(el.id, chartData, restarts, versions);
+                            if (chartType === 'rlr-buffer') createRLRTimeseriesChart(el.id, chartData.buffer_timeseries, 'Buffer (MB)', '#6c8cff', 1/(1024*1024));
+                            if (chartType === 'rlr-ingestion') createRLRTimeseriesChart(el.id, chartData.ingestion_timeseries, 'Events/sec', '#2dd4a0', 1);
+                            if (chartType === 'rlr-loss') createRLRTimeseriesChart(el.id, chartData.event_loss_timeseries, 'Events/sec lost', '#f25c5c', 1);
+                            if (chartType === 'rlr-write') createRLRTimeseriesChart(el.id, chartData.write_ratio_timeseries, 'Write Ratio', '#f5c542', 1);
+                            if (chartType === 'rlr-memory') createRLRTimeseriesChart(el.id, chartData.memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
+                            if (chartType === 'rlr-cpu') createRLRTimeseriesChart(el.id, chartData.cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
                         }, 50);
                     });
                 }
@@ -376,7 +382,26 @@
                 'rhobs_platform_rules_namespace': 'Rules NS',
                 'rhobs_platform_rules': 'Platform Rules',
                 'rhobs_clf_conditions': 'CLF Conditions',
-                'rhobs_metrics_forwarder': 'HCP Fwd'
+                'rhobs_metrics_forwarder': 'HCP Fwd',
+                'rlr_cluster_type': 'Cluster Type',
+                'rlr_vector_namespace': 'Vector NS',
+                'rlr_vector_daemonset_health': 'Vector DS',
+                'rlr_vector_pod_restarts': 'Vector Restarts',
+                'rlr_vector_metrics_present': 'Metrics Scraped',
+                'rlr_vector_ingestion_rate': 'Ingestion Rate',
+                'rlr_vector_s3_delivery': 'S3 Write Ratio',
+                'rlr_vector_buffer_usage': 'Buffer Usage',
+                'rlr_vector_error_rate': 'Error Rate',
+                'rlr_vector_event_loss': 'Event Loss',
+                'rlr_vector_pipeline_ratio': 'Pipeline Health',
+                'rlr_heartbeat_deployment': 'Heartbeat Deploy',
+                'rlr_heartbeat_pod_health': 'Heartbeat Pod',
+                'rlr_processor_deployment': 'Processor Deploy',
+                'rlr_processor_pod_health': 'Processor Pod',
+                'rlr_prometheusrule_exists': 'PromRule Exists',
+                'rlr_prometheusrule_alerts': 'PromRule Alerts',
+                'rlr_active_alerts': 'Firing Alerts',
+                'rlr_vector_trends': 'Trends'
             };
 
             if (customNames[checkName]) {
@@ -877,6 +902,45 @@
             });
         }
 
+        function createRLRTimeseriesChart(canvasId, timeseries, label, color, scaleFactor) {
+            if (!timeseries || timeseries.length === 0) return;
+            const data = timeseries.map(p => ({ x: parseFloat(p[0]) * 1000, y: parseFloat(p[1]) * scaleFactor }));
+
+            new Chart(document.getElementById(canvasId), {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: label,
+                        data: data,
+                        borderColor: color,
+                        backgroundColor: color + '20',
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 0,
+                        borderWidth: 1.5
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    plugins: {
+                        legend: { display: true, position: 'top' },
+                        tooltip: {
+                            mode: 'nearest', intersect: true,
+                            callbacks: {
+                                title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
+                                label: ctx => label + ': ' + ctx.parsed.y.toFixed(2)
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
+                        y: { beginAtZero: true, title: { display: true, text: label } }
+                    }
+                }
+            });
+        }
+
         function generateClusterDetails(cluster, clusterIdx) {
             const detailsDiv = document.createElement('div');
             detailsDiv.className = 'cluster-section';
@@ -1219,6 +1283,122 @@
                         </div>
                     `;
                     chartsDiv.appendChild(healthyDiv);
+                }
+            }
+
+            // RLR-specific charts (Vector pipeline health)
+            const rlrTrendsCheck = (cluster.health_checks || []).find(c => c.check === 'rlr_vector_trends');
+            if (rlrTrendsCheck && rlrTrendsCheck.details) {
+                const rlr = rlrTrendsCheck.details;
+
+                // Buffer usage chart
+                if (rlr.buffer_timeseries && rlr.buffer_timeseries.length > 0) {
+                    const bufferDiv = document.createElement('div');
+                    bufferDiv.className = 'chart-wrapper';
+                    bufferDiv.innerHTML = `
+                        <h3>Vector Buffer Usage (7d)</h3>
+                        <canvas id="rlr-buffer-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-buffer"
+                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Peak:</strong> ${rlr.buffer_peak_mb || 0} MB &nbsp;|&nbsp;
+                            <strong>Max capacity:</strong> 10 GB &nbsp;|&nbsp;
+                            <div style="color: #28a745; display: inline;">✓ Normal: &lt; 7 GB</div> &nbsp;
+                            <div style="color: #ffc107; display: inline;">⚠ Warning: 7-9.5 GB</div> &nbsp;
+                            <div style="color: #dc3545; display: inline;">✗ Critical: &gt; 9.5 GB</div>
+                        </div>
+                    `;
+                    chartsDiv.appendChild(bufferDiv);
+                }
+
+                // Ingestion rate chart
+                if (rlr.ingestion_timeseries && rlr.ingestion_timeseries.length > 0) {
+                    const ingestionDiv = document.createElement('div');
+                    ingestionDiv.className = 'chart-wrapper';
+                    ingestionDiv.innerHTML = `
+                        <h3>Vector Log Ingestion Rate (7d)</h3>
+                        <canvas id="rlr-ingestion-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-ingestion"
+                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Peak:</strong> ${rlr.ingestion_peak_events_per_sec || 0} events/sec &nbsp;|&nbsp;
+                            Zero rate with active HCPs = Vector not collecting logs
+                        </div>
+                    `;
+                    chartsDiv.appendChild(ingestionDiv);
+                }
+
+                // Event loss chart
+                if (rlr.event_loss_timeseries && rlr.event_loss_timeseries.length > 0) {
+                    const lossDiv = document.createElement('div');
+                    lossDiv.className = 'chart-wrapper';
+                    const lossCount = rlr.event_loss_error_count || 0;
+                    lossDiv.innerHTML = `
+                        <h3>Vector Event Loss Rate (7d)</h3>
+                        <canvas id="rlr-loss-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-loss"
+                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>${lossCount > 0 ? '⚠' : '✓'} ${lossCount} non-zero data points</strong> — positive values mean customer logs are being dropped.
+                        </div>
+                    `;
+                    chartsDiv.appendChild(lossDiv);
+                }
+
+                // S3 write ratio chart
+                if (rlr.write_ratio_timeseries && rlr.write_ratio_timeseries.length > 0) {
+                    const writeDiv = document.createElement('div');
+                    writeDiv.className = 'chart-wrapper';
+                    writeDiv.innerHTML = `
+                        <h3>Vector S3 Write Ratio (7d)</h3>
+                        <canvas id="rlr-write-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-write"
+                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            1.0 = keeping up with delivery &nbsp;|&nbsp; &lt; 1.0 = backpressure (logs buffering faster than S3 delivery)
+                        </div>
+                    `;
+                    chartsDiv.appendChild(writeDiv);
+                }
+
+                // Memory chart
+                if (rlr.memory_timeseries && rlr.memory_timeseries.length > 0) {
+                    const memDiv = document.createElement('div');
+                    memDiv.className = 'chart-wrapper';
+                    memDiv.innerHTML = `
+                        <h3>Vector Aggregate Memory (7d)</h3>
+                        <canvas id="rlr-mem-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-memory"
+                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Peak:</strong> ${rlr.peak_memory_mb || 0} MB &nbsp;|&nbsp;
+                            <strong>Trend:</strong> ${rlr.memory_trend || 'unknown'} (${rlr.memory_increase_percent || 0}%)
+                        </div>
+                    `;
+                    chartsDiv.appendChild(memDiv);
+                }
+
+                // CPU chart
+                if (rlr.cpu_timeseries && rlr.cpu_timeseries.length > 0) {
+                    const cpuDiv = document.createElement('div');
+                    cpuDiv.className = 'chart-wrapper';
+                    cpuDiv.innerHTML = `
+                        <h3>Vector Aggregate CPU (7d)</h3>
+                        <canvas id="rlr-cpu-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-cpu"
+                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Peak:</strong> ${rlr.peak_cpu_millicores || 0}m &nbsp;|&nbsp;
+                            <strong>Trend:</strong> ${rlr.cpu_increase_percent || 0}% change over 7d
+                        </div>
+                    `;
+                    chartsDiv.appendChild(cpuDiv);
                 }
             }
 
