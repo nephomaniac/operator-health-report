@@ -63,6 +63,7 @@ func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext)
 	checkMonitoringCredentials(ctx, cc, hasRHOBS)
 	checkMetricsDestination(ctx, cc, hasRHOBS)
 	checkRemoteWriteConfig(ctx, cc, hasRHOBS)
+	checkPrometheusHealth(ctx, cc, hasRHOBS)
 	checkPrometheusStatefulSets(ctx, cc, hasRHOBS)
 
 	// Log collection (source: rhobs/configuration)
@@ -92,6 +93,24 @@ func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext)
 	}
 }
 
+const (
+	labelRHOBSRegional = "ext-managed.openshift.io/rhobs-regional-cluster"
+	labelFedRAMP       = "api.openshift.com/fedramp"
+)
+
+func isRHOBSExpected(cc *checks.ClusterContext) bool {
+	if cc.Metadata == nil || cc.Metadata.Labels == nil {
+		return false // can't determine — treat as not expected
+	}
+	if cc.Metadata.Labels[labelRHOBSRegional] != "true" {
+		return false
+	}
+	if cc.Metadata.Labels[labelFedRAMP] == "true" {
+		return false
+	}
+	return true
+}
+
 // --- Metric Collection (rhobs/configuration) ---
 
 func checkMonitoringStack(ctx context.Context, cc *checks.ClusterContext) bool {
@@ -105,7 +124,7 @@ func checkMonitoringStack(ctx context.Context, cc *checks.ClusterContext) bool {
 			"namespace":     observabilityNS,
 			"resource":      "MonitoringStack/rhobs-hypershift-monitoring-stack",
 			"description":   "Validates the RHOBS MonitoringStack CR exists and is healthy. This is the central component that deploys Prometheus and Alertmanager for scraping HCP metrics and remote-writing them to the RHOBS cell. Deployed via SelectorSyncSet from hive.",
-			"pass_criteria": "PASS: Available=True condition. WARN: CR exists but Available!=True. SKIP: CRD or CR not found (RHOBS not configured). FAIL: API error.",
+			"pass_criteria": "PASS: Available=True condition. WARN: CR exists but Available!=True. INFO: Not found and not expected (no rhobs-regional-cluster label). FAIL: Not found but expected (label set), or API error.",
 		},
 	}
 
@@ -118,8 +137,15 @@ func checkMonitoringStack(ctx context.Context, cc *checks.ClusterContext) bool {
 			return false
 		}
 		if isNotFoundOrCRDMissing(err) {
-			r.Status = checks.StatusSkip
-			r.Message = fmt.Sprintf("MonitoringStack CRD or resource not found in %s — RHOBS metric collection not configured on this cluster", observabilityNS)
+			expected := isRHOBSExpected(cc)
+			r.Details["rhobs_expected"] = expected
+			if expected {
+				r.Status = checks.StatusFail
+				r.Message = fmt.Sprintf("MonitoringStack not found but RHOBS is expected on this cluster (label %s=true)", labelRHOBSRegional)
+			} else {
+				r.Status = checks.StatusInfo
+				r.Message = fmt.Sprintf("RHOBS not configured on this cluster — label %s not set", labelRHOBSRegional)
+			}
 		} else {
 			r.Status = checks.StatusFail
 			r.Message = fmt.Sprintf("Cannot access MonitoringStack: %v", err)
@@ -165,8 +191,8 @@ func checkMonitoringCredentials(ctx context.Context, cc *checks.ClusterContext, 
 	}
 
 	if !hasRHOBS {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — RHOBS metric collection not configured on this cluster"
+		r.Status = checks.StatusInfo
+		r.Message = "RHOBS metric collection not configured on this cluster"
 		r.Severity = checks.SeverityInfo
 		cc.AddResult(r)
 		return
@@ -212,8 +238,8 @@ func checkMetricsDestination(ctx context.Context, cc *checks.ClusterContext, has
 	}
 
 	if !hasRHOBS {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — RHOBS metric collection not configured on this cluster"
+		r.Status = checks.StatusInfo
+		r.Message = "RHOBS metric collection not configured on this cluster"
 		r.Severity = checks.SeverityInfo
 		cc.AddResult(r)
 		return
@@ -256,8 +282,8 @@ func checkRemoteWriteConfig(ctx context.Context, cc *checks.ClusterContext, hasR
 	}
 
 	if !hasRHOBS {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — RHOBS metric collection not configured on this cluster"
+		r.Status = checks.StatusInfo
+		r.Message = "RHOBS metric collection not configured on this cluster"
 		r.Severity = checks.SeverityInfo
 		cc.AddResult(r)
 		return
@@ -318,6 +344,98 @@ func checkRemoteWriteConfig(ctx context.Context, cc *checks.ClusterContext, hasR
 	cc.AddResult(r)
 }
 
+func checkPrometheusHealth(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
+	cc.CurrentCheck = "rhobs_prometheus_health"
+
+	prometheusGVR := schema.GroupVersionResource{
+		Group: "monitoring.rhobs", Version: "v1", Resource: "prometheuses",
+	}
+
+	r := checks.Result{
+		Check:    "rhobs_prometheus_health",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"source_repo":   "rhobs/configuration",
+			"namespace":     observabilityNS,
+			"api_group":     "monitoring.rhobs/v1",
+			"description":   "Validates the RHOBS Prometheus CR (monitoring.rhobs/v1) status conditions and replica health. This Prometheus instance scrapes HCP metrics and remote-writes to the RHOBS cell. Available=True and Reconciled=True indicate the Prometheus operator has successfully deployed and is managing the instance. Shard status shows per-shard replica availability.",
+			"pass_criteria": "PASS: Available=True, Reconciled=True, all replicas ready. WARN: Prometheus exists but conditions degraded or replicas not ready. SKIP: RHOBS not configured. FAIL: Cannot access Prometheus CR.",
+		},
+	}
+
+	if !hasRHOBS {
+		r.Status = checks.StatusInfo
+		r.Message = "RHOBS metric collection not configured on this cluster"
+		r.Severity = checks.SeverityInfo
+		cc.AddResult(r)
+		return
+	}
+
+	prom, err := cc.Client.GetResource(ctx, prometheusGVR, observabilityNS, "rhobs-hypershift-monitoring-stack", false)
+	cc.RecordError("Get RHOBS Prometheus CR", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Cannot access RHOBS Prometheus CR: %v", err)
+		cc.AddResult(r)
+		return
+	}
+
+	conditions, _, _ := unstructuredConditions(prom)
+	r.Details["conditions"] = conditions
+
+	available := false
+	reconciled := false
+	for _, c := range conditions {
+		if c["type"] == "Available" && c["status"] == "True" {
+			available = true
+		}
+		if c["type"] == "Reconciled" && c["status"] == "True" {
+			reconciled = true
+		}
+	}
+
+	replicas, _, _ := unstructured.NestedInt64(prom.Object, "status", "replicas")
+	availableReplicas, _, _ := unstructured.NestedInt64(prom.Object, "status", "availableReplicas")
+	r.Details["replicas"] = replicas
+	r.Details["available_replicas"] = availableReplicas
+
+	// Check shard status for detailed health
+	shardStatuses, found, _ := unstructured.NestedSlice(prom.Object, "status", "shardStatuses")
+	if found {
+		var shardInfo []string
+		for _, s := range shardStatuses {
+			sMap, ok := s.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			shardID, _ := sMap["shardID"].(string)
+			shardReplicas, _ := sMap["replicas"].(int64)
+			shardAvail, _ := sMap["availableReplicas"].(int64)
+			shardUnavail, _ := sMap["unavailableReplicas"].(int64)
+			shardInfo = append(shardInfo, fmt.Sprintf("shard-%s: %d/%d available, %d unavailable", shardID, shardAvail, shardReplicas, shardUnavail))
+		}
+		r.Details["shard_statuses"] = shardInfo
+	}
+
+	switch {
+	case available && reconciled && availableReplicas == replicas:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("RHOBS Prometheus healthy — Available=True, Reconciled=True, %d/%d replicas ready", availableReplicas, replicas)
+	case available && reconciled:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("RHOBS Prometheus conditions healthy but %d/%d replicas available", availableReplicas, replicas)
+	default:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("RHOBS Prometheus degraded — Available=%v, Reconciled=%v, %d/%d replicas", available, reconciled, availableReplicas, replicas)
+	}
+	cc.AddResult(r)
+}
+
 func checkPrometheusStatefulSets(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
 	cc.CurrentCheck = "rhobs_prometheus_statefulsets"
 
@@ -333,8 +451,8 @@ func checkPrometheusStatefulSets(ctx context.Context, cc *checks.ClusterContext,
 	}
 
 	if !hasRHOBS {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — RHOBS metric collection not configured on this cluster"
+		r.Status = checks.StatusInfo
+		r.Message = "RHOBS metric collection not configured on this cluster"
 		r.Severity = checks.SeverityInfo
 		cc.AddResult(r)
 		return
@@ -433,8 +551,13 @@ func checkLogForwarder(ctx context.Context, cc *checks.ClusterContext) {
 			return
 		}
 		if isNotFoundOrCRDMissing(err) {
-			r.Status = checks.StatusSkip
-			r.Message = fmt.Sprintf("ClusterLogForwarder CRD not found — log forwarding not available on this cluster")
+			if isRHOBSExpected(cc) {
+				r.Status = checks.StatusFail
+				r.Message = "ClusterLogForwarder CRD not found but RHOBS is expected on this cluster"
+			} else {
+				r.Status = checks.StatusInfo
+				r.Message = "ClusterLogForwarder CRD not found — RHOBS log forwarding not configured"
+			}
 		} else {
 			r.Status = checks.StatusFail
 			r.Message = fmt.Sprintf("Cannot list ClusterLogForwarders: %v", err)
@@ -474,8 +597,13 @@ func checkLogForwarder(ctx context.Context, cc *checks.ClusterContext) {
 
 	switch {
 	case len(rhobsCLFs) == 0:
-		r.Status = checks.StatusSkip
-		r.Message = fmt.Sprintf("No RHOBS ClusterLogForwarders found in %s", loggingNS)
+		if isRHOBSExpected(cc) {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("No RHOBS ClusterLogForwarders found in %s — expected on this cluster", loggingNS)
+		} else {
+			r.Status = checks.StatusInfo
+			r.Message = fmt.Sprintf("No RHOBS ClusterLogForwarders in %s — RHOBS log forwarding not configured", loggingNS)
+		}
 	case len(notReadyCLFs) > 0:
 		r.Status = checks.StatusWarning
 		r.Message = fmt.Sprintf("%d/%d RHOBS ClusterLogForwarder(s) not Ready: %s",
@@ -543,8 +671,13 @@ func checkLogCollectorDaemonSet(ctx context.Context, cc *checks.ClusterContext) 
 
 	switch {
 	case len(rhobsDS) == 0:
-		r.Status = checks.StatusSkip
-		r.Message = fmt.Sprintf("No RHOBS log collector DaemonSets found in %s — CLF may not be configured", loggingNS)
+		if isRHOBSExpected(cc) {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("No RHOBS log collector DaemonSets found in %s — expected on this cluster", loggingNS)
+		} else {
+			r.Status = checks.StatusInfo
+			r.Message = fmt.Sprintf("No RHOBS log collector DaemonSets in %s — RHOBS log forwarding not configured", loggingNS)
+		}
 	case !allHealthy:
 		r.Status = checks.StatusWarning
 		r.Message = fmt.Sprintf("Log collector DaemonSet degraded: %s", strings.Join(degradedDS, ", "))
@@ -574,8 +707,13 @@ func checkLogEventCollector(ctx context.Context, cc *checks.ClusterContext) {
 	// Check if the eventrouter namespace exists first
 	_, nsErr := cc.Client.Clientset().CoreV1().Namespaces().Get(ctx, eventRouterNS, metav1.GetOptions{})
 	if nsErr != nil {
-		r.Status = checks.StatusSkip
-		r.Message = fmt.Sprintf("Namespace %s not found — event collector not configured on this cluster", eventRouterNS)
+		if isRHOBSExpected(cc) {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("Namespace %s not found — event collector expected on this cluster", eventRouterNS)
+		} else {
+			r.Status = checks.StatusInfo
+			r.Message = fmt.Sprintf("Namespace %s not found — event collector not configured", eventRouterNS)
+		}
 		cc.AddResult(r)
 		return
 	}
@@ -616,7 +754,7 @@ func checkLogEventCollector(ctx context.Context, cc *checks.ClusterContext) {
 
 	switch {
 	case len(erNames) == 0:
-		r.Status = checks.StatusSkip
+		r.Status = checks.StatusInfo
 		r.Message = fmt.Sprintf("No RHOBS EventRouter deployments found in %s", eventRouterNS)
 	case len(degradedNames) > 0:
 		r.Status = checks.StatusWarning
@@ -645,8 +783,8 @@ func checkLogTokenRefresher(ctx context.Context, cc *checks.ClusterContext, hasR
 	}
 
 	if !hasRHOBS {
-		r.Status = checks.StatusSkip
-		r.Message = "Skipped — RHOBS metric collection not configured on this cluster"
+		r.Status = checks.StatusInfo
+		r.Message = "RHOBS metric collection not configured on this cluster"
 		r.Severity = checks.SeverityInfo
 		cc.AddResult(r)
 		return
@@ -660,8 +798,13 @@ func checkLogTokenRefresher(ctx context.Context, cc *checks.ClusterContext, hasR
 			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 			return
 		}
-		r.Status = checks.StatusSkip
-		r.Message = fmt.Sprintf("Token refresher deployment not found in %s — may not be configured", loggingNS)
+		if isRHOBSExpected(cc) {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("Token refresher deployment not found in %s — expected on this cluster", loggingNS)
+		} else {
+			r.Status = checks.StatusInfo
+			r.Message = fmt.Sprintf("Token refresher not configured in %s", loggingNS)
+		}
 		cc.AddResult(r)
 		return
 	}
@@ -703,8 +846,13 @@ func checkLogDestination(ctx context.Context, cc *checks.ClusterContext) {
 			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 			return
 		}
-		r.Status = checks.StatusSkip
-		r.Message = fmt.Sprintf("Log destination ConfigMap not found in %s — RHOBS log forwarding may not be configured", loggingNS)
+		if isRHOBSExpected(cc) {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("Log destination ConfigMap not found in %s — expected on this cluster", loggingNS)
+		} else {
+			r.Status = checks.StatusInfo
+			r.Message = fmt.Sprintf("Log destination ConfigMap not found in %s — RHOBS log forwarding not configured", loggingNS)
+		}
 		cc.AddResult(r)
 		return
 	}
@@ -925,7 +1073,7 @@ func checkCLFConditions(ctx context.Context, cc *checks.ClusterContext) {
 			return
 		}
 		if isNotFoundOrCRDMissing(err) {
-			r.Status = checks.StatusSkip
+			r.Status = checks.StatusInfo
 			r.Message = "ClusterLogForwarder CRD not available"
 		} else {
 			r.Status = checks.StatusFail
@@ -989,8 +1137,8 @@ func checkCLFConditions(ctx context.Context, cc *checks.ClusterContext) {
 
 	switch {
 	case len(rhobsCLFs) == 0:
-		r.Status = checks.StatusSkip
-		r.Message = "No RHOBS ClusterLogForwarders found — condition check skipped"
+		r.Status = checks.StatusInfo
+		r.Message = "No RHOBS ClusterLogForwarders found — condition check not applicable"
 	case !allHealthy:
 		r.Status = checks.StatusWarning
 		r.Message = fmt.Sprintf("CLF condition issues: %s", strings.Join(issues, "; "))

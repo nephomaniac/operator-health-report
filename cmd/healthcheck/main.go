@@ -405,6 +405,7 @@ func main() {
 				Shard:          meta.Shard,
 				OwnerOrg:       meta.OwnerOrg,
 				OwnerEmail:     maskedEmail,
+				Labels:         meta.Labels,
 			}
 
 			var wg sync.WaitGroup

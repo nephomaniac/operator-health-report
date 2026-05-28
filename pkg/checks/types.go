@@ -82,8 +82,9 @@ type ClusterMetadata struct {
 	ChannelGroup    string `json:"channel_group"`
 	LimitedSupport  bool   `json:"limited_support"`
 	Shard           string `json:"shard"`
-	OwnerOrg        string `json:"owner_org,omitempty"`
-	OwnerEmail      string `json:"owner_email,omitempty"`
+	OwnerOrg        string            `json:"owner_org,omitempty"`
+	OwnerEmail      string            `json:"owner_email,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
 }
 
 // ClusterOutput is the JSON output for a single cluster+operator check

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	sdk "github.com/openshift-online/ocm-sdk-go"
+	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
 
 	ocmConfig "github.com/openshift-online/ocm-common/pkg/ocm/config"
 	ocmConnBuilder "github.com/openshift-online/ocm-common/pkg/ocm/connection-builder"
@@ -312,6 +313,15 @@ func (c *Client) GetClusterMetadata(clusterID string) (*ClusterMeta, error) {
 		}
 	}
 
+	// Fetch external configuration labels
+	labels := map[string]string{}
+	if labelsResp, err := c.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).ExternalConfiguration().Labels().List().Send(); err == nil {
+		labelsResp.Items().Each(func(l *cmv1.Label) bool {
+			labels[l.Key()] = l.Value()
+			return true
+		})
+	}
+
 	meta := &ClusterMeta{
 		ID:             cl.ID(),
 		ExternalID:     cl.ExternalID(),
@@ -332,6 +342,7 @@ func (c *Client) GetClusterMetadata(clusterID string) (*ClusterMeta, error) {
 		ChannelGroup:   cl.Version().ChannelGroup(),
 		LimitedSupport: cl.Status().LimitedSupportReasonCount() > 0,
 		Shard:          shard,
+		Labels:         labels,
 	}
 
 	// Fetch subscription for owner info
@@ -373,9 +384,10 @@ type ClusterMeta struct {
 	ExistingVPC    bool   `json:"existing_vpc"`
 	ChannelGroup   string `json:"channel_group"`
 	LimitedSupport bool   `json:"limited_support"`
-	Shard          string `json:"shard"`
-	OwnerOrg       string `json:"owner_org,omitempty"`
-	OwnerEmail     string `json:"owner_email,omitempty"`
+	Shard          string            `json:"shard"`
+	OwnerOrg       string            `json:"owner_org,omitempty"`
+	OwnerEmail     string            `json:"owner_email,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
 }
 
 func (c *Client) wrapError(operation string, err error) error {
