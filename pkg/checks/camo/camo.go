@@ -331,7 +331,7 @@ func checkReconciliationBehavior(ctx context.Context, cc *checks.ClusterContext,
 	cc.AddResult(r)
 }
 
-// checkAlertmanagerSecret checks AM secret, CAMO ConfigMap, and PagerDuty secret existence
+// checkAlertmanagerSecret checks AM secret and the secrets/configmaps CAMO watches for reconciliation
 func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
 	cc.CurrentCheck = "alertmanager_secret"
 
@@ -339,8 +339,8 @@ func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
 		Check:    "alertmanager_secret",
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
-			"description":   "Validates that the alertmanager-main Secret exists and checks for the CAMO ConfigMap and PagerDuty secret. The alertmanager-main secret contains the full AlertManager configuration including all receivers and routes — without it, AlertManager cannot start. The pd-secret contains the PagerDuty integration key required for alert delivery. Requires elevated permissions to read secrets.",
-			"pass_criteria": "PASS: alertmanager-main secret exists with data keys. Also reports whether the configure-alertmanager-operator-config ConfigMap and pd-secret exist. FAIL: alertmanager-main secret not found. SKIP: elevation not available (cannot read secrets without backplane-cluster-admin).",
+			"description":   "Validates the resources CAMO watches to build the Alertmanager configuration. The alertmanager-main secret is the rendered AM config (required). CAMO also reconciles optional secrets (pd-secret for PagerDuty, dms-secret for Dead Man's Snitch, goalert-secret for GoAlert) — if present, their receivers are added to the AM config. The managed-namespaces and ocp-namespaces ConfigMaps control alert routing rules per namespace.",
+			"pass_criteria": "PASS: alertmanager-main secret exists. Reports presence of each optional resource. WARN: pd-secret missing (PagerDuty alerts won't deliver). FAIL: alertmanager-main secret not found. SKIP: elevation not available.",
 		},
 	}
 
@@ -349,32 +349,77 @@ func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
 		return
 	}
 
-	// Check alertmanager-main secret
+	// Check alertmanager-main secret (required — the rendered AM config)
 	secret, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, "alertmanager-main", metav1.GetOptions{})
 	cc.RecordError("Get alertmanager-main secret", err)
 
 	if err != nil {
 		r.Status = checks.StatusFail
-		r.Message = "Alertmanager secret not found"
+		r.Message = "alertmanager-main secret not found — Alertmanager cannot start without its configuration secret"
 		cc.AddResult(r)
 		return
 	}
 
 	keyCount := len(secret.Data)
-	r.Details["key_count"] = keyCount
+	r.Details["alertmanager_main_keys"] = keyCount
 
-	// Check CAMO ConfigMap
-	_, cmErr := cc.Client.Clientset().CoreV1().ConfigMaps(cc.Operator.Namespace).Get(ctx, "configure-alertmanager-operator-config", metav1.GetOptions{})
-	cmExists := cmErr == nil
-	r.Details["configmap_exists"] = cmExists
+	// Check optional secrets that CAMO watches for receiver configuration
+	type watchedResource struct {
+		kind    string
+		name    string
+		purpose string
+		warn    bool // true = WARN if missing, false = INFO
+	}
+	resources := []watchedResource{
+		{"secret", "pd-secret", "PagerDuty integration key — if present, CAMO adds PD receiver for alert delivery", true},
+		{"secret", "dms-secret", "Dead Man's Snitch URL — if present, CAMO adds watchdog/heartbeat receiver", false},
+		{"secret", "goalert-secret", "GoAlert URLs (high/low/heartbeat) — if present, CAMO adds GoAlert receivers", false},
+		{"configmap", "managed-namespaces", "Managed namespace list — controls which namespaces get alert routing rules", false},
+		{"configmap", "ocp-namespaces", "OCP namespace list — controls platform namespace alert routing", false},
+	}
 
-	// Check PagerDuty secret
-	_, pdErr := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, "pd-secret", metav1.GetOptions{})
-	pdExists := pdErr == nil
-	r.Details["pagerduty_configured"] = pdExists
+	var present []string
+	var missing []string
+	var warnMissing []string
 
-	r.Status = checks.StatusPass
-	r.Message = fmt.Sprintf("Secret exists (%d keys)", keyCount)
+	for _, res := range resources {
+		exists := false
+		if res.kind == "secret" {
+			_, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, res.name, metav1.GetOptions{})
+			exists = err == nil
+		} else {
+			_, err := cc.Client.Clientset().CoreV1().ConfigMaps(cc.Operator.Namespace).Get(ctx, res.name, metav1.GetOptions{})
+			exists = err == nil
+		}
+
+		r.Details[res.name+"_exists"] = exists
+		r.Details[res.name+"_purpose"] = res.purpose
+
+		if exists {
+			present = append(present, res.name)
+		} else {
+			missing = append(missing, res.name)
+			if res.warn {
+				warnMissing = append(warnMissing, res.name)
+			}
+		}
+	}
+
+	r.Details["present_resources"] = present
+	r.Details["missing_resources"] = missing
+
+	if len(warnMissing) > 0 {
+		r.Status = checks.StatusWarning
+		r.Severity = checks.SeverityWarning
+		r.Message = fmt.Sprintf("alertmanager-main secret present (%d keys) but %s missing — alert delivery may be impacted", keyCount, strings.Join(warnMissing, ", "))
+	} else if len(missing) > 0 {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("alertmanager-main secret (%d keys) + %d/%d optional resources present. Not configured: %s",
+			keyCount, len(present), len(resources), strings.Join(missing, ", "))
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("alertmanager-main secret (%d keys) + all %d watched resources present", keyCount, len(resources))
+	}
 
 	cc.AddResult(r)
 }
