@@ -63,10 +63,13 @@
                             if (chartType === 'duration') createDurationChart(el.id, chartData, restarts, versions);
                             if (chartType === 'sfo-throughput') createSFOThroughputChart(el.id, chartData, restarts, versions);
                             if (chartType === 'sfo-errors') createSFOErrorChart(el.id, chartData, restarts, versions);
-                            if (chartType === 'rlr-buffer') createRLRTimeseriesChart(el.id, chartData.buffer_timeseries, 'Buffer (MB)', '#6c8cff', 1/(1024*1024));
+                            if (chartType === 'rlr-buffer-pods') createRLRMultiSeriesChart(el.id, chartData.buffer_saturation_timeseries_by_pod, 'Buffer Saturation (%)', 100, [{y: 70, label: 'Warning (70%)', color: '#ffc107'}, {y: 95, label: 'Critical (95%)', color: '#dc3545'}]);
                             if (chartType === 'rlr-ingestion') createRLRTimeseriesChart(el.id, chartData.ingestion_timeseries, 'Events/sec', '#2dd4a0', 1);
+                            if (chartType === 'rlr-ingestion-clusters') createRLRMultiSeriesChart(el.id, chartData.ingestion_timeseries_by_cluster, 'Events/sec', 1, [{y: 2000, label: 'Runaway threshold', color: '#f25c5c'}]);
                             if (chartType === 'rlr-loss') createRLRTimeseriesChart(el.id, chartData.event_loss_timeseries, 'Events/sec lost', '#f25c5c', 1);
-                            if (chartType === 'rlr-write') createRLRTimeseriesChart(el.id, chartData.write_ratio_timeseries, 'Write Ratio', '#f5c542', 1);
+                            if (chartType === 'rlr-loss-pods') createRLRMultiSeriesChart(el.id, chartData.event_loss_timeseries_by_pod, 'Events/sec lost', 1, []);
+                            if (chartType === 'rlr-write') createRLRTimeseriesChart(el.id, chartData.write_ratio_timeseries, 'Write Ratio', '#f5c542', 1, [{y: 0.99, label: 'SLO (0.99)', color: '#dc3545'}]);
+                            if (chartType === 'rlr-write-pods') createRLRMultiSeriesChart(el.id, chartData.write_ratio_timeseries_by_pod, 'Write Ratio', 1, [{y: 0.99, label: 'SLO (0.99)', color: '#dc3545'}]);
                             if (chartType === 'rlr-memory') createRLRTimeseriesChart(el.id, chartData.memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
                             if (chartType === 'rlr-cpu') createRLRTimeseriesChart(el.id, chartData.cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
                         }, 50);
@@ -902,9 +905,17 @@
             });
         }
 
-        function createRLRTimeseriesChart(canvasId, timeseries, label, color, scaleFactor) {
+        function createRLRTimeseriesChart(canvasId, timeseries, label, color, scaleFactor, thresholds) {
             if (!timeseries || timeseries.length === 0) return;
             const data = timeseries.map(p => ({ x: parseFloat(p[0]) * 1000, y: parseFloat(p[1]) * scaleFactor }));
+            const annotations = {};
+            (thresholds || []).forEach((t, i) => {
+                annotations['threshold_' + i] = {
+                    type: 'line', yMin: t.y, yMax: t.y,
+                    borderColor: t.color, borderWidth: 1.5, borderDash: [6, 3],
+                    label: { display: true, content: t.label, position: 'start', backgroundColor: t.color + '40', color: t.color, font: { size: 10 } }
+                };
+            });
 
             new Chart(document.getElementById(canvasId), {
                 type: 'line',
@@ -931,11 +942,58 @@
                                 title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
                                 label: ctx => label + ': ' + ctx.parsed.y.toFixed(2)
                             }
-                        }
+                        },
+                        annotation: { annotations }
                     },
                     scales: {
                         x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
                         y: { beginAtZero: true, title: { display: true, text: label } }
+                    }
+                }
+            });
+        }
+
+        function createRLRMultiSeriesChart(canvasId, seriesData, yLabel, scaleFactor, thresholds) {
+            if (!seriesData || seriesData.length === 0) return;
+            const colors = ['#6c8cff','#2dd4a0','#f5c542','#f25c5c','#56b8e6','#ff9f40','#a855f7','#ec4899',
+                            '#14b8a6','#f97316'];
+            const annotations = {};
+            (thresholds || []).forEach((t, i) => {
+                annotations['threshold_' + i] = {
+                    type: 'line', yMin: t.y, yMax: t.y,
+                    borderColor: t.color, borderWidth: 1.5, borderDash: [6, 3],
+                    label: { display: true, content: t.label, position: 'start', backgroundColor: t.color + '40', color: t.color, font: { size: 10 } }
+                };
+            });
+            const datasets = seriesData.map((s, i) => ({
+                label: s.label || `pod-${i}`,
+                data: (s.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * scaleFactor })),
+                borderColor: colors[i % colors.length],
+                backgroundColor: 'transparent',
+                tension: 0.3,
+                pointRadius: 0,
+                borderWidth: 1.5
+            }));
+
+            new Chart(document.getElementById(canvasId), {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true, maintainAspectRatio: true,
+                    plugins: {
+                        legend: { display: true, position: 'top', labels: { boxWidth: 8, font: { size: 10 } } },
+                        tooltip: {
+                            mode: 'index', intersect: false,
+                            callbacks: {
+                                title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
+                                label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2)
+                            }
+                        },
+                        annotation: { annotations }
+                    },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
+                        y: { beginAtZero: true, title: { display: true, text: yLabel } }
                     }
                 }
             });
@@ -1291,55 +1349,68 @@
             if (rlrTrendsCheck && rlrTrendsCheck.details) {
                 const rlr = rlrTrendsCheck.details;
 
-                // Buffer usage chart
-                if (rlr.buffer_timeseries && rlr.buffer_timeseries.length > 0) {
-                    const bufferDiv = document.createElement('div');
-                    bufferDiv.className = 'chart-wrapper';
-                    bufferDiv.innerHTML = `
-                        <h3>Vector Buffer Usage (7d)</h3>
-                        <canvas id="rlr-buffer-chart-${clusterIdx}" class="chart-canvas"
-                            data-pending-chart="rlr-buffer"
-                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                const rlrJson = JSON.stringify(rlr).replace(/'/g, "&#39;");
+
+                // Buffer saturation per pod — primary buffer chart
+                if (rlr.buffer_saturation_timeseries_by_pod && rlr.buffer_saturation_timeseries_by_pod.length > 0) {
+                    const bufPodDiv = document.createElement('div');
+                    bufPodDiv.className = 'chart-wrapper';
+                    bufPodDiv.innerHTML = `
+                        <h3>HCP Log Forwarding — Buffer Saturation Per Pod (7d)</h3>
+                        <canvas id="rlr-buffer-pods-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-buffer-pods"
+                            data-chart-data='${rlrJson}'
                         ></canvas>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
-                            <strong>Peak:</strong> ${rlr.buffer_peak_mb || 0} MB &nbsp;|&nbsp;
-                            <strong>Max capacity:</strong> 10 GB &nbsp;|&nbsp;
-                            <div style="color: #28a745; display: inline;">✓ Normal: &lt; 7 GB</div> &nbsp;
-                            <div style="color: #ffc107; display: inline;">⚠ Warning: 7-9.5 GB</div> &nbsp;
-                            <div style="color: #dc3545; display: inline;">✗ Critical: &gt; 9.5 GB</div>
+                            Top ${rlr.buffer_saturation_total_pods ? rlr.buffer_saturation_timeseries_by_pod.length + ' of ' + rlr.buffer_saturation_total_pods : ''} pods by peak buffer usage. Each pod has its own independent 10 GB disk buffer.
                         </div>
                     `;
-                    chartsDiv.appendChild(bufferDiv);
+                    chartsDiv.appendChild(bufPodDiv);
                 }
 
-                // Ingestion rate chart
+                // Ingestion rate — aggregate + per-pod + per-cluster
                 if (rlr.ingestion_timeseries && rlr.ingestion_timeseries.length > 0) {
-                    const ingestionDiv = document.createElement('div');
-                    ingestionDiv.className = 'chart-wrapper';
-                    ingestionDiv.innerHTML = `
-                        <h3>Vector Log Ingestion Rate (7d)</h3>
+                    const ingDiv = document.createElement('div');
+                    ingDiv.className = 'chart-wrapper';
+                    ingDiv.innerHTML = `
+                        <h3>HCP Log Forwarding — Ingestion Rate, Aggregate (7d)</h3>
                         <canvas id="rlr-ingestion-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="rlr-ingestion"
-                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                            data-chart-data='${rlrJson}'
                         ></canvas>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
                             <strong>Peak:</strong> ${rlr.ingestion_peak_events_per_sec || 0} events/sec &nbsp;|&nbsp;
                             Zero rate with active HCPs = Vector not collecting logs
                         </div>
                     `;
-                    chartsDiv.appendChild(ingestionDiv);
+                    chartsDiv.appendChild(ingDiv);
+                }
+                if (rlr.ingestion_timeseries_by_cluster && rlr.ingestion_timeseries_by_cluster.length > 0) {
+                    const ingClusterDiv = document.createElement('div');
+                    ingClusterDiv.className = 'chart-wrapper';
+                    ingClusterDiv.innerHTML = `
+                        <h3>HCP Log Forwarding — Ingestion Rate Per Hosted Cluster (7d)</h3>
+                        <canvas id="rlr-ingestion-clusters-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-ingestion-clusters"
+                            data-chart-data='${rlrJson}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            Top ${rlr.ingestion_total_clusters ? rlr.ingestion_timeseries_by_cluster.length + ' of ' + rlr.ingestion_total_clusters : ''} HCPs by peak log volume. &gt; 2,000 events/sec may indicate runaway logging.
+                        </div>
+                    `;
+                    chartsDiv.appendChild(ingClusterDiv);
                 }
 
-                // Event loss chart
+                // Event loss — aggregate + per-pod
                 if (rlr.event_loss_timeseries && rlr.event_loss_timeseries.length > 0) {
                     const lossDiv = document.createElement('div');
                     lossDiv.className = 'chart-wrapper';
                     const lossCount = rlr.event_loss_error_count || 0;
                     lossDiv.innerHTML = `
-                        <h3>Vector Event Loss Rate (7d)</h3>
+                        <h3>HCP Log Forwarding — Event Loss Rate (7d)</h3>
                         <canvas id="rlr-loss-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="rlr-loss"
-                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                            data-chart-data='${rlrJson}'
                         ></canvas>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
                             <strong>${lossCount > 0 ? '⚠' : '✓'} ${lossCount} non-zero data points</strong> — positive values mean customer logs are being dropped.
@@ -1347,16 +1418,31 @@
                     `;
                     chartsDiv.appendChild(lossDiv);
                 }
+                if (rlr.event_loss_timeseries_by_pod && rlr.event_loss_timeseries_by_pod.length > 0 && (rlr.event_loss_error_count || 0) > 0) {
+                    const lossPodDiv = document.createElement('div');
+                    lossPodDiv.className = 'chart-wrapper';
+                    lossPodDiv.innerHTML = `
+                        <h3>HCP Log Forwarding — Event Loss Rate Per Pod (7d)</h3>
+                        <canvas id="rlr-loss-pods-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-loss-pods"
+                            data-chart-data='${rlrJson}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            Top ${rlr.event_loss_total_pods ? rlr.event_loss_timeseries_by_pod.length + ' of ' + rlr.event_loss_total_pods : ''} pods by peak event loss rate.
+                        </div>
+                    `;
+                    chartsDiv.appendChild(lossPodDiv);
+                }
 
-                // S3 write ratio chart
+                // S3 write ratio — aggregate + per-pod
                 if (rlr.write_ratio_timeseries && rlr.write_ratio_timeseries.length > 0) {
                     const writeDiv = document.createElement('div');
                     writeDiv.className = 'chart-wrapper';
                     writeDiv.innerHTML = `
-                        <h3>Vector S3 Write Ratio (7d)</h3>
+                        <h3>HCP Log Forwarding — S3 Write Ratio (7d)</h3>
                         <canvas id="rlr-write-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="rlr-write"
-                            data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
+                            data-chart-data='${rlrJson}'
                         ></canvas>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
                             1.0 = keeping up with delivery &nbsp;|&nbsp; &lt; 1.0 = backpressure (logs buffering faster than S3 delivery)
@@ -1364,13 +1450,29 @@
                     `;
                     chartsDiv.appendChild(writeDiv);
                 }
+                const hasWriteDip = rlr.write_ratio_timeseries && rlr.write_ratio_timeseries.some(p => parseFloat(p[1]) < 0.99);
+                if (hasWriteDip && rlr.write_ratio_timeseries_by_pod && rlr.write_ratio_timeseries_by_pod.length > 0) {
+                    const writePodDiv = document.createElement('div');
+                    writePodDiv.className = 'chart-wrapper';
+                    writePodDiv.innerHTML = `
+                        <h3>HCP Log Forwarding — S3 Write Ratio Per Pod (7d)</h3>
+                        <canvas id="rlr-write-pods-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="rlr-write-pods"
+                            data-chart-data='${rlrJson}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            Top ${rlr.write_ratio_total_pods ? rlr.write_ratio_timeseries_by_pod.length + ' of ' + rlr.write_ratio_total_pods : ''} pods with worst (lowest) S3 delivery ratio — identifies pods with most backpressure.
+                        </div>
+                    `;
+                    chartsDiv.appendChild(writePodDiv);
+                }
 
                 // Memory chart
                 if (rlr.memory_timeseries && rlr.memory_timeseries.length > 0) {
                     const memDiv = document.createElement('div');
                     memDiv.className = 'chart-wrapper';
                     memDiv.innerHTML = `
-                        <h3>Vector Aggregate Memory (7d)</h3>
+                        <h3>HCP Log Forwarding — Vector Aggregate Memory (7d)</h3>
                         <canvas id="rlr-mem-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="rlr-memory"
                             data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
@@ -1388,7 +1490,7 @@
                     const cpuDiv = document.createElement('div');
                     cpuDiv.className = 'chart-wrapper';
                     cpuDiv.innerHTML = `
-                        <h3>Vector Aggregate CPU (7d)</h3>
+                        <h3>HCP Log Forwarding — Vector Aggregate CPU (7d)</h3>
                         <canvas id="rlr-cpu-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="rlr-cpu"
                             data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'

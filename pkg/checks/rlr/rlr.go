@@ -103,7 +103,7 @@ func checkVectorNamespace(ctx context.Context, cc *checks.ClusterContext) {
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
 			"namespace":     vectorNS,
-			"description":   "Validates the Vector log forwarding namespace exists and is Active. This namespace hosts the Vector DaemonSet that collects HCP control plane logs.",
+			"description":   "Validates the HCP log forwarding namespace exists and is Active. This namespace hosts the Vector DaemonSet that collects HCP control plane logs and writes them to the central S3 bucket for rosa-log-router delivery. Separate from the RHOBS Vector in openshift-logging.",
 			"pass_criteria": "PASS: Namespace Active. FAIL: Not found or Terminating.",
 		},
 	}
@@ -142,7 +142,7 @@ func checkVectorDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) 
 		Details: map[string]any{
 			"namespace":     vectorNS,
 			"daemonset":     vectorDS,
-			"description":   "Validates the Vector DaemonSet is healthy with all pods scheduled and ready. Vector collects HCP control plane logs from every node and writes them to S3.",
+			"description":   "Validates the HCP log forwarding Vector DaemonSet is healthy with all pods scheduled and ready. Each pod has its own disk buffer, S3 sink, and backpressure state. Separate from the RHOBS Vector in openshift-logging.",
 			"pass_criteria": "PASS: desired==ready, 0 misscheduled, no CrashLoopBackOff. WARN: Not all ready or crashlooping pods. FAIL: DaemonSet not found.",
 		},
 	}
@@ -644,7 +644,7 @@ func checkVectorEventLoss(ctx context.Context, cc *checks.ClusterContext) {
 		return
 	}
 
-	query := thanos.EncodeQuery(`max(vector:hcp_logs:event_loss_rate:by_pod)`)
+	query := thanos.EncodeQuery(`max(clamp_min(vector:hcp_logs:event_loss_rate:by_pod, 0))`)
 	body, err := cc.Client.QueryThanos(ctx, query)
 	cc.RecordError("Query Vector event loss rate", err)
 
@@ -1218,6 +1218,77 @@ func checkActiveAlerts(ctx context.Context, cc *checks.ClusterContext) {
 	cc.AddResult(r)
 }
 
+func topNSeriesByPeak(series []thanos.LabeledTimeseries, n int) []thanos.LabeledTimeseries {
+	if len(series) <= n {
+		return series
+	}
+	type scored struct {
+		idx  int
+		peak float64
+	}
+	scores := make([]scored, len(series))
+	for i, s := range series {
+		var peak float64
+		for _, p := range s.Values {
+			if p[1] > peak {
+				peak = p[1]
+			}
+		}
+		scores[i] = scored{i, peak}
+	}
+	// Simple selection sort for top N (N is small)
+	for i := 0; i < n && i < len(scores); i++ {
+		maxIdx := i
+		for j := i + 1; j < len(scores); j++ {
+			if scores[j].peak > scores[maxIdx].peak {
+				maxIdx = j
+			}
+		}
+		scores[i], scores[maxIdx] = scores[maxIdx], scores[i]
+	}
+	result := make([]thanos.LabeledTimeseries, n)
+	for i := 0; i < n; i++ {
+		result[i] = series[scores[i].idx]
+	}
+	return result
+}
+
+func topNSeriesByWorstRatio(series []thanos.LabeledTimeseries, n int) []thanos.LabeledTimeseries {
+	if len(series) <= n {
+		return series
+	}
+	type scored struct {
+		idx    int
+		minVal float64
+	}
+	scores := make([]scored, len(series))
+	for i, s := range series {
+		minVal := 1.0
+		for _, p := range s.Values {
+			if p[1] < minVal {
+				minVal = p[1]
+			}
+		}
+		scores[i] = scored{i, minVal}
+	}
+	for i := 0; i < n && i < len(scores); i++ {
+		minIdx := i
+		for j := i + 1; j < len(scores); j++ {
+			if scores[j].minVal < scores[minIdx].minVal {
+				minIdx = j
+			}
+		}
+		scores[i], scores[minIdx] = scores[minIdx], scores[i]
+	}
+	result := make([]thanos.LabeledTimeseries, n)
+	for i := 0; i < n; i++ {
+		result[i] = series[scores[i].idx]
+	}
+	return result
+}
+
+const maxChartSeries = 10
+
 // --- Timeseries Collection (7-day trends for charts) ---
 
 func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
@@ -1243,19 +1314,35 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 	step := 1800          // 30-minute intervals
 
 	seriesCollected := 0
+	podLabel := func(m map[string]string) string {
+		p := m["pod"]
+		if len(p) > 40 {
+			p = p[:37] + "..."
+		}
+		return p
+	}
+	clusterLabel := func(m map[string]string) string {
+		ns := m["pod_namespace"]
+		if ns == "" {
+			ns = m["namespace"]
+		}
+		if len(ns) > 40 {
+			ns = ns[:37] + "..."
+		}
+		return ns
+	}
 
-	// Buffer usage (bytes)
-	bufferQuery := thanos.EncodeQuery(`max(vector_buffer_byte_size{buffer_id="hcp_logs"})`)
-	if bufferData, err := cc.Client.QueryThanosRange(ctx, bufferQuery, start, now, step); err == nil {
-		if points, _ := thanos.Timeseries(bufferData); len(points) > 0 {
-			r.Details["buffer_timeseries"] = thanos.PointsToJSON(points)
-			peak := thanos.Peak(points)
-			r.Details["buffer_peak_mb"] = thanos.Round(sanitizeFloat(peak/(1024*1024)), 0)
+	// Buffer saturation per pod (0-1, fraction of 10GB max) — top N by peak
+	saturationQuery := thanos.EncodeQuery(`vector:s3_sink:buffer_saturation:by_pod`)
+	if satData, err := cc.Client.QueryThanosRange(ctx, saturationQuery, start, now, step); err == nil {
+		if series, _ := thanos.PerSeriesTimeseries(satData, podLabel); len(series) > 0 {
+			r.Details["buffer_saturation_total_pods"] = len(series)
+			r.Details["buffer_saturation_timeseries_by_pod"] = topNSeriesByPeak(series, maxChartSeries)
 			seriesCollected++
 		}
 	}
 
-	// Ingestion rate (events/sec)
+	// Ingestion rate — aggregate + top N clusters by volume
 	ingestionQuery := thanos.EncodeQuery(`vector:logs:ingestion_rate`)
 	if ingestionData, err := cc.Client.QueryThanosRange(ctx, ingestionQuery, start, now, step); err == nil {
 		if points, _ := thanos.Timeseries(ingestionData); len(points) > 0 {
@@ -1265,19 +1352,31 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 			seriesCollected++
 		}
 	}
+	clusterIngestionQuery := thanos.EncodeQuery(`vector:cluster:ingestion_rate`)
+	if clusterData, err := cc.Client.QueryThanosRange(ctx, clusterIngestionQuery, start, now, step); err == nil {
+		if series, _ := thanos.PerSeriesTimeseries(clusterData, clusterLabel); len(series) > 0 {
+			r.Details["ingestion_total_clusters"] = len(series)
+			r.Details["ingestion_timeseries_by_cluster"] = topNSeriesByPeak(series, maxChartSeries)
+			seriesCollected++
+		}
+	}
 
-	// Event loss rate (events/sec, positive = bad)
-	lossQuery := thanos.EncodeQuery(`max(vector:hcp_logs:event_loss_rate:by_pod)`)
+	// Event loss — aggregate (clamp negative to 0) + top N pods with most loss
+	lossQuery := thanos.EncodeQuery(`clamp_min(vector:hcp_logs:event_loss_rate:by_pod, 0)`)
 	if lossData, err := cc.Client.QueryThanosRange(ctx, lossQuery, start, now, step); err == nil {
 		if points, _ := thanos.Timeseries(lossData); len(points) > 0 {
 			errorPoints := thanos.FilterNonZero(points)
 			r.Details["event_loss_timeseries"] = thanos.PointsToJSON(points)
 			r.Details["event_loss_error_count"] = len(errorPoints)
+		}
+		if series, _ := thanos.PerSeriesTimeseries(lossData, podLabel); len(series) > 0 {
+			r.Details["event_loss_total_pods"] = len(series)
+			r.Details["event_loss_timeseries_by_pod"] = topNSeriesByPeak(series, maxChartSeries)
 			seriesCollected++
 		}
 	}
 
-	// S3 write ratio (1.0 = keeping up)
+	// Write ratio — aggregate + top N worst pods (lowest ratio = most backpressure)
 	writeQuery := thanos.EncodeQuery(`vector:s3_sink:write_ratio`)
 	if writeData, err := cc.Client.QueryThanosRange(ctx, writeQuery, start, now, step); err == nil {
 		if points, _ := thanos.Timeseries(writeData); len(points) > 0 {
@@ -1285,12 +1384,11 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 			seriesCollected++
 		}
 	}
-
-	// S3 delivery success ratio
-	successQuery := thanos.EncodeQuery(`vector:log_delivery:success_ratio`)
-	if successData, err := cc.Client.QueryThanosRange(ctx, successQuery, start, now, step); err == nil {
-		if points, _ := thanos.Timeseries(successData); len(points) > 0 {
-			r.Details["success_ratio_timeseries"] = thanos.PointsToJSON(points)
+	writeByPodQuery := thanos.EncodeQuery(`vector:logs:write_ratio:by_pod`)
+	if writeData, err := cc.Client.QueryThanosRange(ctx, writeByPodQuery, start, now, step); err == nil {
+		if series, _ := thanos.PerSeriesTimeseries(writeData, podLabel); len(series) > 0 {
+			r.Details["write_ratio_total_pods"] = len(series)
+			r.Details["write_ratio_timeseries_by_pod"] = topNSeriesByWorstRatio(series, maxChartSeries)
 			seriesCollected++
 		}
 	}

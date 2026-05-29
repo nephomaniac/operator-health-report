@@ -92,7 +92,7 @@ func Timeseries(body string) ([][2]float64, error) {
 				continue
 			}
 			val, ok := toFloat(v[1])
-			if !ok {
+			if !ok || math.IsNaN(val) || math.IsInf(val, 0) {
 				continue
 			}
 			seen[ts] = val
@@ -125,7 +125,7 @@ func PerSeriesTimeseries(body string, labelFn func(map[string]string) string) ([
 			}
 			ts, ok1 := toFloat(v[0])
 			val, ok2 := toFloat(v[1])
-			if ok1 && ok2 {
+			if ok1 && ok2 && !math.IsNaN(val) && !math.IsInf(val, 0) {
 				points = append(points, [2]float64{ts, val})
 			}
 		}
