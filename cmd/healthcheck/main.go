@@ -367,7 +367,7 @@ func main() {
 			if cellURL := meta.Labels["ext-hypershift.openshift.io/rhobs-cell"]; cellURL != "" {
 				rhobsClient, rhobsErr := rhobs.NewClient(cellURL, meta.Environment)
 				if rhobsErr != nil {
-					logging.WithCheck("rhobs_init").WithField("cluster", meta.Name).Warn("RHOBS remote unavailable: ", rhobsErr)
+					logging.WithCheck("rhobs_init").WithField("cluster", meta.Name).Warn("RHOBS remote metrics unavailable (Thanos queries will require elevation): ", rhobsErr)
 				} else {
 					client.SetRHOBSClient(rhobsClient)
 					logging.WithCheck("rhobs_init").WithField("cluster", meta.Name).Debug("RHOBS remote configured (cell: ", cellURL, ")")

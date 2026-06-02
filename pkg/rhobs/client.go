@@ -207,13 +207,14 @@ func readOsdctlConfig(environment string) (vaultAddr, vaultPath string, err erro
 
 	vaultAddr = config[vaultAddrKey]
 	if vaultAddr == "" {
-		return "", "", fmt.Errorf("%s not set in %s", vaultAddrKey, configFile)
+		return "", "", fmt.Errorf("%s not set in %s — run 'osdctl setup' or add it manually", vaultAddrKey, configFile)
 	}
 
 	pathKey := fmt.Sprintf(vaultPathFmt, environment)
 	vaultPath = config[pathKey]
 	if vaultPath == "" {
-		return "", "", fmt.Errorf("%s not set in %s", pathKey, configFile)
+		return "", "", fmt.Errorf("%s not set in %s — add this key to enable RHOBS remote metrics for %s clusters (e.g., %s: \"osd-sre/rhobs/sd-sre-%s-creds\")",
+			pathKey, configFile, environment, pathKey, environment)
 	}
 
 	return vaultAddr, vaultPath, nil
