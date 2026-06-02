@@ -343,6 +343,7 @@ func (c *Client) GetClusterMetadata(clusterID string) (*ClusterMeta, error) {
 		LimitedSupport: cl.Status().LimitedSupportReasonCount() > 0,
 		Shard:          shard,
 		Labels:         labels,
+		Environment:    c.env,
 	}
 
 	// Fetch subscription for owner info
@@ -388,6 +389,7 @@ type ClusterMeta struct {
 	OwnerOrg       string            `json:"owner_org,omitempty"`
 	OwnerEmail     string            `json:"owner_email,omitempty"`
 	Labels         map[string]string `json:"labels,omitempty"`
+	Environment    string            `json:"environment,omitempty"`
 }
 
 func (c *Client) wrapError(operation string, err error) error {

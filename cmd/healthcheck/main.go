@@ -18,6 +18,7 @@ import (
 	"github.com/openshift/operator-health-report/pkg/logging"
 	"github.com/openshift/operator-health-report/pkg/ocm"
 	"github.com/openshift/operator-health-report/pkg/report"
+	"github.com/openshift/operator-health-report/pkg/rhobs"
 	"github.com/openshift/operator-health-report/pkg/saas"
 
 	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
@@ -362,6 +363,17 @@ func main() {
 			}
 			defer client.Disconnect()
 
+			// Initialize RHOBS remote client if cell URL is available
+			if cellURL := meta.Labels["ext-hypershift.openshift.io/rhobs-cell"]; cellURL != "" {
+				rhobsClient, rhobsErr := rhobs.NewClient(cellURL, meta.Environment)
+				if rhobsErr != nil {
+					logging.WithCheck("rhobs_init").WithField("cluster", meta.Name).Warn("RHOBS remote unavailable: ", rhobsErr)
+				} else {
+					client.SetRHOBSClient(rhobsClient)
+					logging.WithCheck("rhobs_init").WithField("cluster", meta.Name).Debug("RHOBS remote configured (cell: ", cellURL, ")")
+				}
+			}
+
 			fmt.Fprintf(os.Stderr, "  ✓ Connected to %s\n", meta.Name)
 
 			clusterVersion := meta.Version
@@ -409,6 +421,7 @@ func main() {
 				OwnerOrg:       meta.OwnerOrg,
 				OwnerEmail:     maskedEmail,
 				Labels:         meta.Labels,
+				Environment:    meta.Environment,
 			}
 
 			var wg sync.WaitGroup

@@ -85,6 +85,7 @@ type ClusterMetadata struct {
 	OwnerOrg        string            `json:"owner_org,omitempty"`
 	OwnerEmail      string            `json:"owner_email,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
+	Environment     string            `json:"environment,omitempty"`
 }
 
 // ClusterOutput is the JSON output for a single cluster+operator check

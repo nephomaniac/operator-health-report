@@ -8,11 +8,13 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/openshift/operator-health-report/pkg/logging"
+	"github.com/openshift/operator-health-report/pkg/rhobs"
 
 	sdk "github.com/openshift-online/ocm-sdk-go"
 	bplogin "github.com/openshift/backplane-cli/cmd/ocm-backplane/login"
@@ -43,6 +45,8 @@ type ClusterClient struct {
 
 	elevationBroken      bool
 	elevationDeniedReason string // "access_request", "forbidden", or ""
+
+	rhobsClient *rhobs.Client
 }
 
 const (
@@ -566,6 +570,64 @@ func (cc *ClusterClient) QueryRHOBSPrometheus(ctx context.Context, query string)
 		true)
 	cc.checkElevatedError(err)
 	return result, err
+}
+
+// SetRHOBSClient configures the RHOBS remote client for out-of-band metrics access.
+func (cc *ClusterClient) SetRHOBSClient(client *rhobs.Client) {
+	cc.rhobsClient = client
+}
+
+// HasRHOBSRemote returns true if the RHOBS remote client is configured.
+func (cc *ClusterClient) HasRHOBSRemote() bool {
+	return cc.rhobsClient != nil
+}
+
+// QueryMetrics runs a PromQL instant query, trying Thanos exec first (if elevation
+// available), falling back to RHOBS remote API (if configured).
+// The query parameter is raw PromQL — encoding is handled internally.
+func (cc *ClusterClient) QueryMetrics(ctx context.Context, rawQuery string) (string, error) {
+	if cc.CanElevate() {
+		encoded := url.QueryEscape(rawQuery)
+		result, err := cc.QueryThanos(ctx, encoded)
+		if err == nil {
+			return result, nil
+		}
+		log := logging.WithCheck("query_metrics")
+		log.WithField("error", err).Debug("Thanos exec failed, trying RHOBS remote")
+	}
+
+	if cc.rhobsClient != nil {
+		return cc.rhobsClient.QueryInstant(rawQuery)
+	}
+
+	if !cc.CanElevate() {
+		return "", fmt.Errorf("metrics unavailable: elevation disabled and no RHOBS remote configured")
+	}
+	return "", fmt.Errorf("metrics unavailable: both Thanos exec and RHOBS remote failed")
+}
+
+// QueryMetricsRange runs a PromQL range query, trying Thanos exec first,
+// falling back to RHOBS remote API.
+// The query parameter is raw PromQL — encoding is handled internally.
+func (cc *ClusterClient) QueryMetricsRange(ctx context.Context, rawQuery string, start, end int64, step int) (string, error) {
+	if cc.CanElevate() {
+		encoded := url.QueryEscape(rawQuery)
+		result, err := cc.QueryThanosRange(ctx, encoded, start, end, step)
+		if err == nil {
+			return result, nil
+		}
+		log := logging.WithCheck("query_metrics_range")
+		log.WithField("error", err).Debug("Thanos exec range failed, trying RHOBS remote")
+	}
+
+	if cc.rhobsClient != nil {
+		return cc.rhobsClient.QueryRange(rawQuery, start, end, step)
+	}
+
+	if !cc.CanElevate() {
+		return "", fmt.Errorf("metrics unavailable: elevation disabled and no RHOBS remote configured")
+	}
+	return "", fmt.Errorf("metrics unavailable: both Thanos exec and RHOBS remote failed")
 }
 
 // GetClusterVersion returns the desired cluster version string.

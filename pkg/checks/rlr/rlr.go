@@ -301,13 +301,13 @@ func checkVectorMetricsPresent(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	query := thanos.EncodeQuery(`up{job=~".*control-plane-log-forwarding.*"}`)
-	body, err := cc.Client.QueryThanos(ctx, query)
+	query := `up{job=~".*control-plane-log-forwarding.*"}`
+	body, err := cc.Client.QueryMetrics(ctx, query)
 	cc.RecordError("Query Vector up metric", err)
 
 	if err != nil {
@@ -365,13 +365,13 @@ func checkVectorIngestionRate(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	query := thanos.EncodeQuery(`vector:logs:ingestion_rate`)
-	body, err := cc.Client.QueryThanos(ctx, query)
+	query := `vector:logs:ingestion_rate`
+	body, err := cc.Client.QueryMetrics(ctx, query)
 	cc.RecordError("Query Vector ingestion rate", err)
 
 	if err != nil {
@@ -437,13 +437,13 @@ func checkVectorS3Delivery(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	query := thanos.EncodeQuery(`vector:s3_sink:write_ratio`)
-	body, err := cc.Client.QueryThanos(ctx, query)
+	query := `vector:s3_sink:write_ratio`
+	body, err := cc.Client.QueryMetrics(ctx, query)
 	cc.RecordError("Query Vector S3 write ratio", err)
 
 	if err != nil {
@@ -499,13 +499,13 @@ func checkVectorBufferUsage(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	query := thanos.EncodeQuery(`max(vector_buffer_byte_size{buffer_id="hcp_logs"})`)
-	body, err := cc.Client.QueryThanos(ctx, query)
+	query := `max(vector_buffer_byte_size{buffer_id="hcp_logs"})`
+	body, err := cc.Client.QueryMetrics(ctx, query)
 	cc.RecordError("Query Vector buffer size", err)
 
 	if err != nil {
@@ -566,17 +566,17 @@ func checkVectorErrorRate(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	s3Query := thanos.EncodeQuery(`vector:s3:error_rate`)
-	s3Body, s3Err := cc.Client.QueryThanos(ctx, s3Query)
+	s3Query := `vector:s3:error_rate`
+	s3Body, s3Err := cc.Client.QueryMetrics(ctx, s3Query)
 	cc.RecordError("Query Vector S3 error rate", s3Err)
 
-	transformQuery := thanos.EncodeQuery(`sum(vector:transform:error_rate:by_component)`)
-	transformBody, transformErr := cc.Client.QueryThanos(ctx, transformQuery)
+	transformQuery := `sum(vector:transform:error_rate:by_component)`
+	transformBody, transformErr := cc.Client.QueryMetrics(ctx, transformQuery)
 	cc.RecordError("Query Vector transform error rate", transformErr)
 
 	if s3Err != nil && transformErr != nil {
@@ -639,13 +639,13 @@ func checkVectorEventLoss(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	query := thanos.EncodeQuery(`max(clamp_min(vector:hcp_logs:event_loss_rate:by_pod, 0))`)
-	body, err := cc.Client.QueryThanos(ctx, query)
+	query := `max(clamp_min(vector:hcp_logs:event_loss_rate:by_pod, 0))`
+	body, err := cc.Client.QueryMetrics(ctx, query)
 	cc.RecordError("Query Vector event loss rate", err)
 
 	if err != nil {
@@ -699,13 +699,13 @@ func checkVectorPipelineRatio(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	query := thanos.EncodeQuery(`vector:log_delivery:pipeline_ratio:by_cluster`)
-	body, err := cc.Client.QueryThanos(ctx, query)
+	query := `vector:log_delivery:pipeline_ratio:by_cluster`
+	body, err := cc.Client.QueryMetrics(ctx, query)
 	cc.RecordError("Query Vector pipeline ratio", err)
 
 	if err != nil {
@@ -1175,13 +1175,13 @@ func checkActiveAlerts(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	query := thanos.EncodeQuery(`ALERTS{alertname=~"Vector.*SRE",alertstate="firing"}`)
-	body, err := cc.Client.QueryThanos(ctx, query)
+	query := `ALERTS{alertname=~"Vector.*SRE",alertstate="firing"}`
+	body, err := cc.Client.QueryMetrics(ctx, query)
 	cc.RecordError("Query firing Vector alerts", err)
 
 	if err != nil {
@@ -1304,7 +1304,7 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -1333,8 +1333,8 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Buffer saturation per pod (0-1, fraction of 10GB max) — top N by peak
-	saturationQuery := thanos.EncodeQuery(`vector:s3_sink:buffer_saturation:by_pod`)
-	if satData, err := cc.Client.QueryThanosRange(ctx, saturationQuery, start, now, step); err == nil {
+	saturationQuery := `vector:s3_sink:buffer_saturation:by_pod`
+	if satData, err := cc.Client.QueryMetricsRange(ctx, saturationQuery, start, now, step); err == nil {
 		if series, _ := thanos.PerSeriesTimeseries(satData, podLabel); len(series) > 0 {
 			r.Details["buffer_saturation_total_pods"] = len(series)
 			r.Details["buffer_saturation_timeseries_by_pod"] = topNSeriesByPeak(series, maxChartSeries)
@@ -1343,8 +1343,8 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Ingestion rate — aggregate + top N clusters by volume
-	ingestionQuery := thanos.EncodeQuery(`vector:logs:ingestion_rate`)
-	if ingestionData, err := cc.Client.QueryThanosRange(ctx, ingestionQuery, start, now, step); err == nil {
+	ingestionQuery := `vector:logs:ingestion_rate`
+	if ingestionData, err := cc.Client.QueryMetricsRange(ctx, ingestionQuery, start, now, step); err == nil {
 		if points, _ := thanos.Timeseries(ingestionData); len(points) > 0 {
 			r.Details["ingestion_timeseries"] = thanos.PointsToJSON(points)
 			peak := thanos.Peak(points)
@@ -1352,8 +1352,8 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 			seriesCollected++
 		}
 	}
-	clusterIngestionQuery := thanos.EncodeQuery(`vector:cluster:ingestion_rate`)
-	if clusterData, err := cc.Client.QueryThanosRange(ctx, clusterIngestionQuery, start, now, step); err == nil {
+	clusterIngestionQuery := `vector:cluster:ingestion_rate`
+	if clusterData, err := cc.Client.QueryMetricsRange(ctx, clusterIngestionQuery, start, now, step); err == nil {
 		if series, _ := thanos.PerSeriesTimeseries(clusterData, clusterLabel); len(series) > 0 {
 			r.Details["ingestion_total_clusters"] = len(series)
 			r.Details["ingestion_timeseries_by_cluster"] = topNSeriesByPeak(series, maxChartSeries)
@@ -1362,8 +1362,8 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Event loss — aggregate (clamp negative to 0) + top N pods with most loss
-	lossQuery := thanos.EncodeQuery(`clamp_min(vector:hcp_logs:event_loss_rate:by_pod, 0)`)
-	if lossData, err := cc.Client.QueryThanosRange(ctx, lossQuery, start, now, step); err == nil {
+	lossQuery := `clamp_min(vector:hcp_logs:event_loss_rate:by_pod, 0)`
+	if lossData, err := cc.Client.QueryMetricsRange(ctx, lossQuery, start, now, step); err == nil {
 		if points, _ := thanos.Timeseries(lossData); len(points) > 0 {
 			errorPoints := thanos.FilterNonZero(points)
 			r.Details["event_loss_timeseries"] = thanos.PointsToJSON(points)
@@ -1377,15 +1377,15 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Write ratio — aggregate + top N worst pods (lowest ratio = most backpressure)
-	writeQuery := thanos.EncodeQuery(`vector:s3_sink:write_ratio`)
-	if writeData, err := cc.Client.QueryThanosRange(ctx, writeQuery, start, now, step); err == nil {
+	writeQuery := `vector:s3_sink:write_ratio`
+	if writeData, err := cc.Client.QueryMetricsRange(ctx, writeQuery, start, now, step); err == nil {
 		if points, _ := thanos.Timeseries(writeData); len(points) > 0 {
 			r.Details["write_ratio_timeseries"] = thanos.PointsToJSON(points)
 			seriesCollected++
 		}
 	}
-	writeByPodQuery := thanos.EncodeQuery(`vector:logs:write_ratio:by_pod`)
-	if writeData, err := cc.Client.QueryThanosRange(ctx, writeByPodQuery, start, now, step); err == nil {
+	writeByPodQuery := `vector:logs:write_ratio:by_pod`
+	if writeData, err := cc.Client.QueryMetricsRange(ctx, writeByPodQuery, start, now, step); err == nil {
 		if series, _ := thanos.PerSeriesTimeseries(writeData, podLabel); len(series) > 0 {
 			r.Details["write_ratio_total_pods"] = len(series)
 			r.Details["write_ratio_timeseries_by_pod"] = topNSeriesByWorstRatio(series, maxChartSeries)
@@ -1394,9 +1394,9 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Vector pod memory (aggregate across all pods)
-	memQuery := thanos.EncodeQuery(fmt.Sprintf(
+	memQuery := (fmt.Sprintf(
 		`sum(container_memory_working_set_bytes{namespace="%s",container!=""})`, vectorNS))
-	if memData, err := cc.Client.QueryThanosRange(ctx, memQuery, start, now, step); err == nil {
+	if memData, err := cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step); err == nil {
 		if points, _ := thanos.Timeseries(memData); len(points) > 0 {
 			r.Details["memory_timeseries"] = thanos.PointsToJSON(points)
 			peak := thanos.Peak(points)
@@ -1412,9 +1412,9 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Vector pod CPU (aggregate across all pods)
-	cpuQuery := thanos.EncodeQuery(fmt.Sprintf(
+	cpuQuery := (fmt.Sprintf(
 		`sum(rate(container_cpu_usage_seconds_total{namespace="%s",container!=""}[5m]))`, vectorNS))
-	if cpuData, err := cc.Client.QueryThanosRange(ctx, cpuQuery, start, now, step); err == nil {
+	if cpuData, err := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step); err == nil {
 		if points, _ := thanos.Timeseries(cpuData); len(points) > 0 {
 			r.Details["cpu_timeseries"] = thanos.PointsToJSON(points)
 			peak := thanos.Peak(points)
