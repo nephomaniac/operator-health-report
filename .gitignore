@@ -6,6 +6,7 @@
 /vendor/
 
 # Results and test output
+results/
 results_*/
 health_*.json
 health_*.html

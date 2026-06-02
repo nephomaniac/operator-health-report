@@ -210,9 +210,12 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Clusters: %d, Operators: %v, No-elevate: %v, OCM: %s\n",
 		len(clusterIDs), operators, noElevate, ocmClient.Environment())
 
-	// Output file
+	// Output file — default to results/ directory
 	if outputFile == "" {
-		outputFile = fmt.Sprintf("health_report_%s.json", time.Now().Format("2006-01-02_1504"))
+		if err := os.MkdirAll("results", 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cannot create results directory: %v\n", err)
+		}
+		outputFile = fmt.Sprintf("results/health_report_%s.json", time.Now().Format("2006-01-02_1504"))
 	}
 
 	// Fetch SAAS targets and build promotion pipeline for all operators
