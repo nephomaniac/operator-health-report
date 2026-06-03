@@ -2449,8 +2449,8 @@
                     html += `<div style="font-weight:600;color:var(--text-primary);word-break:break-all;line-height:1.2;">${nodeName}</div>`;
                     html += `<div style="margin-top:3px;display:flex;gap:3px;flex-wrap:wrap;">${typeBadge} ${autoBadge}</div>`;
                     html += `<div style="font-family:var(--font-mono,monospace);font-size:0.85em;color:var(--text-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;">${refDisplay}</div>`;
-                    if (isE2E && node.pipeline_runs_url) {
-                        html += `<a href="${node.pipeline_runs_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="display:inline-block;margin-top:3px;font-size:0.7em;padding:1px 5px;border-radius:3px;background:rgba(102,126,234,0.15);color:#667eea;text-decoration:none;border:1px solid rgba(102,126,234,0.3);">View Runs</a>`;
+                    if (node.pipeline_runs_url) {
+                        html += `<a href="${node.pipeline_runs_url}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="display:inline-block;margin-top:3px;font-size:0.7em;padding:1px 5px;border-radius:3px;background:rgba(102,126,234,0.15);color:#667eea;text-decoration:none;border:1px solid rgba(102,126,234,0.3);">Pipeline Runs</a>`;
                     }
                     html += checkedBadge;
                     html += '</div>';

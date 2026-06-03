@@ -165,13 +165,10 @@ func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string, r
 		}
 	}
 
-	// Add pipeline run URLs to e2e nodes
+	// Add pipeline run URLs to all nodes
 	if p.Tekton != nil && p.Tekton.PipelineRunsURL != "" {
 		for i := range p.Nodes {
-			if p.Nodes[i].Type == "e2e" {
-				p.Nodes[i].PipelineRunsURL = p.Tekton.PipelineRunsURL +
-					"?name=" + p.Nodes[i].Name
-			}
+			p.Nodes[i].PipelineRunsURL = p.Tekton.PipelineRunsURL
 		}
 	}
 
