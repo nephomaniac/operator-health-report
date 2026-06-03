@@ -17,6 +17,78 @@ import (
 
 const memoryLeakThresholdPercent = 50.0
 
+// PodSummary returns an oc-get-pod-wide style summary for a pod.
+func PodSummary(pod corev1.Pod) map[string]any {
+	totalRestarts := int32(0)
+	readyContainers := 0
+	totalContainers := len(pod.Spec.Containers)
+	var waitReason, termReason string
+
+	for _, cs := range pod.Status.ContainerStatuses {
+		totalRestarts += cs.RestartCount
+		if cs.Ready {
+			readyContainers++
+		}
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+			waitReason = cs.State.Waiting.Reason
+		}
+		if cs.State.Terminated != nil && cs.State.Terminated.Reason != "" {
+			termReason = cs.State.Terminated.Reason
+		}
+	}
+
+	status := string(pod.Status.Phase)
+	if waitReason != "" {
+		status = waitReason
+	} else if termReason != "" {
+		status = termReason
+	}
+
+	age := time.Since(pod.CreationTimestamp.Time).Truncate(time.Minute).String()
+
+	summary := map[string]any{
+		"name":     pod.Name,
+		"ready":    fmt.Sprintf("%d/%d", readyContainers, totalContainers),
+		"status":   status,
+		"restarts": totalRestarts,
+		"age":      age,
+		"node":     pod.Spec.NodeName,
+	}
+	if pod.Status.PodIP != "" {
+		summary["ip"] = pod.Status.PodIP
+	}
+	return summary
+}
+
+// ProblematicPods filters a pod list to those with issues and returns summaries.
+func ProblematicPods(pods []corev1.Pod) []map[string]any {
+	var result []map[string]any
+	for _, pod := range pods {
+		if isPodProblematic(pod) {
+			result = append(result, PodSummary(pod))
+		}
+	}
+	return result
+}
+
+func isPodProblematic(pod corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning {
+		return true
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if !cs.Ready {
+			return true
+		}
+		if cs.RestartCount > 5 {
+			return true
+		}
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckNamespace verifies the operator namespace exists and is Active
 func CheckNamespace(ctx context.Context, cc *ClusterContext) {
 	cc.CurrentCheck = "namespace_status"
@@ -147,6 +219,11 @@ func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 	r.Details["pods_not_running"] = podsNotRunning
 	if len(podIssues) > 0 {
 		r.Details["pod_issues"] = podIssues
+	}
+	if err == nil {
+		if problematic := ProblematicPods(pods.Items); len(problematic) > 0 {
+			r.Details["failing_pods"] = problematic
+		}
 	}
 
 	switch {
@@ -717,6 +794,11 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 	}
 
 	r.Details["image_pull_errors"] = pullErrors
+	if pullErrors > 0 {
+		if problematic := ProblematicPods(pods.Items); len(problematic) > 0 {
+			r.Details["failing_pods"] = problematic
+		}
+	}
 
 	if pullErrors > 0 {
 		r.Status = StatusFail

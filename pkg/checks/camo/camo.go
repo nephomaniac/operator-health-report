@@ -118,6 +118,9 @@ func checkAlertmanagerPods(ctx context.Context, cc *checks.ClusterContext) {
 	r.Details["not_ready"] = notReady
 	r.Details["total_restarts"] = totalRestarts
 	r.Details["restart_details"] = restartDetails
+	if problematic := checks.ProblematicPods(pods.Items); len(problematic) > 0 {
+		r.Details["failing_pods"] = problematic
+	}
 
 	switch {
 	case notReady > 0:

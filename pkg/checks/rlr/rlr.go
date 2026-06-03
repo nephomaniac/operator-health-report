@@ -200,6 +200,9 @@ func checkVectorDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) 
 				}
 			}
 		}
+		if problematic := checks.ProblematicPods(pods.Items); len(problematic) > 0 {
+			r.Details["failing_pods"] = problematic
+		}
 	}
 	r.Details["crashlooping_pods"] = crashlooping
 
@@ -273,6 +276,9 @@ func checkVectorPodRestarts(ctx context.Context, cc *checks.ClusterContext) {
 	if maxRestartPod != "" {
 		r.Details["max_restart_pod"] = maxRestartPod
 		r.Details["max_restart_count"] = maxRestarts
+	}
+	if problematic := checks.ProblematicPods(pods.Items); len(problematic) > 0 {
+		r.Details["failing_pods"] = problematic
 	}
 
 	if podCount == 0 {
@@ -881,6 +887,9 @@ func checkHeartbeatPodHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r.Details["running"] = running
 	r.Details["total_restarts"] = totalRestarts
 	r.Details["crashlooping"] = crashlooping
+	if problematic := checks.ProblematicPods(allPods); len(problematic) > 0 {
+		r.Details["failing_pods"] = problematic
+	}
 
 	if running == len(allPods) && totalRestarts <= 5 && crashlooping == 0 {
 		r.Status = checks.StatusPass
@@ -1009,6 +1018,9 @@ func checkProcessorPodHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r.Details["pod_count"] = len(allPods)
 	r.Details["running"] = running
 	r.Details["total_restarts"] = totalRestarts
+	if problematic := checks.ProblematicPods(allPods); len(problematic) > 0 {
+		r.Details["failing_pods"] = problematic
+	}
 
 	if running == len(allPods) && totalRestarts <= 5 && crashlooping == 0 {
 		r.Status = checks.StatusPass
