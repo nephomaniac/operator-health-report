@@ -27,9 +27,10 @@ type PipelineNode struct {
 	HiveCluster string   `json:"hive_cluster,omitempty"`
 	QuayRepo    string   `json:"quay_repo,omitempty"`
 	RepoURL     string   `json:"repo_url,omitempty"`
-	TestImage   string   `json:"test_image,omitempty"`
-	TestConfig  string   `json:"test_config,omitempty"`
-	ResolvedSHA string   `json:"resolved_sha,omitempty"`
+	TestImage       string `json:"test_image,omitempty"`
+	TestConfig      string `json:"test_config,omitempty"`
+	ResolvedSHA     string `json:"resolved_sha,omitempty"`
+	PipelineRunsURL string `json:"pipeline_runs_url,omitempty"`
 }
 
 // PipelineEdge represents a channel connection between two nodes
@@ -161,6 +162,16 @@ func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string, r
 				p.Nodes = append(p.Nodes, t)
 			}
 			log.WithField("count", len(e2eTargets)).Debug("Fetched e2e pipeline targets")
+		}
+	}
+
+	// Add pipeline run URLs to e2e nodes
+	if p.Tekton != nil && p.Tekton.PipelineRunsURL != "" {
+		for i := range p.Nodes {
+			if p.Nodes[i].Type == "e2e" {
+				p.Nodes[i].PipelineRunsURL = p.Tekton.PipelineRunsURL +
+					"?name=" + p.Nodes[i].Name
+			}
 		}
 	}
 
