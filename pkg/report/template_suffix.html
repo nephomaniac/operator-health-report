@@ -2293,9 +2293,11 @@
                                     const shortSHA = resolvedSHA.substring(0, 7);
                                     display = `<a href="${repoUrl}/commit/${resolvedSHA}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;" title="View commit on GitHub">${gitIcon}branch:${branchName} (${shortSHA})</a>`;
                                 }
-                                // Ref hash → GitHub commit link with icon
-                                if (repoUrl && ref && ref.length === 40) {
-                                    display += ` <a href="${repoUrl}/commit/${ref}" target="_blank" rel="noopener" style="color:var(--text-muted);font-size:0.85em;" title="View commit on GitHub">${gitIcon}${ref.substring(0,7)}</a>`;
+                                // Ref hash or resolved SHA → GitHub commit link with icon
+                                const commitSHA = (ref && ref.length === 40) ? ref : resolvedSHA;
+                                if (repoUrl && commitSHA) {
+                                    const commitLabel = (ref && ref.length !== 40 && resolvedSHA) ? `${ref} (${commitSHA.substring(0,7)})` : commitSHA.substring(0,7);
+                                    display += ` <a href="${repoUrl}/commit/${commitSHA}" target="_blank" rel="noopener" style="color:var(--text-muted);font-size:0.85em;" title="View commit on GitHub">${gitIcon}${commitLabel}</a>`;
                                 }
                                 return display;
                             })() + '</td>' +
