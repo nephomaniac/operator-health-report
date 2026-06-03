@@ -825,6 +825,35 @@ func checkHCPCoverage(ctx context.Context, cc *checks.ClusterContext) {
 	hcpCount := len(hcpList.Items)
 	r.Details["hcp_count"] = hcpCount
 
+	// Build HCP metadata map (keyed by cluster ID)
+	type hcpInfo struct {
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
+		ClusterID string `json:"cluster_id"`
+		Created   string `json:"created"`
+		Version   string `json:"version"`
+	}
+	hcpByID := map[string]hcpInfo{}
+	for _, hcp := range hcpList.Items {
+		cid, _, _ := unstructured.NestedString(hcp.Object, "spec", "clusterID")
+		ver, _, _ := unstructured.NestedString(hcp.Object, "spec", "release", "image")
+		if idx := strings.LastIndex(ver, ":"); idx >= 0 {
+			ver = ver[idx+1:]
+		}
+		info := hcpInfo{
+			Name:      hcp.GetName(),
+			Namespace: hcp.GetNamespace(),
+			ClusterID: cid,
+			Created:   hcp.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
+			Version:   ver,
+		}
+		if cid != "" {
+			hcpByID[cid] = info
+		} else {
+			hcpByID[hcp.GetNamespace()] = info
+		}
+	}
+
 	// Check how many have RouteMonitors via RHOBS Prometheus
 	if !cc.Client.CanElevate() {
 		r.Status = checks.StatusSkip
@@ -833,35 +862,39 @@ func checkHCPCoverage(ctx context.Context, cc *checks.ClusterContext) {
 		return
 	}
 
-	// Query RHOBS Prometheus for HCP probe metrics (no namespace filter —
-	// RHOBS only contains HCP probe data, so all results are relevant)
+	// Query RHOBS Prometheus for HCP probe metrics
 	probeData, err := cc.Client.QueryRHOBSPrometheus(ctx, thanos.EncodeQuery("probe_success"))
 	cc.RecordError("HCP probe metrics", err)
 
-	monitored := 0
+	monitoredIDs := map[string]bool{}
 	if err == nil && thanos.HasResults(probeData) {
 		resp, _ := thanos.Parse(probeData)
-		// Count unique cluster IDs with probes
-		clusterIDs := map[string]bool{}
 		for _, result := range resp.Data.Result {
 			id := result.Metric["_id"]
 			if id != "" {
-				clusterIDs[id] = true
+				monitoredIDs[id] = true
 			}
-		}
-		monitored = len(clusterIDs)
-		// If no _id labels, fall back to counting unique probe targets
-		if monitored == 0 {
-			monitored = len(resp.Data.Result)
 		}
 	}
 
+	monitored := len(monitoredIDs)
 	r.Details["hcp_monitored"] = monitored
 	unmonitored := hcpCount - monitored
 	if unmonitored < 0 {
 		unmonitored = 0
 	}
 	r.Details["hcp_unmonitored"] = unmonitored
+
+	// Identify which HCPs lack coverage
+	if unmonitored > 0 {
+		var uncoveredHCPs []hcpInfo
+		for id, info := range hcpByID {
+			if !monitoredIDs[id] {
+				uncoveredHCPs = append(uncoveredHCPs, info)
+			}
+		}
+		r.Details["uncovered_hcps"] = uncoveredHCPs
+	}
 
 	switch {
 	case unmonitored > 0:
