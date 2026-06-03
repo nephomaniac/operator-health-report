@@ -29,6 +29,7 @@ type PipelineNode struct {
 	RepoURL     string   `json:"repo_url,omitempty"`
 	TestImage   string   `json:"test_image,omitempty"`
 	TestConfig  string   `json:"test_config,omitempty"`
+	ResolvedSHA string   `json:"resolved_sha,omitempty"`
 }
 
 // PipelineEdge represents a channel connection between two nodes
@@ -116,8 +117,9 @@ func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string, r
 					Subscribe:   t.Subscribe,
 					SaasFile:    pkoSaas,
 					HiveCluster: t.HiveCluster,
-				QuayRepo:    t.QuayRepo,
-				RepoURL:     t.RepoURL,
+					QuayRepo:    t.QuayRepo,
+					RepoURL:     t.RepoURL,
+					ResolvedSHA: t.ResolvedSHA,
 				})
 			}
 		}
@@ -140,8 +142,9 @@ func BuildPipeline(ctx context.Context, operatorName, pkoSaas, olmSaas string, r
 					Subscribe:   t.Subscribe,
 					SaasFile:    olmSaas,
 					HiveCluster: t.HiveCluster,
-				QuayRepo:    t.QuayRepo,
-				RepoURL:     t.RepoURL,
+					QuayRepo:    t.QuayRepo,
+					RepoURL:     t.RepoURL,
+					ResolvedSHA: t.ResolvedSHA,
 				})
 			}
 		}

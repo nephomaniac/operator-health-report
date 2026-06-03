@@ -34,6 +34,7 @@ type Target struct {
 	Publish     []string `json:"publish"`       // channels this target publishes to
 	Subscribe   []string `json:"subscribe"`     // channels this target subscribes to
 	HiveCluster string   `json:"hive_cluster"`  // hive cluster name from namespace ref
+	ResolvedSHA string   `json:"resolved_sha,omitempty"` // commit SHA when ref is a branch name
 }
 
 // saasFile is the YAML structure of an app-interface SAAS file
@@ -235,8 +236,15 @@ func fetchTargets(ctx context.Context, saasFileName string) ([]Target, error) {
 				HiveCluster: extractHiveFromRef(st.Namespace.Ref),
 			}
 
-			// Resolve image tag from Quay
-			t.ImageTag = resolveImageTag(st.Ref, quayTags)
+			// Resolve image tag from Quay (passes repo URL for branch→SHA resolution)
+			t.ImageTag = resolveImageTag(st.Ref, quayTags, rt.URL)
+
+			// If ref is a branch, store resolved SHA for commit linking
+			if len(st.Ref) != 40 {
+				if sha := resolveBranchSHA(st.Ref, rt.URL); sha != "" {
+					t.ResolvedSHA = sha
+				}
+			}
 
 			targets = append(targets, t)
 		}
@@ -288,8 +296,19 @@ func fetchQuayTags(ctx context.Context, repo string) []quayTag {
 }
 
 // resolveImageTag maps a git ref to its Quay image tag
-func resolveImageTag(ref string, tags []quayTag) string {
+func resolveImageTag(ref string, tags []quayTag, repoURL string) string {
 	if len(ref) != 40 {
+		// Branch ref — resolve to commit SHA via GitHub API
+		if sha := resolveBranchSHA(ref, repoURL); sha != "" {
+			shortSHA := sha[:7]
+			suffix := "-g" + shortSHA
+			for _, tag := range tags {
+				if strings.HasSuffix(tag.Name, suffix) {
+					return tag.Name
+				}
+			}
+			return "branch:" + ref + " (" + shortSHA + ")"
+		}
 		return "branch:" + ref
 	}
 
@@ -303,6 +322,45 @@ func resolveImageTag(ref string, tags []quayTag) string {
 	}
 
 	return "sha:" + shortCommit
+}
+
+// resolveBranchSHA resolves a branch name to its commit SHA via GitHub API.
+func resolveBranchSHA(branch, repoURL string) string {
+	owner, repo := parseGitHubURL(repoURL)
+	if owner == "" || repo == "" {
+		return ""
+	}
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", owner, repo, branch)
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	var commit struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&commit); err != nil {
+		return ""
+	}
+	return commit.SHA
+}
+
+// parseGitHubURL extracts owner and repo from a GitHub URL.
+func parseGitHubURL(repoURL string) (owner, repo string) {
+	repoURL = strings.TrimSuffix(repoURL, ".git")
+	parts := strings.Split(repoURL, "/")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	return parts[len(parts)-2], parts[len(parts)-1]
 }
 
 // extractHiveFromRef extracts the hive cluster name from a namespace $ref path
