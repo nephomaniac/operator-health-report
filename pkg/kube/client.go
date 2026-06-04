@@ -54,9 +54,10 @@ type ClusterClient struct {
 	pfSetupOnce  sync.Once
 	pfSetupErr   error
 
-	// Elevation audit counters
+	// Elevation audit
 	ElevatedCallCount int64
-	StandardCallCount int64
+	ElevatedOps       []string
+	elevMu            sync.Mutex
 }
 
 // portForwardSession manages a port-forward to a Thanos/Prometheus pod.
@@ -358,18 +359,25 @@ func (cc *ClusterClient) checkElevatedError(err error) {
 	}
 }
 
+func (cc *ClusterClient) recordElevatedOp(op string) {
+	cc.elevMu.Lock()
+	cc.ElevatedCallCount++
+	cc.ElevatedOps = append(cc.ElevatedOps, op)
+	cc.elevMu.Unlock()
+}
+
 // Clientset returns the standard (non-elevated) k8s client
 func (cc *ClusterClient) Clientset() kubernetes.Interface {
 	return cc.clientset
 }
 
 // ElevatedClientset returns the elevated k8s client, or nil if unavailable.
-// Increments the elevation audit counter.
+// Records the elevated operation for audit.
 func (cc *ClusterClient) ElevatedClientset() kubernetes.Interface {
 	if !cc.CanElevate() {
 		return nil
 	}
-	cc.ElevatedCallCount++
+	cc.recordElevatedOp("clientset (direct)")
 	return cc.elevatedClient
 }
 
@@ -378,7 +386,7 @@ func (cc *ClusterClient) ElevatedClientset() kubernetes.Interface {
 func (cc *ClusterClient) GetResource(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string, elevated bool) (*unstructured.Unstructured, error) {
 	client := cc.dynamicClient
 	if elevated && cc.CanElevate() {
-		cc.ElevatedCallCount++
+		cc.recordElevatedOp(fmt.Sprintf("get %s/%s in %s", gvr.Resource, name, namespace))
 		client = cc.elevatedDynamic
 	}
 
@@ -398,7 +406,7 @@ func (cc *ClusterClient) GetResource(ctx context.Context, gvr schema.GroupVersio
 func (cc *ClusterClient) ListResources(ctx context.Context, gvr schema.GroupVersionResource, namespace string, elevated bool) (*unstructured.UnstructuredList, error) {
 	client := cc.dynamicClient
 	if elevated && cc.CanElevate() {
-		cc.ElevatedCallCount++
+		cc.recordElevatedOp(fmt.Sprintf("list %s in %s", gvr.Resource, namespace))
 		client = cc.elevatedDynamic
 	}
 
@@ -488,7 +496,7 @@ func (cc *ClusterClient) execInPodOnce(ctx context.Context, namespace, podName, 
 	config := cc.restConfig
 	client := cc.clientset
 	if elevated && cc.CanElevate() {
-		cc.ElevatedCallCount++
+		cc.recordElevatedOp(fmt.Sprintf("exec %s/%s", namespace, podName))
 		config = cc.elevatedConfig
 		client = cc.elevatedClient
 	}

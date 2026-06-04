@@ -525,6 +525,17 @@ func main() {
 			}
 			wg.Wait()
 
+			// Attach elevated ops to all outputs for this cluster
+			if len(client.ElevatedOps) > 0 {
+				mu.Lock()
+				for i := range allOutputs {
+					if allOutputs[i].ClusterID == cid && len(allOutputs[i].ElevatedOps) == 0 {
+						allOutputs[i].ElevatedOps = client.ElevatedOps
+					}
+				}
+				mu.Unlock()
+			}
+
 			// Elevation audit
 			if client.ElevatedCallCount > 0 {
 				mu.Lock()

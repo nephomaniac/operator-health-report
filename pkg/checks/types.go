@@ -106,6 +106,7 @@ type ClusterOutput struct {
 	HealthSummary   HealthSummary    `json:"health_summary"`
 	HealthChecks    []Result         `json:"health_checks"`
 	APIErrors       []APIError       `json:"api_errors"`
+	ElevatedOps     []string         `json:"elevated_ops,omitempty"`
 }
 
 // HealthSummary aggregates check results

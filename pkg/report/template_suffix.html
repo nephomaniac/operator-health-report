@@ -1720,6 +1720,33 @@
 
             detailsDiv.appendChild(checksDiv);
 
+            // Elevated operations audit
+            const elevOps = cluster.elevated_ops || [];
+            if (elevOps.length > 0) {
+                const elevDiv = document.createElement('div');
+                elevDiv.className = 'health-check';
+                elevDiv.style.marginTop = '16px';
+                const elevId = `elev-${clusterIdx}`;
+                elevDiv.innerHTML = `
+                    <div class="check-header" onclick="toggleCheckDetails('${elevId}')" style="background:#fff3cd;">
+                        <div>
+                            <span class="check-icon warning">⚠</span>
+                            <span class="check-title">ELEVATED API CALLS (${elevOps.length})</span>
+                        </div>
+                        <span class="status-badge warning">${elevOps.length} calls</span>
+                    </div>
+                    <div class="check-details" id="check-details-${elevId}">
+                        <div style="margin-bottom:8px;padding:8px 10px;background:rgba(245,197,66,0.1);border-left:3px solid #f5c542;border-radius:3px;font-size:0.85em;color:#333;">
+                            These operations used backplane-cluster-admin elevation. In production, elevation is disabled and these operations use port-forward or RHOBS remote instead. Use <code>--no-elevate</code> to simulate production restrictions.
+                        </div>
+                        <div style="font-family:var(--mono);font-size:0.82em;background:#fff;border:1px solid #d5d8e0;border-radius:4px;padding:8px 10px;">
+                            ${elevOps.map((op, i) => `<div style="padding:2px 0;${i > 0 ? 'border-top:1px solid #f0f0f0;' : ''}">${op}</div>`).join('')}
+                        </div>
+                    </div>
+                `;
+                checksDiv.appendChild(elevDiv);
+            }
+
             // Close button at bottom of details panel
             const closeDiv = document.createElement('div');
             closeDiv.style.cssText = 'text-align: center; padding: 12px; margin-top: 20px; border-top: 1px solid #e0e0e0;';
