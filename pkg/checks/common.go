@@ -369,7 +369,7 @@ func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult("resource_leak_detection"))
 		return
 	}
@@ -385,20 +385,20 @@ func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
 	step := 1800
 
 	// Memory query
-	memQuery := thanos.EncodeQuery(fmt.Sprintf(
+	memQueryRaw := fmt.Sprintf(
 		`container_memory_working_set_bytes{namespace="%s",pod=~"%s-.*",container="%s"}`,
-		cc.Operator.Namespace, cc.Operator.Deployment, containerName))
+		cc.Operator.Namespace, cc.Operator.Deployment, containerName)
 
-	memData, memErr := cc.Client.QueryThanosRange(ctx, memQuery, start, now, step)
+	memData, memErr := cc.Client.QueryMetricsRange(ctx, memQueryRaw, start, now, step)
 	cc.RecordError("Memory timeseries query", memErr)
 	memPoints, _ := thanos.Timeseries(memData)
 
 	// CPU query
-	cpuQuery := thanos.EncodeQuery(fmt.Sprintf(
+	cpuQueryRaw := fmt.Sprintf(
 		`rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"%s-.*",container="%s"}[5m])`,
-		cc.Operator.Namespace, cc.Operator.Deployment, containerName))
+		cc.Operator.Namespace, cc.Operator.Deployment, containerName)
 
-	cpuData, cpuErr := cc.Client.QueryThanosRange(ctx, cpuQuery, start, now, step)
+	cpuData, cpuErr := cc.Client.QueryMetricsRange(ctx, cpuQueryRaw, start, now, step)
 	cc.RecordError("CPU timeseries query", cpuErr)
 	cpuPoints, _ := thanos.Timeseries(cpuData)
 

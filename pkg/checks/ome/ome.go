@@ -81,13 +81,13 @@ func checkMetricsHealth(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
 	// Check if Prometheus is scraping OME
-	upBody, err := cc.Client.QueryThanos(ctx, `up{job="osd-metrics-exporter"}`)
+	upBody, err := cc.Client.QueryMetrics(ctx, `up{job="osd-metrics-exporter"}`)
 	cc.RecordError("Check OME scrape target", err)
 
 	scraped := false
@@ -113,8 +113,8 @@ func checkMetricsHealth(ctx context.Context, cc *checks.ClusterContext) {
 	var metricResults []map[string]any
 
 	for _, metric := range expectedMetrics {
-		query := fmt.Sprintf(`%s{name="osd_exporter"}`, metric.Name)
-		body, queryErr := cc.Client.QueryThanos(ctx, query)
+		rawQuery := fmt.Sprintf(`%s{name="osd_exporter"}`, metric.Name)
+		body, queryErr := cc.Client.QueryMetrics(ctx, rawQuery)
 
 		entry := map[string]any{
 			"name":    metric.Name,
@@ -238,12 +238,12 @@ func checkPullSecretHealth(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	body, err := cc.Client.QueryThanos(ctx, `pull_secret_valid{name="osd_exporter"}`)
+	body, err := cc.Client.QueryMetrics(ctx, `pull_secret_valid{name="osd_exporter"}`)
 	cc.RecordError("Query pull_secret_valid", err)
 
 	if err != nil || body == "" || !thanos.HasResults(body) {
@@ -285,7 +285,7 @@ func checkProxyCAHealth(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -309,7 +309,7 @@ func checkProxyCAHealth(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Check CA validity metric
-	validBody, err := cc.Client.QueryThanos(ctx, `cluster_proxy_ca_valid{name="osd_exporter"}`)
+	validBody, err := cc.Client.QueryMetrics(ctx, `cluster_proxy_ca_valid{name="osd_exporter"}`)
 	cc.RecordError("Query cluster_proxy_ca_valid", err)
 
 	caValid := "unknown"
@@ -319,7 +319,7 @@ func checkProxyCAHealth(ctx context.Context, cc *checks.ClusterContext) {
 	r.Details["ca_valid"] = caValid
 
 	// Check expiry timestamp
-	expiryBody, expiryErr := cc.Client.QueryThanos(ctx, `cluster_proxy_ca_expiry_timestamp{name="osd_exporter"}`)
+	expiryBody, expiryErr := cc.Client.QueryMetrics(ctx, `cluster_proxy_ca_expiry_timestamp{name="osd_exporter"}`)
 	if expiryErr != nil {
 		cc.RecordError("Query cluster_proxy_ca_expiry_timestamp", expiryErr)
 	}
@@ -409,12 +409,12 @@ func checkIdentityProviders(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	body, err := cc.Client.QueryThanos(ctx, `identity_provider{name="osd_exporter"}`)
+	body, err := cc.Client.QueryMetrics(ctx, `identity_provider{name="osd_exporter"}`)
 	cc.RecordError("Query identity_provider", err)
 
 	if err != nil || body == "" || !thanos.HasResults(body) {

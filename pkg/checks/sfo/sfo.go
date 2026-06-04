@@ -565,14 +565,14 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 		return
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
 	// --- Instant: component health ---
-	query := thanos.EncodeQuery(`splunk_forwarder_component_unhealthy`)
-	body, err := cc.Client.QueryThanos(ctx, query)
+	rawQuery := `splunk_forwarder_component_unhealthy`
+	body, err := cc.Client.QueryMetrics(ctx, rawQuery)
 	cc.RecordError("Query splunk forwarder health", err)
 
 	unhealthyCount := 0
@@ -603,8 +603,8 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 
 	// Forwarder component unhealthy over time — only store error points (value > 0)
 	// An empty timeseries means "healthy for the entire period"
-	unhealthyTS := thanos.EncodeQuery(`max(splunk_forwarder_component_unhealthy) by (component)`)
-	tsData, tsErr := cc.Client.QueryThanosRange(ctx, unhealthyTS, start, now, step)
+	unhealthyTSRaw := `max(splunk_forwarder_component_unhealthy) by (component)`
+	tsData, tsErr := cc.Client.QueryMetricsRange(ctx, unhealthyTSRaw, start, now, step)
 	if tsErr == nil {
 		points, _ := thanos.Timeseries(tsData)
 		errorPoints := thanos.FilterNonZero(points)
@@ -613,8 +613,8 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 	}
 
 	// Audit filter errors over time — only store non-zero error rates
-	errRateQuery := thanos.EncodeQuery(`rate(splunkforwarder_audit_filter_errors_total[30m])`)
-	errData, errErr := cc.Client.QueryThanosRange(ctx, errRateQuery, start, now, step)
+	errRateQueryRaw := `rate(splunkforwarder_audit_filter_errors_total[30m])`
+	errData, errErr := cc.Client.QueryMetricsRange(ctx, errRateQueryRaw, start, now, step)
 	if errErr == nil {
 		points, _ := thanos.Timeseries(errData)
 		errorPoints := thanos.FilterNonZero(points)
@@ -623,24 +623,24 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 	}
 
 	// Audit filter forwarded events rate (events/sec averaged over 1h intervals)
-	fwdQuery := thanos.EncodeQuery(`sum(rate(splunkforwarder_audit_filter_events_processed_total{decision="forward"}[1h]))`)
-	fwdData, fwdErr := cc.Client.QueryThanosRange(ctx, fwdQuery, start, now, 3600) // 1h intervals
+	fwdQueryRaw := `sum(rate(splunkforwarder_audit_filter_events_processed_total{decision="forward"}[1h]))`
+	fwdData, fwdErr := cc.Client.QueryMetricsRange(ctx, fwdQueryRaw, start, now, 3600) // 1h intervals
 	if fwdErr == nil {
 		points, _ := thanos.Timeseries(fwdData)
 		r.Details["audit_forward_rate_timeseries"] = thanos.PointsToJSON(points)
 	}
 
 	// Audit filter total event throughput (events/sec over 1h)
-	totalQuery := thanos.EncodeQuery(`sum(rate(splunkforwarder_audit_filter_events_total[1h]))`)
-	totalData, totalErr := cc.Client.QueryThanosRange(ctx, totalQuery, start, now, 3600)
+	totalQueryRaw := `sum(rate(splunkforwarder_audit_filter_events_total[1h]))`
+	totalData, totalErr := cc.Client.QueryMetricsRange(ctx, totalQueryRaw, start, now, 3600)
 	if totalErr == nil {
 		points, _ := thanos.Timeseries(totalData)
 		r.Details["audit_total_rate_timeseries"] = thanos.PointsToJSON(points)
 	}
 
 	// --- Instant: current forwarding rate ---
-	fwdInstant := thanos.EncodeQuery(`sum(rate(splunkforwarder_audit_filter_events_processed_total{decision="forward"}[5m]))`)
-	fwdNow, fwdNowErr := cc.Client.QueryThanos(ctx, fwdInstant)
+	fwdInstantRaw := `sum(rate(splunkforwarder_audit_filter_events_processed_total{decision="forward"}[5m]))`
+	fwdNow, fwdNowErr := cc.Client.QueryMetrics(ctx, fwdInstantRaw)
 	if fwdNowErr == nil {
 		if val, _, ok := thanos.InstantValue(fwdNow); ok {
 			r.Details["current_forward_rate"] = val + " events/sec"
@@ -648,8 +648,8 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 	}
 
 	// --- Instant: current error rate ---
-	errInstant := thanos.EncodeQuery(`sum(rate(splunkforwarder_audit_filter_errors_total[5m]))`)
-	errNow, errNowErr := cc.Client.QueryThanos(ctx, errInstant)
+	errInstantRaw := `sum(rate(splunkforwarder_audit_filter_errors_total[5m]))`
+	errNow, errNowErr := cc.Client.QueryMetrics(ctx, errInstantRaw)
 	currentErrRate := 0.0
 	if errNowErr == nil {
 		if f, ok := thanos.InstantFloat(errNow); ok {
@@ -698,7 +698,7 @@ func checkServiceMonitor(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -745,7 +745,7 @@ func checkPrometheusRule(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}

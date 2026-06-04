@@ -493,7 +493,7 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -517,8 +517,8 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	queryMetric := func(name string) string {
-		query := thanos.EncodeQuery(fmt.Sprintf(`%s{namespace="%s"}`, name, cc.Operator.Namespace))
-		result, err := cc.Client.QueryThanos(ctx, query)
+		rawQuery := fmt.Sprintf(`%s{namespace="%s"}`, name, cc.Operator.Namespace)
+		result, err := cc.Client.QueryMetrics(ctx, rawQuery)
 		cc.RecordError("CAMO metric: "+name, err)
 		if err == nil && result != "" {
 			if val, _, ok := thanos.InstantValue(result); ok {

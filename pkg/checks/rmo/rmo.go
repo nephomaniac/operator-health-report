@@ -436,8 +436,8 @@ func checkProbeHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cu
 		return
 	}
 
-	query := thanos.EncodeQuery(`probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}`)
-	probeData, err := cc.Client.QueryThanos(ctx, query)
+	rawQuery := `probe_success{namespace=~"openshift-route-monitor-operator|ocm-.*"}`
+	probeData, err := cc.Client.QueryMetrics(ctx, rawQuery)
 	cc.RecordError("Probe success instant query", err)
 
 	if err != nil || !thanos.HasResults(probeData) {
@@ -686,8 +686,8 @@ func checkOperatorMetrics(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	queryMetric := func(name string) string {
-		query := thanos.EncodeQuery(fmt.Sprintf(`%s{namespace="%s"}`, name, cc.Operator.Namespace))
-		data, err := cc.Client.QueryThanos(ctx, query)
+		rawQuery := fmt.Sprintf(`%s{namespace="%s"}`, name, cc.Operator.Namespace)
+		data, err := cc.Client.QueryMetrics(ctx, rawQuery)
 		cc.RecordError("RMO metric: "+name, err)
 		return data
 	}
@@ -1210,8 +1210,8 @@ func checkRHOBSIntegration(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Check OIDC token refresh metrics
-	oidcQuery := thanos.EncodeQuery(fmt.Sprintf(`rhobs_route_monitor_operator_oidc_token_refresh_total{namespace="%s"}`, cc.Operator.Namespace))
-	oidcData, err := cc.Client.QueryThanos(ctx, oidcQuery)
+	oidcQueryRaw := fmt.Sprintf(`rhobs_route_monitor_operator_oidc_token_refresh_total{namespace="%s"}`, cc.Operator.Namespace)
+	oidcData, err := cc.Client.QueryMetrics(ctx, oidcQueryRaw)
 	cc.RecordError("OIDC token refresh", err)
 
 	oidcSuccess := 0.0
@@ -1279,8 +1279,8 @@ func checkLimitedSupportDisagreement(ctx context.Context, cc *checks.ClusterCont
 	r.Details["hcp_label_value"] = labelValue
 
 	// Get metric from Thanos
-	query := thanos.EncodeQuery(fmt.Sprintf(`limited_support{_id="%s"}`, cc.ClusterID))
-	metricData, err := cc.Client.QueryThanos(ctx, query)
+	rawQuery := fmt.Sprintf(`limited_support{_id="%s"}`, cc.ClusterID)
+	metricData, err := cc.Client.QueryMetrics(ctx, rawQuery)
 	cc.RecordError("Query limited_support metric", err)
 
 	metricValue := ""
