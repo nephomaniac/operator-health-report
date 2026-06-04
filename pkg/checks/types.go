@@ -297,6 +297,16 @@ var (
 		SkipCommonChecks: true,
 	}
 
+	PDOConfig = OperatorConfig{
+		Name:             "pagerduty-operator",
+		ShortName:        "pdo",
+		Namespace:        "pagerduty-operator",
+		Deployment:       "pagerduty-operator",
+		PKOSaas:          "saas-pagerduty-operator-pko.yaml",
+		OLMSaas:          "saas-pagerduty-operator.yaml",
+		SkipCommonChecks: true,
+	}
+
 	AllOperators = map[string]OperatorConfig{
 		"camo":  CAMOConfig,
 		"rmo":   RMOConfig,
@@ -304,5 +314,6 @@ var (
 		"sfo":   SFOConfig,
 		"rhobs": RHOBSConfig,
 		"rlr":   RLRConfig,
+		"pdo":   PDOConfig,
 	}
 )
