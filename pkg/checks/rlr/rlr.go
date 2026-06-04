@@ -307,7 +307,7 @@ func checkVectorMetricsPresent(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -371,7 +371,7 @@ func checkVectorIngestionRate(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -443,7 +443,7 @@ func checkVectorS3Delivery(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -505,7 +505,7 @@ func checkVectorBufferUsage(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -572,7 +572,7 @@ func checkVectorErrorRate(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -645,7 +645,7 @@ func checkVectorEventLoss(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -705,7 +705,7 @@ func checkVectorPipelineRatio(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -1187,7 +1187,7 @@ func checkActiveAlerts(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
@@ -1316,7 +1316,7 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() && !cc.Client.HasRHOBSRemote() {
+	if !cc.Client.CanQueryMetrics() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}

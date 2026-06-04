@@ -17,6 +17,8 @@ import (
 	"github.com/openshift/operator-health-report/pkg/rhobs"
 
 	sdk "github.com/openshift-online/ocm-sdk-go"
+	"k8s.io/client-go/tools/portforward"
+	"k8s.io/client-go/transport/spdy"
 	bplogin "github.com/openshift/backplane-cli/cmd/ocm-backplane/login"
 	bpconfig "github.com/openshift/backplane-cli/pkg/cli/config"
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +49,17 @@ type ClusterClient struct {
 	elevationDeniedReason string // "access_request", "forbidden", or ""
 
 	rhobsClient *rhobs.Client
+
+	pfSession    *portForwardSession
+	pfSetupOnce  sync.Once
+	pfSetupErr   error
+}
+
+// portForwardSession manages a port-forward to a Thanos/Prometheus pod.
+type portForwardSession struct {
+	localPort uint16
+	stopChan  chan struct{}
+	fw        *portforward.PortForwarder
 }
 
 const (
@@ -293,6 +306,7 @@ func ConnectToClusterWithConn(ctx context.Context, clusterID, reason string, noE
 
 // Disconnect cleans up the connection (no-op for backplane — session is per-request)
 func (cc *ClusterClient) Disconnect() {
+	cc.closePortForward()
 	logging.Log.WithField("cluster_id", cc.ClusterID).Debug("Disconnected from cluster")
 }
 
@@ -582,52 +596,241 @@ func (cc *ClusterClient) HasRHOBSRemote() bool {
 	return cc.rhobsClient != nil
 }
 
-// QueryMetrics runs a PromQL instant query, trying Thanos exec first (if elevation
-// available), falling back to RHOBS remote API (if configured).
+// CanQueryMetrics returns true if any metrics source is potentially available:
+// elevation (exec), RHOBS remote, or port-forward (always attempted as fallback).
+func (cc *ClusterClient) CanQueryMetrics() bool {
+	return true
+}
+
+// QueryMetrics runs a PromQL instant query using the best available method:
+// 1. Thanos exec (if elevation available)
+// 2. Port-forward to Thanos (no elevation needed)
+// 3. RHOBS remote API (out-of-band, for production)
 // The query parameter is raw PromQL — encoding is handled internally.
 func (cc *ClusterClient) QueryMetrics(ctx context.Context, rawQuery string) (string, error) {
+	log := logging.WithCheck("query_metrics")
+
+	// Try 1: Thanos exec (requires elevation)
 	if cc.CanElevate() {
 		encoded := url.QueryEscape(rawQuery)
 		result, err := cc.QueryThanos(ctx, encoded)
 		if err == nil {
 			return result, nil
 		}
-		log := logging.WithCheck("query_metrics")
-		log.WithField("error", err).Debug("Thanos exec failed, trying RHOBS remote")
+		log.WithField("error", err).Debug("Thanos exec failed, trying port-forward")
 	}
 
+	// Try 2: Port-forward to Thanos (no elevation needed)
+	result, err := cc.QueryThanosViaPortForward(ctx, rawQuery)
+	if err == nil {
+		return result, nil
+	}
+	if cc.pfSetupErr == nil {
+		log.WithField("error", err).Debug("Port-forward query failed, trying RHOBS remote")
+	}
+
+	// Try 3: RHOBS remote API (out-of-band, requires vault credentials)
 	if cc.rhobsClient != nil {
 		return cc.rhobsClient.QueryInstant(rawQuery)
 	}
 
-	if !cc.CanElevate() {
-		return "", fmt.Errorf("metrics unavailable: elevation disabled and no RHOBS remote configured")
-	}
-	return "", fmt.Errorf("metrics unavailable: both Thanos exec and RHOBS remote failed")
+	return "", fmt.Errorf("metrics unavailable: tried exec (elevation: %v), port-forward (%v), no RHOBS remote configured",
+		cc.CanElevate(), cc.pfSetupErr)
 }
 
-// QueryMetricsRange runs a PromQL range query, trying Thanos exec first,
-// falling back to RHOBS remote API.
-// The query parameter is raw PromQL — encoding is handled internally.
+// QueryMetricsRange runs a PromQL range query using the best available method.
+// Same fallback chain as QueryMetrics: exec → port-forward → RHOBS remote.
 func (cc *ClusterClient) QueryMetricsRange(ctx context.Context, rawQuery string, start, end int64, step int) (string, error) {
+	log := logging.WithCheck("query_metrics_range")
+
+	// Try 1: Thanos exec
 	if cc.CanElevate() {
 		encoded := url.QueryEscape(rawQuery)
 		result, err := cc.QueryThanosRange(ctx, encoded, start, end, step)
 		if err == nil {
 			return result, nil
 		}
-		log := logging.WithCheck("query_metrics_range")
-		log.WithField("error", err).Debug("Thanos exec range failed, trying RHOBS remote")
+		log.WithField("error", err).Debug("Thanos exec range failed, trying port-forward")
 	}
 
+	// Try 2: Port-forward
+	result, err := cc.QueryThanosRangeViaPortForward(ctx, rawQuery, start, end, step)
+	if err == nil {
+		return result, nil
+	}
+
+	// Try 3: RHOBS remote
 	if cc.rhobsClient != nil {
 		return cc.rhobsClient.QueryRange(rawQuery, start, end, step)
 	}
 
-	if !cc.CanElevate() {
-		return "", fmt.Errorf("metrics unavailable: elevation disabled and no RHOBS remote configured")
+	return "", fmt.Errorf("metrics unavailable: tried exec (elevation: %v), port-forward (%v), no RHOBS remote configured",
+		cc.CanElevate(), cc.pfSetupErr)
+}
+
+// setupPortForward establishes a port-forward to a Prometheus-compatible pod.
+// Tries thanos-query first (federated view), falls back to prometheus-k8s.
+// Called once per cluster via sync.Once. The session is cleaned up in Disconnect().
+func (cc *ClusterClient) setupPortForward(ctx context.Context) error {
+	log := logging.WithCheck("port_forward")
+
+	// Try thanos-query first, then prometheus-k8s
+	selectors := []struct {
+		label string
+		port  string
+	}{
+		{"app.kubernetes.io/name=thanos-query", "9090"},
+		{"app.kubernetes.io/name=prometheus,app.kubernetes.io/component=prometheus", "9090"},
+		{"app=prometheus,prometheus=k8s", "9090"},
 	}
-	return "", fmt.Errorf("metrics unavailable: both Thanos exec and RHOBS remote failed")
+
+	var podName, targetPort string
+	for _, s := range selectors {
+		pods, err := cc.clientset.CoreV1().Pods("openshift-monitoring").List(ctx, metav1.ListOptions{
+			LabelSelector: s.label,
+		})
+		if err == nil && len(pods.Items) > 0 {
+			podName = pods.Items[0].Name
+			targetPort = s.port
+			log.WithField("pod", podName).WithField("selector", s.label).Debug("Found Prometheus-compatible pod")
+			break
+		}
+	}
+
+	if podName == "" {
+		return fmt.Errorf("no thanos-query or prometheus pods found for port-forward")
+	}
+
+	restConfig := cc.restConfig
+
+	reqURL := cc.clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Namespace("openshift-monitoring").
+		Name(podName).
+		SubResource("portforward").
+		URL()
+
+	transport, upgrader, err := spdy.RoundTripperFor(restConfig)
+	if err != nil {
+		return fmt.Errorf("creating SPDY transport: %w", err)
+	}
+
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", reqURL)
+
+	stopChan := make(chan struct{})
+	readyChan := make(chan struct{})
+
+	fw, err := portforward.New(dialer, []string{"0:" + targetPort}, stopChan, readyChan, io.Discard, io.Discard)
+	if err != nil {
+		return fmt.Errorf("creating port-forwarder: %w", err)
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- fw.ForwardPorts()
+	}()
+
+	select {
+	case <-readyChan:
+	case err := <-errChan:
+		return fmt.Errorf("port-forward failed: %w", err)
+	case <-time.After(15 * time.Second):
+		close(stopChan)
+		return fmt.Errorf("port-forward timed out after 15s")
+	}
+
+	ports, err := fw.GetPorts()
+	if err != nil || len(ports) == 0 {
+		close(stopChan)
+		return fmt.Errorf("no forwarded ports: %v", err)
+	}
+
+	localPort := ports[0].Local
+	log.WithField("pod", podName).WithField("local_port", localPort).Debug("Port-forward established")
+
+	cc.pfSession = &portForwardSession{
+		localPort: localPort,
+		stopChan:  stopChan,
+		fw:        fw,
+	}
+	return nil
+}
+
+// closePortForward shuts down the port-forward session if active.
+func (cc *ClusterClient) closePortForward() {
+	if cc.pfSession != nil {
+		close(cc.pfSession.stopChan)
+		cc.pfSession = nil
+	}
+}
+
+// QueryThanosViaPortForward runs a PromQL instant query via port-forward.
+func (cc *ClusterClient) QueryThanosViaPortForward(ctx context.Context, query string) (string, error) {
+	cc.pfSetupOnce.Do(func() {
+		cc.pfSetupErr = cc.setupPortForward(ctx)
+	})
+	if cc.pfSetupErr != nil {
+		return "", cc.pfSetupErr
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/query?query=%s",
+		cc.pfSession.localPort, url.QueryEscape(query))
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("port-forward query failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading port-forward response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("thanos returned %d via port-forward: %s", resp.StatusCode, truncateStr(string(body), 200))
+	}
+
+	return string(body), nil
+}
+
+// QueryThanosRangeViaPortForward runs a PromQL range query via port-forward.
+func (cc *ClusterClient) QueryThanosRangeViaPortForward(ctx context.Context, query string, start, end int64, step int) (string, error) {
+	cc.pfSetupOnce.Do(func() {
+		cc.pfSetupErr = cc.setupPortForward(ctx)
+	})
+	if cc.pfSetupErr != nil {
+		return "", cc.pfSetupErr
+	}
+
+	reqURL := fmt.Sprintf("http://127.0.0.1:%d/api/v1/query_range?query=%s&start=%d&end=%d&step=%d",
+		cc.pfSession.localPort, url.QueryEscape(query), start, end, step)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(reqURL)
+	if err != nil {
+		return "", fmt.Errorf("port-forward range query failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading port-forward response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("thanos returned %d via port-forward: %s", resp.StatusCode, truncateStr(string(body), 200))
+	}
+
+	return string(body), nil
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // GetClusterVersion returns the desired cluster version string.
