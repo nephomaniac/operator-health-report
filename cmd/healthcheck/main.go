@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/openshift/operator-health-report/pkg/checks"
@@ -298,6 +300,50 @@ func main() {
 		Status    string `json:"skip_status"` // "limited_support", "not_ready", "connection_failed", "metadata_failed"
 	}
 
+	// Signal handling — graceful shutdown on ctrl-c
+	rootCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// writeResults dumps current results to JSON and HTML (used for both normal exit and signal)
+	writeResults := func(allOutputs []checks.ClusterOutput, skippedClusters []skippedCluster, interrupted bool) {
+		var combined []any
+		for _, meta := range saasMetadata {
+			combined = append(combined, meta)
+		}
+		for _, sc := range skippedClusters {
+			combined = append(combined, sc)
+		}
+		for _, out := range allOutputs {
+			combined = append(combined, out)
+		}
+
+		data, err := json.MarshalIndent(combined, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling JSON: %v\n", err)
+			return
+		}
+		if err := os.WriteFile(outputFile, data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
+			return
+		}
+
+		label := ""
+		if interrupted {
+			label = " (PARTIAL — interrupted)"
+		}
+		fmt.Fprintf(os.Stderr, "\nResults written to: %s (%d cluster entries, %d SAAS metadata)%s\n",
+			outputFile, len(allOutputs), len(saasMetadata), label)
+
+		if !noHTML {
+			htmlFile := strings.TrimSuffix(outputFile, ".json") + ".html"
+			if err := report.GenerateHTML(data, htmlFile); err != nil {
+				fmt.Fprintf(os.Stderr, "HTML generation failed: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "HTML report: %s\n", htmlFile)
+			}
+		}
+	}
+
 	// Process clusters — concurrently up to --parallel limit
 	var allOutputs []checks.ClusterOutput
 	var skippedClusters []skippedCluster
@@ -306,6 +352,14 @@ func main() {
 	var clusterWg sync.WaitGroup
 
 	for i, clusterID := range clusterIDs {
+		// Check for cancellation before starting new clusters
+		select {
+		case <-rootCtx.Done():
+			fmt.Fprintf(os.Stderr, "\n⚠ Interrupted — waiting for %d in-flight cluster(s) to finish...\n", parallel)
+			goto waitAndWrite
+		default:
+		}
+
 		clusterWg.Add(1)
 		sem <- struct{}{} // acquire semaphore slot
 
@@ -313,7 +367,7 @@ func main() {
 			defer clusterWg.Done()
 			defer func() { <-sem }() // release semaphore slot
 
-			ctx := context.Background()
+			ctx := rootCtx
 
 			// Fetch cluster metadata from OCM first — skip non-ready and limited-support clusters
 			meta, metaErr := ocmClient.GetClusterMetadata(cid)
@@ -459,40 +513,14 @@ func main() {
 			wg.Wait()
 		}(i, clusterID)
 	}
+waitAndWrite:
 	clusterWg.Wait()
 
-	// Write JSON output — mixed array of saas_targets metadata + skipped clusters + cluster data
-	var combined []any
-	for _, meta := range saasMetadata {
-		combined = append(combined, meta)
-	}
-	for _, sc := range skippedClusters {
-		combined = append(combined, sc)
-	}
-	for _, out := range allOutputs {
-		combined = append(combined, out)
-	}
+	interrupted := rootCtx.Err() != nil
+	writeResults(allOutputs, skippedClusters, interrupted)
 
-	data, err := json.MarshalIndent(combined, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling JSON: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.WriteFile(outputFile, data, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Fprintf(os.Stderr, "\nResults written to: %s (%d cluster entries, %d SAAS metadata)\n",
-		outputFile, len(allOutputs), len(saasMetadata))
-
-	// Generate HTML report
-	if !noHTML {
-		htmlFile := strings.TrimSuffix(outputFile, ".json") + ".html"
-		if err := report.GenerateHTML(data, htmlFile); err != nil {
-			fmt.Fprintf(os.Stderr, "HTML generation failed: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "HTML report: %s\n", htmlFile)
-		}
+	if interrupted {
+		os.Exit(130) // standard exit code for SIGINT
 	}
 }
 
