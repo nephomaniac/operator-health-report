@@ -11,7 +11,7 @@
             healthData.filter(e => e.type === 'saas_targets').forEach(meta => {
                 saasTargets[meta.operator_name] = meta.targets || [];
             });
-            healthData = healthData.filter(e => e.type !== 'saas_targets' && e.type !== 'skipped_cluster');
+            healthData = healthData.filter(e => e.type !== 'saas_targets' && e.type !== 'skipped_cluster' && e.type !== 'elevation_audit');
         }
 
         // Extract and display script version from first cluster's data
@@ -1858,27 +1858,6 @@
                         '<div class="stat-number" style="color: #dc3545;">' + totalApiErrors + '</div>' +
                         '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS') + ': ' + n).join(', ') + '</div>' +
                     '</div>' : '') +
-                    (() => {
-                        const audit = allEntries.find(e => e.type === 'elevation_audit');
-                        if (!audit) return '';
-                        const calls = audit.elevated_api_calls || 0;
-                        const elevClusters = audit.clusters_with_elevation || 0;
-                        const noElev = audit.no_elevate_flag;
-                        const env = audit.environment || '';
-                        const color = calls === 0 ? 'var(--green)' : (noElev ? '#dc3545' : 'var(--accent)');
-                        const borderColor = calls === 0 ? 'var(--green)' : (noElev ? '#dc3545' : 'var(--accent)');
-                        const bg = calls === 0 ? 'var(--green-dim)' : (noElev ? 'rgba(220,53,69,0.08)' : 'var(--accent-dim)');
-                        let detail = calls === 0
-                            ? 'All checks used standard access or port-forward'
-                            : elevClusters + ' cluster(s) used elevation';
-                        if (noElev && calls > 0) detail = 'VIOLATION: elevation used despite --no-elevate';
-                        return '<div class="stat-card" style="border-color:' + borderColor + ';background:' + bg + ';">' +
-                            '<div class="stat-label">Elevated API Calls</div>' +
-                            '<div class="stat-number" style="color:' + color + ';">' + calls + '</div>' +
-                            '<div class="stat-label">' + detail + '</div>' +
-                            '<div style="font-size:0.7em;color:var(--text-muted);margin-top:2px;">env: ' + env + (noElev ? ' | --no-elevate' : '') + '</div>' +
-                        '</div>';
-                    })() +
                 '</div>' +
                 // CVE Security Section (optional)
                 (enableCVESection && (cveData.image_tag || cveData.image_sha) ?
@@ -1999,6 +1978,32 @@
                     '</div>' +
                 '</div>'
                 : '');  // End CVE section conditional
+
+            // Elevation audit card — appended after main summary
+            const audit = allEntries.find(e => e.type === 'elevation_audit');
+            if (audit) {
+                const calls = audit.elevated_api_calls || 0;
+                const elevClusters = audit.clusters_with_elevation || 0;
+                const noElev = audit.no_elevate_flag;
+                const env = audit.environment || '';
+                const color = calls === 0 ? 'var(--green)' : (noElev ? '#dc3545' : 'var(--accent)');
+                const borderColor = calls === 0 ? 'var(--green)' : (noElev ? '#dc3545' : 'var(--accent)');
+                const bg = calls === 0 ? 'var(--green-dim)' : (noElev ? 'rgba(220,53,69,0.08)' : 'var(--accent-dim)');
+                let detail = calls === 0
+                    ? 'All checks used standard access or port-forward'
+                    : elevClusters + ' cluster(s) used elevation';
+                if (noElev && calls > 0) detail = 'VIOLATION: elevation used despite --no-elevate';
+                const elevCard = document.createElement('div');
+                elevCard.className = 'stat-card';
+                elevCard.style.cssText = 'border-color:' + borderColor + ';background:' + bg;
+                elevCard.innerHTML =
+                    '<div class="stat-label">Elevated API Calls</div>' +
+                    '<div class="stat-number" style="color:' + color + ';">' + calls + '</div>' +
+                    '<div class="stat-label">' + detail + '</div>' +
+                    '<div style="font-size:0.7em;color:var(--text-muted);margin-top:2px;">env: ' + env + (noElev ? ' | --no-elevate' : '') + '</div>';
+                const statsGrid = summaryEl.querySelector('.stats-grid');
+                if (statsGrid) statsGrid.appendChild(elevCard);
+            }
         }
 
         function sortClusters(data) {
