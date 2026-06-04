@@ -305,11 +305,19 @@ func main() {
 	defer cancel()
 
 	// writeResults dumps current results to JSON and HTML (used for both normal exit and signal)
-	writeResults := func(allOutputs []checks.ClusterOutput, skippedClusters []skippedCluster, interrupted bool) {
+	writeResults := func(allOutputs []checks.ClusterOutput, skippedClusters []skippedCluster, interrupted bool, elevatedCalls int64, clustersElev int) {
 		var combined []any
 		for _, meta := range saasMetadata {
 			combined = append(combined, meta)
 		}
+		combined = append(combined, map[string]any{
+			"type":                     "elevation_audit",
+			"elevated_api_calls":      elevatedCalls,
+			"clusters_with_elevation":  clustersElev,
+			"total_clusters_processed": len(allOutputs),
+			"no_elevate_flag":          noElevate,
+			"environment":              ocmClient.Environment(),
+		})
 		for _, sc := range skippedClusters {
 			combined = append(combined, sc)
 		}
@@ -350,6 +358,8 @@ func main() {
 	var mu sync.Mutex
 	sem := make(chan struct{}, parallel)
 	var clusterWg sync.WaitGroup
+	var totalElevatedCalls int64
+	var clustersWithElevation int
 
 	for i, clusterID := range clusterIDs {
 		// Check for cancellation before starting new clusters
@@ -515,14 +525,16 @@ func main() {
 			}
 			wg.Wait()
 
-			// Elevation audit: warn if elevated calls happened on a no-elevate or production run
-			if client.ElevatedCallCount > 0 && noElevate {
-				fmt.Fprintf(os.Stderr, "  ⚠ AUDIT: %d elevated API calls on %s despite --no-elevate!\n",
-					client.ElevatedCallCount, clusterName)
-			} else if client.ElevatedCallCount > 0 {
-				logging.WithCheck("elevation_audit").WithField("cluster", clusterName).
-					WithField("elevated_calls", client.ElevatedCallCount).
-					Debug("Elevated API calls used")
+			// Elevation audit
+			if client.ElevatedCallCount > 0 {
+				mu.Lock()
+				totalElevatedCalls += client.ElevatedCallCount
+				clustersWithElevation++
+				mu.Unlock()
+				if noElevate {
+					fmt.Fprintf(os.Stderr, "  ⚠ AUDIT: %d elevated API calls on %s despite --no-elevate!\n",
+						client.ElevatedCallCount, clusterName)
+				}
 			}
 		}(i, clusterID)
 	}
@@ -545,8 +557,16 @@ waitAndWrite:
 	}
 
 	mu.Lock()
-	writeResults(allOutputs, skippedClusters, interrupted)
+	writeResults(allOutputs, skippedClusters, interrupted, totalElevatedCalls, clustersWithElevation)
 	mu.Unlock()
+
+	// Elevation audit summary
+	if totalElevatedCalls > 0 {
+		fmt.Fprintf(os.Stderr, "Elevation audit: %d elevated API calls across %d cluster(s)\n",
+			totalElevatedCalls, clustersWithElevation)
+	} else {
+		fmt.Fprintf(os.Stderr, "Elevation audit: 0 elevated API calls (all checks used standard access or port-forward)\n")
+	}
 
 	if interrupted {
 		os.Exit(130)
