@@ -78,6 +78,7 @@ func checkAPIKeySecret(ctx context.Context, cc *checks.ClusterContext) {
 		return
 	}
 
+	cc.Client.RecordElevatedOp(fmt.Sprintf("get secrets/pagerduty-api-key in %s", cc.Operator.Namespace))
 	secret, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, "pagerduty-api-key", metav1.GetOptions{})
 	cc.RecordError("Get pagerduty-api-key secret", err)
 

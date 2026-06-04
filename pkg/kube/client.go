@@ -372,13 +372,18 @@ func (cc *ClusterClient) Clientset() kubernetes.Interface {
 }
 
 // ElevatedClientset returns the elevated k8s client, or nil if unavailable.
-// Records the elevated operation for audit.
+// Callers should use RecordElevatedOp to describe the operation they perform.
 func (cc *ClusterClient) ElevatedClientset() kubernetes.Interface {
 	if !cc.CanElevate() {
 		return nil
 	}
-	cc.recordElevatedOp("clientset (direct)")
 	return cc.elevatedClient
+}
+
+// RecordElevatedOp logs an elevated operation for audit purposes.
+// Call this when using ElevatedClientset() to describe the specific operation.
+func (cc *ClusterClient) RecordElevatedOp(op string) {
+	cc.recordElevatedOp(op)
 }
 
 // GetResource fetches a single resource using the dynamic client.
