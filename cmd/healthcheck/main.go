@@ -481,6 +481,9 @@ func main() {
 
 			var wg sync.WaitGroup
 			for _, opCfg := range opConfigs {
+				if checks.Cancelled(ctx) {
+					break
+				}
 				wg.Add(1)
 				go func(op checks.OperatorConfig) {
 					defer wg.Done()
@@ -514,13 +517,29 @@ func main() {
 		}(i, clusterID)
 	}
 waitAndWrite:
-	clusterWg.Wait()
-
 	interrupted := rootCtx.Err() != nil
+	if interrupted {
+		// Give in-flight goroutines a short window to finish current API call and record partial results
+		done := make(chan struct{})
+		go func() {
+			clusterWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			fmt.Fprintf(os.Stderr, "⚠ Timed out waiting for in-flight checks — writing partial results\n")
+		}
+	} else {
+		clusterWg.Wait()
+	}
+
+	mu.Lock()
 	writeResults(allOutputs, skippedClusters, interrupted)
+	mu.Unlock()
 
 	if interrupted {
-		os.Exit(130) // standard exit code for SIGINT
+		os.Exit(130)
 	}
 }
 

@@ -1181,18 +1181,26 @@ func RunAllCommonChecks(ctx context.Context, cc *ClusterContext) {
 		return
 	}
 
-	CheckDeployment(ctx, cc)
-	CheckPKOHealth(ctx, cc)
-	CheckDualInstallation(ctx, cc)
-	CheckOrphanedOLM(ctx, cc)
-	CheckVersionVerification(ctx, cc)
-	CheckResourceLeakDetection(ctx, cc)
-	CheckResourceLimits(ctx, cc)
-	CheckLeaderElection(ctx, cc)
-	CheckImagePull(ctx, cc)
-	CheckPKOJobHealth(ctx, cc)
-	CheckLogErrors(ctx, cc)
-	CheckEvents(ctx, cc)
+	checks := []func(context.Context, *ClusterContext){
+		CheckDeployment,
+		CheckPKOHealth,
+		CheckDualInstallation,
+		CheckOrphanedOLM,
+		CheckVersionVerification,
+		CheckResourceLeakDetection,
+		CheckResourceLimits,
+		CheckLeaderElection,
+		CheckImagePull,
+		CheckPKOJobHealth,
+		CheckLogErrors,
+		CheckEvents,
+	}
+	for _, check := range checks {
+		if Cancelled(ctx) {
+			return
+		}
+		check(ctx, cc)
+	}
 }
 
 // Helper functions

@@ -26,10 +26,25 @@ func GetChecker(shortName string) OperatorChecker {
 	return registry[shortName]
 }
 
-// RunOperatorChecks runs common checks then operator-specific checks
+// Cancelled returns true if the context has been cancelled (e.g., ctrl-c).
+func Cancelled(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// RunOperatorChecks runs common checks then operator-specific checks.
+// Stops early if the context is cancelled (graceful shutdown).
 func RunOperatorChecks(ctx context.Context, cc *ClusterContext) {
 	if !cc.Operator.SkipCommonChecks {
 		RunAllCommonChecks(ctx, cc)
+	}
+
+	if Cancelled(ctx) {
+		return
 	}
 
 	if checker := GetChecker(cc.Operator.ShortName); checker != nil {
