@@ -9,34 +9,43 @@ Single Go binary for comprehensive health monitoring of SRE-managed OpenShift op
 
 ## Supported Operators
 
-| Operator | Key | Namespace | Deployment |
-|----------|-----|-----------|------------|
-| configure-alertmanager-operator | `camo` | `openshift-monitoring` | `configure-alertmanager-operator` |
-| route-monitor-operator | `rmo` | `openshift-route-monitor-operator` | `route-monitor-operator-controller-manager` |
-| osd-metrics-exporter | `ome` | `openshift-osd-metrics` | `osd-metrics-exporter` |
+| Operator | Key | Namespace | Deployment | Cluster Types |
+|----------|-----|-----------|------------|---------------|
+| configure-alertmanager-operator | `camo` | `openshift-monitoring` | `configure-alertmanager-operator` | All managed |
+| route-monitor-operator | `rmo` | `openshift-route-monitor-operator` | `route-monitor-operator-controller-manager` | All managed |
+| osd-metrics-exporter | `ome` | `openshift-osd-metrics` | `osd-metrics-exporter` | All managed |
+| splunk-forwarder-operator | `sfo` | `openshift-splunk-forwarder-operator` | `splunk-forwarder-operator` | All managed |
+| rhobs-observability | `rhobs` | `openshift-observability-operator` | — | MC/SC only |
+| rosa-log-router | `rlr` | `hypershift-control-plane-log-forwarding` | — | MC only |
+| pagerduty-operator | `pdo` | `pagerduty-operator` | `pagerduty-operator` | Hive only |
 
 ## Architecture
 
 ```
 cmd/healthcheck/main.go        CLI, cluster loop, parallel processing, config
-pkg/ocm/ocm.go                 OCM SDK — multi-env, token lifecycle, Options{}
-pkg/kube/client.go              Backplane k8s client — impersonation elevation, retry
+pkg/ocm/ocm.go                 OCM SDK — multi-env, token lifecycle, labels
+pkg/kube/client.go              Backplane k8s client — elevation, retry, unified metrics
 pkg/config/config.go            Config file loading (.healthcheck.yaml)
+pkg/rhobs/client.go             RHOBS remote API — vault auth, SSO token, metrics queries
 pkg/checks/
   types.go                      Result, ClusterContext, OperatorConfig, status types
   operator.go                   OperatorChecker interface + registry
-  common.go                     13 common checks (all operators inherit)
-  camo/camo.go                  CAMO-specific checks (13 checks)
+  common.go                     13 common checks + PodSummary/ProblematicPods helpers
+  camo/camo.go                  CAMO-specific checks (11 checks)
   rmo/rmo.go                    RMO-specific checks (16 checks)
   ome/ome.go                    OME-specific checks (5 checks)
+  sfo/sfo.go                    SFO-specific checks
+  rhobs/rhobs.go                RHOBS-specific checks (16 checks, SkipCommonChecks)
+  rlr/rlr.go                    RLR-specific checks (18 checks, SkipCommonChecks)
+  pdo/pdo.go                    PDO-specific checks (8 checks, SkipCommonChecks)
 pkg/saas/
-  resolver.go                   SAAS target resolution (GitLab + Quay HTTP)
+  resolver.go                   SAAS target resolution (GitLab + Quay + GitHub)
   pipeline.go                   Promotion pipeline DAG (deploy + e2e targets)
-pkg/thanos/thanos.go           Prometheus/Thanos response parsing
+pkg/thanos/thanos.go           Prometheus/Thanos response parsing (NaN/Inf safe)
 pkg/report/
   report.go                     HTML generation (embedded templates)
-  template_prefix.html          HTML/CSS (525 lines)
-  template_suffix.html          JavaScript (1900+ lines)
+  template_prefix.html          HTML/CSS
+  template_suffix.html          JavaScript (charts, tables, pipeline rendering)
 pkg/logging/logger.go           Structured logging (logrus)
 Makefile                        Build with version from git
 ```
@@ -137,14 +146,17 @@ image_pull_status, pko_job_health, log_error_analysis, operator_events
 ## Connection Architecture
 
 ```
-OCM Client (per environment, token lifecycle)
+OCM Client (per environment, token lifecycle, cluster labels)
   └── Backplane ClusterClient (per cluster)
        ├── Standard k8s client (pods, deployments, namespaces)
        ├── Elevated k8s client (impersonation as backplane-cluster-admin)
        │    ├── Custom resources (RouteMonitors, ServiceMonitors, etc.)
        │    ├── Secrets (elevated read)
-       │    └── Pod exec (Thanos/RHOBS queries)
-       └── Dynamic client (ClusterPackages, Subscriptions, CSVs)
+       │    └── Pod exec (Thanos queries — int/staging only)
+       ├── Dynamic client (ClusterPackages, Subscriptions, CSVs)
+       ├── RHOBS remote client (production metrics via Observatorium API)
+       │    └── Vault-based OAuth2 → SSO token → RHOBS cell API
+       └── Unified QueryMetrics (tries Thanos exec → RHOBS remote fallback)
 ```
 
 Multi-env: `ocm.NewClientWithOptions(ocm.Options{URL: "https://api.openshift.com"})`
@@ -158,15 +170,44 @@ Per-cluster: `kube.ConnectToClusterWithConn(ctx, clusterID, reason, noElevate, o
 - **Token lifecycle**: Refresh token expiry checked against estimated runtime, refreshed proactively
 - **SAAS pipeline**: Walks deploy + e2e SAAS files, connects via pub/sub channels, resolves Tekton cluster console URL via prod OCM
 
-## Production Safety — CRITICAL
+## Security & Safety Directives — CRITICAL
 
-- Production auto-detected from OCM URL → `--no-elevate` enforced
+### No Sensitive Data in Repo
+- NEVER commit hardcoded cluster IDs, API tokens, secrets, email addresses, vault paths, AWS ARNs, or personal usernames
+- NEVER commit real cluster names or organization names — use generic examples
+- Config values that vary by environment (vault paths, OCM URLs) must be loaded from config files at runtime, never hardcoded
+- File paths must use dynamic resolution (`os.UserHomeDir()`, `os.UserConfigDir()`) — never hardcode `/Users/`, `/home/`, or `~/`
+- If file paths are required, provide them via config with sane generic defaults
+
+### Read-Only Operations Only
+- ALL cluster operations MUST be read-only: GET, LIST, WATCH only
+- NEVER add k8s Create, Update, Patch, Delete operations
+- NEVER modify cluster state, resources, or configurations
+- Pod exec is acceptable only for read-only queries (wget/curl to localhost Prometheus endpoints)
+- The only files this tool writes are local result files (JSON/HTML reports, debug logs)
+
+### Production & Hive Safety
+- Production auto-detected from OCM URL → `--no-elevate` enforced automatically
 - `--reason` with JIRA ticket required for production
 - Limited support and non-ready clusters automatically skipped
-- Claude should NEVER suggest removing production safety checks
+- Hive clusters are production infrastructure — same restrictions apply
+- NEVER suggest removing production safety checks
+- All elevation-dependent checks MUST be gated by `cc.Client.CanElevate()` or `cc.Client.HasRHOBSRemote()`
+- When elevation is unavailable, checks MUST degrade gracefully (SKIP/INFO with explanation)
 
-## Sensitive Repos — CRITICAL
+### Metrics Access Strategy
+- **Managed clusters (int/staging)**: Use Thanos exec (elevation required) or RHOBS remote API
+- **Managed clusters (production)**: RHOBS remote API only (no elevation available)
+- **Hive clusters (production)**: Port-forward to Prometheus service (no exec, no RHOBS) — TODO
+- **MC/SC clusters (int/staging)**: Thanos exec (elevation available)
+- **MC/SC clusters (production)**: No exec/logs/debug — use RHOBS remote API
+- Unified `QueryMetrics`/`QueryMetricsRange` methods handle fallback automatically
 
+### Environment Variable Safety
+- NEVER use `os.Setenv()` to modify the process environment — pass env vars via `cmd.Env` on subprocesses
+- Vault CLI commands must use `cmd.Env` with `VAULT_ADDR` set per-command
+
+### Sensitive Repos
 - `splunk-audit-exporter` (gitlab.cee.redhat.com) is **internal**. NEVER include its config details, internal URLs, or implementation patterns in this public repo.
 - When adding checks for operators with internal components, use only public GitHub sources and generic k8s resource queries.
 

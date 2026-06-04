@@ -222,16 +222,16 @@ func readOsdctlConfig(environment string) (vaultAddr, vaultPath string, err erro
 
 // getCredsFromVault fetches client_id and client_secret from HashiCorp Vault
 func getCredsFromVault(vaultAddr, vaultPath string) (clientID, clientSecret string, err error) {
-	if err := os.Setenv("VAULT_ADDR", vaultAddr); err != nil {
-		return "", "", fmt.Errorf("setting VAULT_ADDR: %w", err)
-	}
+	vaultEnv := append(os.Environ(), "VAULT_ADDR="+vaultAddr)
 
 	// Check vault token validity, login if needed
 	checkCmd := exec.Command("vault", "token", "lookup")
+	checkCmd.Env = vaultEnv
 	checkCmd.Stdout = nil
 	checkCmd.Stderr = nil
 	if err := checkCmd.Run(); err != nil {
 		loginCmd := exec.Command("vault", "login", "-method=oidc", "-no-print")
+		loginCmd.Env = vaultEnv
 		loginCmd.Stdout = os.Stderr
 		loginCmd.Stderr = os.Stderr
 		if err := loginCmd.Run(); err != nil {
@@ -239,7 +239,9 @@ func getCredsFromVault(vaultAddr, vaultPath string) (clientID, clientSecret stri
 		}
 	}
 
-	output, err := exec.Command("vault", "kv", "get", "-format=json", vaultPath).Output()
+	kvCmd := exec.Command("vault", "kv", "get", "-format=json", vaultPath)
+	kvCmd.Env = vaultEnv
+	output, err := kvCmd.Output()
 	if err != nil {
 		return "", "", fmt.Errorf("vault kv get %s: %w", vaultPath, err)
 	}
