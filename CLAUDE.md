@@ -203,6 +203,17 @@ Per-cluster: `kube.ConnectToClusterWithConn(ctx, clusterID, reason, noElevate, o
 - **MC/SC clusters (production)**: No exec/logs/debug — use RHOBS remote API
 - Unified `QueryMetrics`/`QueryMetricsRange` methods handle fallback automatically
 
+### Elevation Auditing & Testing
+- Every elevated API call (ElevatedClientset, elevated GetResource/ListResources/ExecInPod) increments `ClusterClient.ElevatedCallCount`
+- On disconnect, elevated call count is logged; a warning is printed if elevation was used with `--no-elevate`
+- **To simulate production restrictions in staging**: use `--no-elevate` flag — this disables all elevation, forcing port-forward and RHOBS remote fallbacks
+- **Unit tests** in `pkg/kube/elevation_test.go` verify:
+  - `NoElevate=true` blocks all elevated operations and counter stays at 0
+  - `elevationBroken=true` blocks subsequent elevated operations
+  - `CanQueryMetrics()` always returns true (port-forward is always attempted)
+- When adding new checks that use elevation, ensure they are gated by `CanElevate()` (for secrets/CRD access) or `CanQueryMetrics()` (for metrics queries)
+- Run `go test ./pkg/kube/ -v` to verify elevation safety before committing
+
 ### Environment Variable Safety
 - NEVER use `os.Setenv()` to modify the process environment — pass env vars via `cmd.Env` on subprocesses
 - Vault CLI commands must use `cmd.Env` with `VAULT_ADDR` set per-command

@@ -514,6 +514,16 @@ func main() {
 				}(opCfg)
 			}
 			wg.Wait()
+
+			// Elevation audit: warn if elevated calls happened on a no-elevate or production run
+			if client.ElevatedCallCount > 0 && noElevate {
+				fmt.Fprintf(os.Stderr, "  ⚠ AUDIT: %d elevated API calls on %s despite --no-elevate!\n",
+					client.ElevatedCallCount, clusterName)
+			} else if client.ElevatedCallCount > 0 {
+				logging.WithCheck("elevation_audit").WithField("cluster", clusterName).
+					WithField("elevated_calls", client.ElevatedCallCount).
+					Debug("Elevated API calls used")
+			}
 		}(i, clusterID)
 	}
 waitAndWrite:
