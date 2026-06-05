@@ -2350,6 +2350,24 @@
             }
         }
 
+        function showOperatorInfo(name, description) {
+            let overlay = document.getElementById('operator-info-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'operator-info-overlay';
+                overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:pointer;backdrop-filter:blur(2px);';
+                overlay.onclick = () => overlay.remove();
+                document.body.appendChild(overlay);
+            }
+            overlay.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--bg-card);border:1px solid var(--border-light);border-radius:12px;padding:28px 32px;max-width:520px;box-shadow:0 16px 48px rgba(0,0,0,0.4);cursor:default;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+                    <h3 style="margin:0;color:var(--accent);font-size:1.1em;text-transform:uppercase;letter-spacing:0.06em;">${name}</h3>
+                    <span onclick="document.getElementById('operator-info-overlay').remove()" style="cursor:pointer;color:var(--text-muted);font-size:1.2em;padding:4px 8px;border-radius:4px;background:rgba(255,255,255,0.05);">&times;</span>
+                </div>
+                <p style="margin:0;color:var(--text-secondary);line-height:1.7;font-size:0.92em;">${description}</p>
+            </div>`;
+        }
+
         function switchTab(operatorName) {
             document.querySelectorAll('.operator-tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -2383,6 +2401,18 @@
             const tabsContainer = document.getElementById('operatorTabs');
             const contentsContainer = document.getElementById('tabContents');
 
+            // Operator purpose descriptions
+            const operatorDescriptions = {
+                'configure-alertmanager-operator': 'Manages AlertManager configuration — reconciles PagerDuty, DeadMansSnitch, and GoAlert receivers with alert routing rules. Ensures alert delivery pipeline is correctly configured.',
+                'route-monitor-operator': 'Creates blackbox exporter probes for monitored endpoints (console, API). Generates probe_success metrics that power availability SLOs and ErrorBudgetBurn alerts.',
+                'osd-metrics-exporter': 'Exposes cluster-level health metrics (pull secret validity, proxy CA, identity providers) as Prometheus gauges for SRE monitoring dashboards.',
+                'splunk-forwarder-operator': 'Manages the Splunk log forwarder DaemonSet — deploys and configures forwarder pods on every node to ship cluster logs to Splunk for centralized log analysis.',
+                'splunk-audit-exporter': 'Filters KAS audit logs on master nodes — drops noisy system events (reads, no-op writes, throttled responses) before forwarding to Splunk. Reduces audit log volume by 50-90%.',
+                'rhobs-observability': 'Manages the RHOBS monitoring stack on MC/SC clusters — deploys Prometheus, Alertmanager, log collectors, and remote-write configuration for HCP metrics and log forwarding.',
+                'rosa-log-router': 'HCP log forwarding pipeline — Vector DaemonSet collects HCP control plane logs and writes to S3. Lambda/processor delivers to customer CloudWatch or S3 destinations.',
+                'pagerduty-operator': 'Manages PagerDuty service integrations on hive clusters — creates PD services for each ClusterDeployment and syncs integration keys via SyncSets.',
+            };
+
             // Build tabs and tab content for each operator (always show tabs)
             operators.forEach((op, idx) => {
                 const opData = sortClusters(operatorGroups[op]);
@@ -2403,7 +2433,9 @@
                 tab.className = `operator-tab${idx === 0 ? ' active' : ''}`;
                 tab.dataset.operator = op;
                 const badgeHTML = `<span style="color:#5eecc0;">${okCount}</span> / <span style="color:#fdd76b;">${warnCount}</span> / <span style="color:#ff8a8a;">${critCount}</span>`;
-                tab.innerHTML = `${shortName} <span class="tab-badge" style="background:rgba(255,255,255,0.08);">${badgeHTML}</span>`;
+                const desc = operatorDescriptions[op] || '';
+                const infoIcon = desc ? ` <span onclick="event.stopPropagation();showOperatorInfo('${shortName}','${desc.replace(/'/g, "\\'")}')" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(255,255,255,0.12);color:var(--text-muted);font-size:0.65em;cursor:help;margin-left:3px;vertical-align:middle;border:1px solid rgba(255,255,255,0.15);font-weight:700;" title="Click for operator info">?</span>` : '';
+                tab.innerHTML = `${shortName}${infoIcon} <span class="tab-badge" style="background:rgba(255,255,255,0.08);">${badgeHTML}</span>`;
                 tab.onclick = () => switchTab(op);
                 tabsContainer.appendChild(tab);
 
