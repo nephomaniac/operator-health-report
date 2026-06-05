@@ -50,9 +50,12 @@ type ClusterClient struct {
 
 	rhobsClient *rhobs.Client
 
-	pfSession    *portForwardSession
-	pfSetupOnce  sync.Once
-	pfSetupErr   error
+	pfSession       *portForwardSession
+	pfSetupOnce     sync.Once
+	pfSetupErr      error
+	rhobsPfSession  *portForwardSession
+	rhobsPfOnce     sync.Once
+	rhobsPfErr      error
 
 	// Elevation audit
 	ElevatedCallCount int64
@@ -591,18 +594,105 @@ func (cc *ClusterClient) QueryThanosRange(ctx context.Context, query string, sta
 	return result, err
 }
 
+// setupRHOBSPortForward establishes a port-forward to the RHOBS Prometheus pod.
+func (cc *ClusterClient) setupRHOBSPortForward(ctx context.Context) error {
+	log := logging.WithCheck("port_forward_rhobs")
+
+	pods, err := cc.clientset.CoreV1().Pods("openshift-observability-operator").List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=prometheus",
+	})
+	if err != nil || len(pods.Items) == 0 {
+		return fmt.Errorf("no RHOBS prometheus pods found for port-forward: %v", err)
+	}
+
+	podName := pods.Items[0].Name
+	log.WithField("pod", podName).Debug("Setting up RHOBS Prometheus port-forward")
+
+	reqURL := cc.clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Namespace("openshift-observability-operator").
+		Name(podName).
+		SubResource("portforward").
+		URL()
+
+	transport, upgrader, err := spdy.RoundTripperFor(cc.restConfig)
+	if err != nil {
+		return fmt.Errorf("creating SPDY transport: %w", err)
+	}
+
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", reqURL)
+
+	stopChan := make(chan struct{})
+	readyChan := make(chan struct{})
+
+	fw, err := portforward.New(dialer, []string{"0:9090"}, stopChan, readyChan, io.Discard, io.Discard)
+	if err != nil {
+		return fmt.Errorf("creating port-forwarder: %w", err)
+	}
+
+	errChan := make(chan error, 1)
+	go func() { errChan <- fw.ForwardPorts() }()
+
+	select {
+	case <-readyChan:
+	case err := <-errChan:
+		return fmt.Errorf("port-forward failed: %w", err)
+	case <-time.After(15 * time.Second):
+		close(stopChan)
+		return fmt.Errorf("port-forward timed out after 15s")
+	}
+
+	ports, err := fw.GetPorts()
+	if err != nil || len(ports) == 0 {
+		close(stopChan)
+		return fmt.Errorf("no forwarded ports: %v", err)
+	}
+
+	localPort := ports[0].Local
+	log.WithField("pod", podName).WithField("local_port", localPort).Debug("RHOBS port-forward established")
+
+	cc.rhobsPfSession = &portForwardSession{
+		localPort: localPort,
+		stopChan:  stopChan,
+		fw:        fw,
+	}
+	return nil
+}
+
 // QueryRHOBSPrometheus runs a PromQL query against the RHOBS Prometheus on MCs.
+// Tries port-forward first, falls back to exec.
 func (cc *ClusterClient) QueryRHOBSPrometheus(ctx context.Context, query string) (string, error) {
+	// Try port-forward first
+	cc.rhobsPfOnce.Do(func() {
+		cc.rhobsPfErr = cc.setupRHOBSPortForward(ctx)
+	})
+
+	if cc.rhobsPfErr == nil {
+		reqURL := fmt.Sprintf("http://127.0.0.1:%d/api/v1/query?query=%s",
+			cc.rhobsPfSession.localPort, query) // query is already URL-encoded by callers
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(reqURL)
+		if err == nil {
+			defer resp.Body.Close()
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr == nil && resp.StatusCode == 200 {
+				return string(body), nil
+			}
+		}
+	}
+
+	// Fall back to exec
+	if !cc.CanElevate() {
+		return "", fmt.Errorf("RHOBS prometheus unavailable: port-forward failed (%v), elevation not available", cc.rhobsPfErr)
+	}
+
 	pods, err := withRetryResult(ctx, "list RHOBS prometheus pods", func() (*corev1.PodList, error) {
 		return cc.clientset.CoreV1().Pods("openshift-observability-operator").List(ctx, metav1.ListOptions{
 			LabelSelector: "app.kubernetes.io/name=prometheus",
 		})
 	})
-	if err != nil {
-		return "", fmt.Errorf("listing RHOBS prometheus pods: %w", err)
-	}
-	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("no RHOBS prometheus pods found")
+	if err != nil || len(pods.Items) == 0 {
+		return "", fmt.Errorf("no RHOBS prometheus pods found: %v", err)
 	}
 
 	result, err := cc.ExecInPod(ctx, "openshift-observability-operator", pods.Items[0].Name, "prometheus",
@@ -785,11 +875,15 @@ func (cc *ClusterClient) setupPortForward(ctx context.Context) error {
 	return nil
 }
 
-// closePortForward shuts down the port-forward session if active.
+// closePortForward shuts down all port-forward sessions.
 func (cc *ClusterClient) closePortForward() {
 	if cc.pfSession != nil {
 		close(cc.pfSession.stopChan)
 		cc.pfSession = nil
+	}
+	if cc.rhobsPfSession != nil {
+		close(cc.rhobsPfSession.stopChan)
+		cc.rhobsPfSession = nil
 	}
 }
 

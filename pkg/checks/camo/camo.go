@@ -353,7 +353,7 @@ func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	// Check alertmanager-main secret (required — the rendered AM config)
-	cc.Client.RecordElevatedOp(fmt.Sprintf("get secrets/alertmanager-main in %s", cc.Operator.Namespace))
+	cc.Client.RecordElevatedOp(fmt.Sprintf("[%s] ", cc.CurrentCheck) + fmt.Sprintf("get secrets/alertmanager-main in %s", cc.Operator.Namespace))
 	secret, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, "alertmanager-main", metav1.GetOptions{})
 	cc.RecordError("Get alertmanager-main secret", err)
 
@@ -389,7 +389,7 @@ func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
 	for _, res := range resources {
 		exists := false
 		if res.kind == "secret" {
-			cc.Client.RecordElevatedOp(fmt.Sprintf("get secrets/%s in %s", res.name, cc.Operator.Namespace))
+			cc.Client.RecordElevatedOp(fmt.Sprintf("[%s] ", cc.CurrentCheck) + fmt.Sprintf("get secrets/%s in %s", res.name, cc.Operator.Namespace))
 			_, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, res.name, metav1.GetOptions{})
 			exists = err == nil
 		} else {

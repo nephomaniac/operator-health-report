@@ -213,7 +213,7 @@ func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
 
 	for _, s := range secrets {
 		ref := fmt.Sprintf("%s/%s", securityNamespace, s.name)
-		cc.Client.RecordElevatedOp(fmt.Sprintf("get secrets/%s in %s", s.name, securityNamespace))
+		cc.Client.RecordElevatedOp(fmt.Sprintf("[%s] ", cc.CurrentCheck) + fmt.Sprintf("get secrets/%s in %s", s.name, securityNamespace))
 		_, err := cc.Client.ElevatedClientset().CoreV1().Secrets(securityNamespace).Get(ctx, s.name, metav1.GetOptions{})
 		if err == nil {
 			found++

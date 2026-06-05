@@ -203,7 +203,7 @@ func checkMonitoringCredentials(ctx context.Context, cc *checks.ClusterContext, 
 		return
 	}
 
-	cc.Client.RecordElevatedOp(fmt.Sprintf("get secrets/rhobs-hcp-credential in %s", observabilityNS))
+	cc.Client.RecordElevatedOp(fmt.Sprintf("[%s] ", cc.CurrentCheck) + fmt.Sprintf("get secrets/rhobs-hcp-credential in %s", observabilityNS))
 	_, err := cc.Client.ElevatedClientset().CoreV1().Secrets(observabilityNS).Get(ctx, "rhobs-hcp-credential", metav1.GetOptions{})
 	cc.RecordError("Get RHOBS credential secret", err)
 
