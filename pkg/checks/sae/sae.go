@@ -65,9 +65,8 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
 		if checks.IsAccessError(err) {
 			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		} else {
-			r.Status = checks.StatusSkip
-			r.Severity = checks.SeverityInfo
-			r.Message = fmt.Sprintf("audit-exporter DaemonSet not found in %s", securityNS)
+			r.Status = checks.StatusFail
+			r.Message = fmt.Sprintf("audit-exporter DaemonSet not found in %s — SSS deployment may have failed or SAE is not configured for this cluster", securityNS)
 			cc.AddResult(r)
 		}
 		return
@@ -392,15 +391,15 @@ func checkDedupCache(ctx context.Context, cc *checks.ClusterContext) {
 		fmt.Sprintf(`max(splunkforwarder_audit_filter_cached_objects{namespace="%s"})`, securityNS))
 
 	if err != nil || !thanos.HasResults(body) {
-		r.Status = checks.StatusInfo
-		r.Message = "Dedup cache metrics not found"
+		r.Status = checks.StatusWarning
+		r.Message = "Dedup cache metrics not found — SAE may not be running"
 		cc.AddResult(r)
 		return
 	}
 
 	size, ok := thanos.InstantFloat(body)
 	if !ok {
-		r.Status = checks.StatusInfo
+		r.Status = checks.StatusWarning
 		r.Message = "Could not parse cache size"
 		cc.AddResult(r)
 		return
@@ -474,8 +473,8 @@ func checkFilterDecisions(ctx context.Context, cc *checks.ClusterContext) {
 			r.Message = fmt.Sprintf("Filter effective — %.0f%% dropped (fwd: %.1f/s, drop: %.1f/s)", dropPct, fwdRate, dropRate)
 		}
 	} else {
-		r.Status = checks.StatusInfo
-		r.Message = "No events being processed"
+		r.Status = checks.StatusWarning
+		r.Message = "No events being processed — SAE may not be running or KAS audit logging is disabled"
 	}
 
 	cc.AddResult(r)
