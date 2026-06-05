@@ -824,13 +824,13 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 			check["available"] = available
 			imageChecks = append(imageChecks, check)
 		}
-		r.Details["image_checks"] = imageChecks
+		r.Details["image_registry_verification"] = imageChecks
 	}
 
 	if pullErrors > 0 {
 		r.Status = StatusFail
 		var imageSummaries []string
-		for _, ic := range r.Details["image_checks"].([]map[string]any) {
+		for _, ic := range r.Details["image_registry_verification"].([]map[string]any) {
 			img := ic["image"].(string)
 			if idx := strings.LastIndex(img, "/"); idx >= 0 {
 				img = img[idx+1:]

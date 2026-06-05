@@ -143,14 +143,14 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
 			check["available"] = available
 			imageChecks = append(imageChecks, check)
 		}
-		r.Details["image_checks"] = imageChecks
+		r.Details["image_registry_verification"] = imageChecks
 	}
 
 	switch {
 	case imagePullErrors > 0:
 		r.Status = checks.StatusFail
 		regNote := ""
-		if imageChecks, ok := r.Details["image_checks"].([]map[string]any); ok && len(imageChecks) > 0 {
+		if imageChecks, ok := r.Details["image_registry_verification"].([]map[string]any); ok && len(imageChecks) > 0 {
 			regNote = " — " + imageChecks[0]["registry_check"].(string)
 		}
 		r.Message = fmt.Sprintf("audit-exporter %d pod(s) with ImagePullBackOff (%d/%d ready)%s", imagePullErrors, ready, desired, regNote)
