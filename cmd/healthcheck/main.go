@@ -72,6 +72,7 @@ func main() {
 		excludePattern string
 		includePattern string
 		saasOnly       bool
+		hiveOCMURL     string
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", cfg.ClusterList, "File with cluster IDs (one per line)")
@@ -89,6 +90,7 @@ func main() {
 	flag.StringVar(&excludePattern, "exclude", cfg.Exclude, "Regex to exclude clusters by name")
 	flag.StringVar(&includePattern, "include", cfg.Include, "Regex to include only clusters matching by name")
 	flag.BoolVar(&saasOnly, "saas-only", cfg.SaasOnly, "Show SAAS targets and pipeline only (no cluster checks)")
+	flag.StringVar(&hiveOCMURL, "hive-ocm-url", "", "OCM API URL for hive cluster connections (default: auto-detect or production)")
 	flag.StringVar(&configFile, "config", "", "Path to config file (default: .healthcheck.yaml)")
 	flag.Parse()
 
@@ -353,6 +355,48 @@ func main() {
 		}
 	}
 
+	// Discover hive clusters from SAAS targets for hive-scoped operators
+	hiveClusterNames := map[string]bool{}
+	hasHiveOperators := false
+	for _, op := range opConfigs {
+		if op.ClusterScope == checks.ScopeHive || op.ClusterScope == checks.ScopeBoth {
+			hasHiveOperators = true
+			targets, tErr := saas.FetchAllTargets(context.Background(), op.PKOSaas, op.OLMSaas)
+			if tErr == nil {
+				for _, t := range targets {
+					if t.HiveCluster != "" {
+						// Filter by current OCM environment
+						env := classifyHiveEnv(t.HiveCluster)
+						if env == ocmClient.Environment() || (env == "staging" && ocmClient.Environment() == "staging") {
+							hiveClusterNames[t.HiveCluster] = true
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(hiveClusterNames) > 0 {
+		names := make([]string, 0, len(hiveClusterNames))
+		for n := range hiveClusterNames {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		fmt.Fprintf(os.Stderr, "Hive clusters (%s): %s\n", ocmClient.Environment(), strings.Join(names, ", "))
+	}
+
+	// Split operators by scope
+	var managedOps, hiveOps []checks.OperatorConfig
+	for _, op := range opConfigs {
+		if op.ClusterScope == checks.ScopeHive {
+			hiveOps = append(hiveOps, op)
+		} else {
+			managedOps = append(managedOps, op)
+			if op.ClusterScope == checks.ScopeBoth {
+				hiveOps = append(hiveOps, op)
+			}
+		}
+	}
+
 	// Process clusters — concurrently up to --parallel limit
 	var allOutputs []checks.ClusterOutput
 	var skippedClusters []skippedCluster
@@ -491,7 +535,7 @@ func main() {
 			}
 
 			var wg sync.WaitGroup
-			for _, opCfg := range opConfigs {
+			for _, opCfg := range managedOps {
 				if checks.Cancelled(ctx) {
 					break
 				}
@@ -550,6 +594,125 @@ func main() {
 			}
 		}(i, clusterID)
 	}
+
+	// Wait for managed cluster processing to complete before starting hive
+	clusterWg.Wait()
+
+	// Process hive clusters for hive-scoped operators
+	if hasHiveOperators && len(hiveClusterNames) > 0 && rootCtx.Err() == nil {
+		// Create hive OCM connection — hive clusters are always in production OCM
+		hiveURL := hiveOCMURL
+		if hiveURL == "" {
+			hiveURL = "https://api.openshift.com" // hive clusters are registered in production
+		}
+
+		hiveOCM, hiveErr := ocm.NewClientWithOptions(ocm.Options{URL: hiveURL})
+		if hiveErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ Cannot connect to hive OCM (%s): %v\n", hiveURL, hiveErr)
+		} else {
+			defer hiveOCM.Close()
+			fmt.Fprintf(os.Stderr, "\nProcessing %d hive cluster(s) for %d operator(s)...\n", len(hiveClusterNames), len(hiveOps))
+
+			for hiveName := range hiveClusterNames {
+				if checks.Cancelled(rootCtx) {
+					break
+				}
+
+				hiveID, resolveErr := hiveOCM.ResolveClusterByName(hiveName)
+				if resolveErr != nil {
+					fmt.Fprintf(os.Stderr, "  ✗ Cannot find hive cluster %s: %v\n", hiveName, resolveErr)
+					mu.Lock()
+					skippedClusters = append(skippedClusters, skippedCluster{
+						Type: "skipped_cluster", ClusterID: hiveName, Name: hiveName,
+						Reason: fmt.Sprintf("Hive cluster not found: %v", resolveErr), Status: "metadata_failed",
+					})
+					mu.Unlock()
+					continue
+				}
+
+				meta, metaErr := hiveOCM.GetClusterMetadata(hiveID)
+				if metaErr != nil {
+					fmt.Fprintf(os.Stderr, "  ✗ Cannot get metadata for %s: %v\n", hiveName, metaErr)
+					continue
+				}
+
+				fmt.Fprintf(os.Stderr, "\n[hive] Processing: %s (%s, %s, %s)\n", meta.Name, meta.Product, meta.Provider, meta.Region)
+
+				// Hive clusters enforce no-elevate unless --reason provided
+				hiveNoElevate := reason == ""
+
+				client, connErr := kube.ConnectToClusterWithConn(rootCtx, hiveID, reason, hiveNoElevate, hiveOCM.Conn())
+				if connErr != nil {
+					fmt.Fprintf(os.Stderr, "  ✗ Failed to connect to %s: %v\n", hiveName, connErr)
+					mu.Lock()
+					skippedClusters = append(skippedClusters, skippedCluster{
+						Type: "skipped_cluster", ClusterID: hiveID, Name: hiveName,
+						Reason: fmt.Sprintf("Connection failed: %v", connErr), Status: "connection_failed",
+					})
+					mu.Unlock()
+					continue
+				}
+
+				fmt.Fprintf(os.Stderr, "  ✓ Connected to %s\n", hiveName)
+
+				// Initialize RHOBS remote if available
+				if cellURL := meta.Labels["ext-hypershift.openshift.io/rhobs-cell"]; cellURL != "" {
+					rhobsClient, rhobsErr := rhobs.NewClient(cellURL, meta.Environment)
+					if rhobsErr == nil {
+						client.SetRHOBSClient(rhobsClient)
+					}
+				}
+
+				clusterType := "hive"
+				clusterMeta := &checks.ClusterMetadata{
+					ID: meta.ID, ExternalID: meta.ExternalID, Name: meta.Name,
+					State: meta.State, Product: meta.Product, Provider: meta.Provider,
+					Version: meta.Version, Region: meta.Region, STS: meta.STS,
+					Hypershift: meta.Hypershift, Labels: meta.Labels,
+					Environment: meta.Environment,
+				}
+
+				for _, op := range hiveOps {
+					if checks.Cancelled(rootCtx) {
+						break
+					}
+
+					cc := &checks.ClusterContext{
+						ClusterID: hiveID, ClusterName: meta.Name,
+						ClusterVersion: meta.Version, ClusterType: clusterType,
+						OCMEnv: hiveOCM.Environment(),
+						Metadata: clusterMeta, Client: client, Operator: op,
+					}
+
+					checks.RunOperatorChecks(rootCtx, cc)
+
+					output := cc.ToOutput(version)
+					mu.Lock()
+					allOutputs = append(allOutputs, output)
+					mu.Unlock()
+
+					fmt.Fprintf(os.Stderr, "  ✓ %s/%s: %s (%d checks)\n",
+						meta.Name, strings.ToUpper(op.ShortName), cc.OverallStatus(), len(cc.Results))
+				}
+
+				// Elevation audit for hive cluster
+				if client.ElevatedCallCount > 0 {
+					mu.Lock()
+					totalElevatedCalls += client.ElevatedCallCount
+					clustersWithElevation++
+					for i := range allOutputs {
+						if allOutputs[i].ClusterID == hiveID && len(allOutputs[i].ElevatedOps) == 0 {
+							allOutputs[i].ElevatedOps = client.ElevatedOps
+						}
+					}
+					mu.Unlock()
+				}
+
+				client.Disconnect()
+			}
+		}
+	}
+
 waitAndWrite:
 	interrupted := rootCtx.Err() != nil
 	if interrupted {
@@ -736,4 +899,17 @@ func orDefault(val, def string) string {
 		return val
 	}
 	return def
+}
+
+func classifyHiveEnv(hiveName string) string {
+	switch {
+	case strings.HasPrefix(hiveName, "hivei"):
+		return "integration"
+	case strings.HasPrefix(hiveName, "hives") || strings.HasPrefix(hiveName, "hive-stage"):
+		return "staging"
+	case strings.HasPrefix(hiveName, "hivep"):
+		return "production"
+	default:
+		return "unknown"
+	}
 }

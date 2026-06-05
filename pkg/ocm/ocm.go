@@ -292,6 +292,21 @@ func (c *Client) GetHiveShard(clusterID string) (string, error) {
 	return "", fmt.Errorf("could not parse hive shard from %s", server)
 }
 
+// ResolveClusterByName searches for a cluster by name and returns its ID.
+func (c *Client) ResolveClusterByName(name string) (string, error) {
+	resp, err := c.conn.ClustersMgmt().V1().Clusters().List().
+		Search(fmt.Sprintf("name='%s'", name)).
+		Size(1).
+		Send()
+	if err != nil {
+		return "", c.wrapError("search cluster by name", err)
+	}
+	if resp.Items().Len() == 0 {
+		return "", fmt.Errorf("cluster '%s' not found in %s", name, c.env)
+	}
+	return resp.Items().Get(0).ID(), nil
+}
+
 // GetClusterMetadata fetches full cluster properties from the OCM API
 func (c *Client) GetClusterMetadata(clusterID string) (*ClusterMeta, error) {
 	resp, err := c.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).Get().Send()

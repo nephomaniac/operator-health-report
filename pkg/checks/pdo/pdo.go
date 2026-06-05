@@ -32,18 +32,18 @@ var (
 )
 
 func (c *PDOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
-	// PDO only deploys to hive clusters (hivei*, hives*, hivep*), not MCs, SCs, or standard managed clusters.
-	// Short-circuit if the namespace doesn't exist — this cluster doesn't run PDO.
+	// PDO is dispatched only to hive clusters via ClusterScope routing.
+	// Verify namespace exists as the first check.
 	phase, err := cc.Client.GetNamespacePhase(ctx, cc.Operator.Namespace)
 	if err != nil || phase != "Active" {
 		cc.AddResult(checks.Result{
-			Check:    "pdo_deployment_scope",
-			Status:   checks.StatusInfo,
-			Severity: checks.SeverityInfo,
-			Message:  fmt.Sprintf("PDO namespace %s not found — PDO only deploys to hive clusters, not this cluster type", cc.Operator.Namespace),
+			Check:    "pdo_namespace",
+			Status:   checks.StatusFail,
+			Severity: checks.SeverityCritical,
+			Message:  fmt.Sprintf("PDO namespace %s not found on hive cluster %s — PDO deployment may have failed", cc.Operator.Namespace, cc.ClusterName),
 			Details: map[string]any{
 				"cluster_type": cc.ClusterType,
-				"description":  "PagerDuty Operator only deploys to hive management clusters (where ClusterDeployments are managed). It is not expected on MCs, SCs, or standard ROSA/OSD clusters.",
+				"description":  "PagerDuty Operator namespace should exist on all hive clusters. Missing namespace indicates a deployment failure.",
 			},
 		})
 		return

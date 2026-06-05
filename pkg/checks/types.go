@@ -51,15 +51,25 @@ type APIError struct {
 	Timestamp    string `json:"timestamp"`
 }
 
+// ClusterScope defines where an operator is deployed
+type ClusterScope string
+
+const (
+	ScopeManaged ClusterScope = ""       // default — runs on managed clusters (ROSA/OSD, MC, SC)
+	ScopeHive    ClusterScope = "hive"   // runs only on hive clusters
+	ScopeBoth    ClusterScope = "both"   // runs on both managed and hive clusters
+)
+
 // OperatorConfig defines an operator to check
 type OperatorConfig struct {
-	Name             string `json:"name"`
-	ShortName        string `json:"short_name"`
-	Namespace        string `json:"namespace"`
-	Deployment       string `json:"deployment"`
-	PKOSaas          string `json:"pko_saas"`
-	OLMSaas          string `json:"olm_saas"`
-	SkipCommonChecks bool   `json:"skip_common_checks,omitempty"`
+	Name             string       `json:"name"`
+	ShortName        string       `json:"short_name"`
+	Namespace        string       `json:"namespace"`
+	Deployment       string       `json:"deployment"`
+	PKOSaas          string       `json:"pko_saas"`
+	OLMSaas          string       `json:"olm_saas"`
+	SkipCommonChecks bool         `json:"skip_common_checks,omitempty"`
+	ClusterScope     ClusterScope `json:"cluster_scope,omitempty"`
 }
 
 // ServiceMonitorGVR returns the GVR for monitoring.coreos.com/v1 ServiceMonitors
@@ -322,6 +332,7 @@ var (
 		PKOSaas:          "saas-pagerduty-operator-pko.yaml",
 		OLMSaas:          "saas-pagerduty-operator.yaml",
 		SkipCommonChecks: true,
+		ClusterScope:     ScopeHive,
 	}
 
 	SAEConfig = OperatorConfig{
