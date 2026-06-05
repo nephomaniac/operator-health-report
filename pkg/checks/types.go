@@ -325,14 +325,13 @@ var (
 	}
 
 	PDOConfig = OperatorConfig{
-		Name:             "pagerduty-operator",
-		ShortName:        "pdo",
-		Namespace:        "pagerduty-operator",
-		Deployment:       "pagerduty-operator",
-		PKOSaas:          "saas-pagerduty-operator-pko.yaml",
-		OLMSaas:          "saas-pagerduty-operator.yaml",
-		SkipCommonChecks: true,
-		ClusterScope:     ScopeHive,
+		Name:         "pagerduty-operator",
+		ShortName:    "pdo",
+		Namespace:    "pagerduty-operator",
+		Deployment:   "pagerduty-operator",
+		PKOSaas:      "saas-pagerduty-operator-pko.yaml",
+		OLMSaas:      "saas-pagerduty-operator.yaml",
+		ClusterScope: ScopeHive,
 	}
 
 	SAEConfig = OperatorConfig{

@@ -680,6 +680,7 @@ func main() {
 					cc := &checks.ClusterContext{
 						ClusterID: hiveID, ClusterName: meta.Name,
 						ClusterVersion: meta.Version, ClusterType: clusterType,
+						HiveShard: meta.Name, // for hive clusters, the shard is the cluster name
 						OCMEnv: hiveOCM.Environment(),
 						Metadata: clusterMeta, Client: client, Operator: op,
 					}
