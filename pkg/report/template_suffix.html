@@ -2434,7 +2434,7 @@
                 tab.dataset.operator = op;
                 const badgeHTML = `<span style="color:#5eecc0;">${okCount}</span> / <span style="color:#fdd76b;">${warnCount}</span> / <span style="color:#ff8a8a;">${critCount}</span>`;
                 const desc = operatorDescriptions[op] || '';
-                const infoIcon = desc ? ` <span onclick="event.stopPropagation();showOperatorInfo('${shortName}','${desc.replace(/'/g, "\\'")}')" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(108,140,255,0.25);color:#8aa4ff;font-size:0.65em;cursor:help;margin-left:3px;vertical-align:middle;border:1px solid rgba(108,140,255,0.5);font-weight:700;" title="Click for operator info">?</span>` : '';
+                const infoIcon = desc ? ` <span onclick="event.stopPropagation();showOperatorInfo('${shortName}','${desc.replace(/'/g, "\\'")}')" style="display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;background:#1a3a8a;color:#ffffff;font-size:0.7em;cursor:help;margin-left:4px;vertical-align:middle;font-weight:900;text-shadow:0 0 2px rgba(255,255,255,0.5);" title="Click for operator info">?</span>` : '';
                 tab.innerHTML = `${shortName}${infoIcon} <span class="tab-badge" style="background:rgba(255,255,255,0.08);">${badgeHTML}</span>`;
                 tab.onclick = () => switchTab(op);
                 tabsContainer.appendChild(tab);
