@@ -733,7 +733,8 @@ func checkAuditExporterDependency(ctx context.Context, cc *checks.ClusterContext
 	ds, err := cc.Client.Clientset().AppsV1().DaemonSets(securityNamespace).Get(ctx, "audit-exporter", metav1.GetOptions{})
 
 	if err != nil {
-		r.Status = checks.StatusWarning
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
 		r.Message = "audit-exporter DaemonSet not found — KAS audit log filtering is not active (see SAE tab for details)"
 		cc.AddResult(r)
 		return
@@ -744,12 +745,17 @@ func checkAuditExporterDependency(ctx context.Context, cc *checks.ClusterContext
 	r.Details["desired"] = desired
 	r.Details["ready"] = ready
 
-	if ready == desired && desired > 0 {
+	switch {
+	case ready == desired && desired > 0:
 		r.Status = checks.StatusPass
 		r.Message = fmt.Sprintf("audit-exporter healthy (%d/%d) — KAS audit log filtering active", ready, desired)
-	} else {
+	case ready == 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("audit-exporter down (0/%d ready) — KAS audit log filtering is completely non-functional (see SAE tab)", desired)
+	default:
 		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("audit-exporter degraded (%d/%d ready) — KAS audit logs may not be filtered before Splunk (see SAE tab)", ready, desired)
+		r.Message = fmt.Sprintf("audit-exporter degraded (%d/%d ready) — KAS audit log filtering partially impaired (see SAE tab)", ready, desired)
 	}
 
 	cc.AddResult(r)
