@@ -2260,9 +2260,12 @@
                 const warnings = getLogWarnings(cluster);
 
                 const currentShardGroupId = `shard-group-${idPrefix}-${shardIdx}`;
+                const hasFail = (cluster.health_checks || []).some(ch => ch.status === 'FAIL');
+                const hasWarn = (cluster.health_checks || []).some(ch => ch.status === 'WARNING' || ch.status === 'WARN');
+                const rowStatusClass = hasFail ? ' row-critical' : (hasWarn ? ' row-warning' : '');
                 const mainRow = document.createElement('tr');
                 mainRow.id = `cluster-row-${clusterIdx}`;
-                mainRow.className = `main-row ${currentShardGroupId}`;
+                mainRow.className = `main-row ${currentShardGroupId}${rowStatusClass}`;
                 mainRow.onclick = () => toggleClusterDetails(clusterIdx);
 
                 // If cluster has health checks, connection succeeded (native Go backplane)
