@@ -2464,11 +2464,11 @@
                 opData.forEach(c => {
                     const hasFail = hasRealFail(c);
                     const hasWarn = hasRealWarn(c);
-                    const hasErr = hasScriptError(c);
+                    const hasErr = hasScriptError(c) || (c.api_errors || []).length > 0;
+                    if (hasErr) errCount++;
                     if (hasFail) critCount++;
                     else if (hasWarn) warnCount++;
-                    else if (hasErr) errCount++;
-                    else okCount++;
+                    else if (!hasErr) okCount++;
                 });
 
                 // Tab button — show all 3 counts as colored numbers
