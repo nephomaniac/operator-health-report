@@ -50,6 +50,7 @@ func (c *SFOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	checkConfigMaps(ctx, cc, hasCR)
 	checkForwarderResourceMetrics(ctx, cc, hasCR)
 	checkForwarderMetrics(ctx, cc, hasCR)
+	checkAuditExporterDependency(ctx, cc)
 	checkServiceMonitor(ctx, cc)
 	checkPrometheusRule(ctx, cc)
 }
@@ -710,6 +711,48 @@ func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR
 
 func timeNow() int64 {
 	return time.Now().Unix()
+}
+
+// checkAuditExporterDependency verifies the audit-exporter DaemonSet is healthy.
+// SAE is a critical dependency — it filters KAS audit logs before Splunk forwarding.
+// If SAE is down, either raw unfiltered audit logs flood Splunk (cost/noise) or
+// audit logs stop flowing entirely (compliance risk).
+func checkAuditExporterDependency(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("sfo_audit_exporter_dep")
+
+	r := checks.Result{
+		Check:    "sfo_audit_exporter_dep",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     securityNamespace,
+			"description":   "Validates the audit-exporter DaemonSet (SAE) is running as a dependency of the Splunk forwarding pipeline. SAE filters noisy KAS audit events before they reach Splunk. If SAE is down, audit logs may not be forwarded or may flood Splunk unfiltered.",
+			"pass_criteria": "PASS: audit-exporter DaemonSet fully ready. WARN: Not fully ready or not found. See SAE operator tab for detailed diagnostics.",
+		},
+	}
+
+	ds, err := cc.Client.Clientset().AppsV1().DaemonSets(securityNamespace).Get(ctx, "audit-exporter", metav1.GetOptions{})
+
+	if err != nil {
+		r.Status = checks.StatusWarning
+		r.Message = "audit-exporter DaemonSet not found — KAS audit log filtering is not active (see SAE tab for details)"
+		cc.AddResult(r)
+		return
+	}
+
+	desired := int(ds.Status.DesiredNumberScheduled)
+	ready := int(ds.Status.NumberReady)
+	r.Details["desired"] = desired
+	r.Details["ready"] = ready
+
+	if ready == desired && desired > 0 {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("audit-exporter healthy (%d/%d) — KAS audit log filtering active", ready, desired)
+	} else {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("audit-exporter degraded (%d/%d ready) — KAS audit logs may not be filtered before Splunk (see SAE tab)", ready, desired)
+	}
+
+	cc.AddResult(r)
 }
 
 // checkServiceMonitor verifies the splunk forwarder ServiceMonitor exists
