@@ -819,15 +819,20 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 
 	if pullErrors > 0 {
 		r.Status = StatusFail
-		images := make([]string, 0, len(failingImages))
-		for img := range failingImages {
+		var imageSummaries []string
+		for _, ic := range r.Details["image_checks"].([]map[string]any) {
+			img := ic["image"].(string)
 			if idx := strings.LastIndex(img, "/"); idx >= 0 {
 				img = img[idx+1:]
 			}
-			images = append(images, img)
+			if len(img) > 40 {
+				img = img[:37] + "..."
+			}
+			regResult := ic["registry_check"].(string)
+			imageSummaries = append(imageSummaries, fmt.Sprintf("%s (%s)", img, regResult))
 		}
-		r.Message = fmt.Sprintf("%d pod(s) with image pull errors in %s — images: %s",
-			pullErrors, cc.Operator.Namespace, strings.Join(images, ", "))
+		r.Message = fmt.Sprintf("%d pod(s) with image pull errors in %s — %s",
+			pullErrors, cc.Operator.Namespace, strings.Join(imageSummaries, "; "))
 	} else {
 		r.Status = StatusPass
 		r.Message = "No image pull errors"
