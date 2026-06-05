@@ -144,6 +144,20 @@
             return check.status;
         }
 
+        // Helper: check if a cluster entry has any real FAIL (not API/script errors)
+        function hasRealFail(cluster) {
+            return (cluster.health_checks || []).some(ch => getEffectiveStatus(cluster, ch) === 'FAIL');
+        }
+        function hasRealWarn(cluster) {
+            return (cluster.health_checks || []).some(ch => {
+                const eff = getEffectiveStatus(cluster, ch);
+                return eff === 'WARNING' || eff === 'WARN';
+            });
+        }
+        function hasScriptError(cluster) {
+            return (cluster.health_checks || []).some(ch => getEffectiveStatus(cluster, ch) === 'ERROR');
+        }
+
         function formatApiError(err) {
             const errMsg = (err.error_message || '').toLowerCase();
             const isScript = (err.error_type === 'script_error');
@@ -1912,8 +1926,8 @@
             healthData.forEach(entry => {
                 if (entry.operator_name === 'unknown') return;
                 const cid = entry.cluster_id || entry.cluster_name;
-                const hasFail = (entry.health_checks || []).some(ch => ch.status === 'FAIL');
-                const hasWarn = (entry.health_checks || []).some(ch => ch.status === 'WARNING' || ch.status === 'WARN');
+                const hasFail = hasRealFail(entry);
+                const hasWarn = hasRealWarn(entry);
                 const hasAccessDenied = (entry.health_checks || []).some(ch => ch.status === 'ACCESS_DENIED');
                 const entryStatus = entry.backplane_login?.status === 'FAILED' ? 'NO_ACCESS' :
                                     hasFail ? 'CRITICAL' :
@@ -1933,8 +1947,9 @@
                 if (!clusterCheckFlags[cid]) clusterCheckFlags[cid] = { hasFail: false, hasWarn: false, noAccess: false };
                 if (entry.backplane_login?.status === 'FAILED') clusterCheckFlags[cid].noAccess = true;
                 (entry.health_checks || []).forEach(ch => {
-                    if (ch.status === 'FAIL') clusterCheckFlags[cid].hasFail = true;
-                    if (ch.status === 'WARNING' || ch.status === 'WARN') clusterCheckFlags[cid].hasWarn = true;
+                    const eff = getEffectiveStatus(entry, ch);
+                    if (eff === 'FAIL') clusterCheckFlags[cid].hasFail = true;
+                    if (eff === 'WARNING' || eff === 'WARN') clusterCheckFlags[cid].hasWarn = true;
                 });
             });
             Object.values(clusterCheckFlags).forEach(flags => {
@@ -2276,8 +2291,9 @@
                 const warnings = getLogWarnings(cluster);
 
                 const currentShardGroupId = `shard-group-${idPrefix}-${shardIdx}`;
-                const hasFail = (cluster.health_checks || []).some(ch => ch.status === 'FAIL');
-                const hasWarn = (cluster.health_checks || []).some(ch => ch.status === 'WARNING' || ch.status === 'WARN');
+                const hasFail = hasRealFail(cluster);
+                const hasWarn = hasRealWarn(cluster);
+                const hasErr = hasScriptError(cluster);
                 const rowStatusClass = hasFail ? ' row-critical' : (hasWarn ? ' row-warning' : '');
                 const mainRow = document.createElement('tr');
                 mainRow.id = `cluster-row-${clusterIdx}`;
@@ -2443,11 +2459,11 @@
                 const opData = sortClusters(operatorGroups[op]);
                 const shortName = op.replace(/-operator$/, '').replace(/configure-alertmanager/, 'CAMO').replace(/route-monitor/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS');
 
-                // Count statuses for badge — non-exclusive, a cluster can be both crit and warn
+                // Count statuses for badge — uses effective status to exclude API/script errors
                 let okCount = 0, warnCount = 0, critCount = 0;
                 opData.forEach(c => {
-                    const hasFail = (c.health_checks || []).some(ch => ch.status === 'FAIL');
-                    const hasWarn = (c.health_checks || []).some(ch => ch.status === 'WARNING' || ch.status === 'WARN');
+                    const hasFail = hasRealFail(c);
+                    const hasWarn = hasRealWarn(c);
                     if (hasFail) critCount++;
                     if (hasWarn) warnCount++;
                     if (!hasFail && !hasWarn) okCount++;
