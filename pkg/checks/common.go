@@ -2,7 +2,10 @@ package checks
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -774,20 +777,14 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 	}
 
 	pullErrors := 0
+	failingImages := map[string]string{} // image → waiting reason
 	for _, pod := range pods.Items {
-		for _, cs := range pod.Status.ContainerStatuses {
+		for _, cs := range append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...) {
 			if cs.State.Waiting != nil {
 				reason := cs.State.Waiting.Reason
 				if reason == "ImagePullBackOff" || reason == "ErrImagePull" {
 					pullErrors++
-				}
-			}
-		}
-		for _, cs := range pod.Status.InitContainerStatuses {
-			if cs.State.Waiting != nil {
-				reason := cs.State.Waiting.Reason
-				if reason == "ImagePullBackOff" || reason == "ErrImagePull" {
-					pullErrors++
+					failingImages[cs.Image] = reason
 				}
 			}
 		}
@@ -798,17 +795,106 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 		if problematic := ProblematicPods(pods.Items); len(problematic) > 0 {
 			r.Details["failing_pods"] = problematic
 		}
+
+		// Verify image availability via registry API
+		var imageChecks []map[string]any
+		for image, reason := range failingImages {
+			check := map[string]any{
+				"image":  image,
+				"reason": reason,
+			}
+			available, regErr := CheckImageInRegistry(image)
+			if regErr != nil {
+				check["registry_check"] = fmt.Sprintf("error: %v", regErr)
+			} else if available {
+				check["registry_check"] = "image exists in registry — pull failure may be auth/network issue"
+			} else {
+				check["registry_check"] = "image NOT found in registry — tag or repo may not exist"
+			}
+			check["available"] = available
+			imageChecks = append(imageChecks, check)
+		}
+		r.Details["image_checks"] = imageChecks
 	}
 
 	if pullErrors > 0 {
 		r.Status = StatusFail
-		r.Message = fmt.Sprintf("%d pod(s) with image pull errors in %s", pullErrors, cc.Operator.Namespace)
+		images := make([]string, 0, len(failingImages))
+		for img := range failingImages {
+			if idx := strings.LastIndex(img, "/"); idx >= 0 {
+				img = img[idx+1:]
+			}
+			images = append(images, img)
+		}
+		r.Message = fmt.Sprintf("%d pod(s) with image pull errors in %s — images: %s",
+			pullErrors, cc.Operator.Namespace, strings.Join(images, ", "))
 	} else {
 		r.Status = StatusPass
 		r.Message = "No image pull errors"
 	}
 
 	cc.AddResult(r)
+}
+
+// checkImageInRegistry verifies if an image exists in its registry via API.
+// Supports quay.io and generic registries via HEAD on the manifest endpoint.
+func CheckImageInRegistry(imageRef string) (bool, error) {
+	// Parse image reference: registry/repo:tag or registry/repo@sha256:digest
+	ref := imageRef
+	tag := "latest"
+	if atIdx := strings.Index(ref, "@"); atIdx >= 0 {
+		tag = ref[atIdx+1:]
+		ref = ref[:atIdx]
+	} else if colonIdx := strings.LastIndex(ref, ":"); colonIdx >= 0 && !strings.Contains(ref[colonIdx:], "/") {
+		tag = ref[colonIdx+1:]
+		ref = ref[:colonIdx]
+	}
+
+	// Quay.io: use Quay API
+	if strings.HasPrefix(ref, "quay.io/") {
+		repo := strings.TrimPrefix(ref, "quay.io/")
+		apiURL := fmt.Sprintf("https://quay.io/api/v1/repository/%s/tag/?specificTag=%s&limit=1", repo, tag)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(apiURL)
+		if err != nil {
+			return false, fmt.Errorf("quay API request failed: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == 404 {
+			return false, nil
+		}
+		if resp.StatusCode != 200 {
+			return false, fmt.Errorf("quay API returned %d", resp.StatusCode)
+		}
+		var result struct {
+			Tags []struct{ Name string `json:"name"` } `json:"tags"`
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if err := json.Unmarshal(body, &result); err != nil {
+			return false, fmt.Errorf("parsing quay response: %w", err)
+		}
+		return len(result.Tags) > 0, nil
+	}
+
+	// Generic registry: try HEAD on /v2/{repo}/manifests/{tag}
+	registry := "https://" + strings.Split(ref, "/")[0]
+	repoPath := strings.SplitN(ref, "/", 2)
+	if len(repoPath) < 2 {
+		return false, fmt.Errorf("cannot parse registry from %s", imageRef)
+	}
+	manifestURL := fmt.Sprintf("%s/v2/%s/manifests/%s", registry, repoPath[1], tag)
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("HEAD", manifestURL, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("registry request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200, nil
 }
 
 // CheckPKOJobHealth verifies PKO cleanup jobs are healthy

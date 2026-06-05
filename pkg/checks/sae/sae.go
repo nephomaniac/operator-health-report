@@ -100,6 +100,33 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
 		}
 	}
 
+	// If image pull errors, extract and verify the image
+	if imagePullErrors > 0 && podErr == nil {
+		failingImages := map[string]bool{}
+		for _, pod := range pods.Items {
+			for _, cs := range pod.Status.ContainerStatuses {
+				if cs.State.Waiting != nil && (cs.State.Waiting.Reason == "ImagePullBackOff" || cs.State.Waiting.Reason == "ErrImagePull") {
+					failingImages[cs.Image] = true
+				}
+			}
+		}
+		var imageChecks []map[string]any
+		for img := range failingImages {
+			check := map[string]any{"image": img}
+			available, regErr := checks.CheckImageInRegistry(img)
+			if regErr != nil {
+				check["registry_check"] = fmt.Sprintf("error: %v", regErr)
+			} else if available {
+				check["registry_check"] = "image exists in registry — pull failure may be auth/network issue"
+			} else {
+				check["registry_check"] = "image NOT found in registry — tag or repo may not exist"
+			}
+			check["available"] = available
+			imageChecks = append(imageChecks, check)
+		}
+		r.Details["image_checks"] = imageChecks
+	}
+
 	switch {
 	case imagePullErrors > 0:
 		r.Status = checks.StatusFail
