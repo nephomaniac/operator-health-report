@@ -61,6 +61,7 @@ func main() {
 		reason         string
 		operators      stringSlice
 		noElevate      bool
+		elevate        bool
 		parallel       int
 		outputFile     string
 		noHTML         bool
@@ -76,9 +77,10 @@ func main() {
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", cfg.ClusterList, "File with cluster IDs (one per line)")
-	flag.StringVar(&reason, "reason", cfg.Reason, "OCM elevation reason (JIRA ticket)")
+	flag.StringVar(&reason, "reason", cfg.Reason, "Elevation reason (JIRA ticket or PD incident — required with --elevate)")
 	flag.Var(&operators, "oper", "Operator to check: camo, rmo, ome, sfo, rhobs (repeatable, default: all)")
-	flag.BoolVar(&noElevate, "no-elevate", cfg.NoElevate, "Skip all backplane elevation commands")
+	flag.BoolVar(&noElevate, "no-elevate", cfg.NoElevate, "Explicitly disable elevation (overrides --elevate)")
+	flag.BoolVar(&elevate, "elevate", false, "Enable backplane elevation (requires --reason)")
 	flag.IntVar(&parallel, "parallel", max(cfg.Parallel, 1), "Number of clusters to process concurrently")
 	flag.StringVar(&outputFile, "output", "", "Output JSON file (default: health_TIMESTAMP.json)")
 	flag.BoolVar(&noHTML, "no-html", cfg.NoHTML, "Skip HTML report generation")
@@ -197,25 +199,37 @@ func main() {
 	ocmEnv := ocmClient.URL()
 	isProd := ocmClient.IsProduction()
 
-	if isProd && !noElevate {
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "================================================================================")
-		fmt.Fprintln(os.Stderr, "⚠  PRODUCTION ENVIRONMENT DETECTED — defaulting to --no-elevate")
-		fmt.Fprintln(os.Stderr, "================================================================================")
-		fmt.Fprintln(os.Stderr, "")
-		noElevate = true
-	}
-
-	if reason == "" {
-		if isProd {
-			fmt.Fprintln(os.Stderr, "Error: --reason is required for production environments (provide a JIRA ticket)")
+	// Elevation logic:
+	// --no-elevate always wins (explicit disable)
+	// --elevate requires --reason (explicit enable with justification)
+	// Without either flag: elevation disabled by default
+	if noElevate {
+		// Explicit disable — takes priority over everything
+		elevate = false
+	} else if elevate {
+		// Explicit enable — requires --reason with a real ticket/incident reference
+		if reason == "" || reason == "operator health check" || reason == cfg.Reason {
+			fmt.Fprintln(os.Stderr, "Error: --elevate requires --reason with a JIRA ticket or PD incident (e.g., --reason SREP-1234)")
 			os.Exit(1)
 		}
+		if isProd {
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "================================================================================")
+			fmt.Fprintln(os.Stderr, "⚠  ELEVATION ENABLED ON PRODUCTION — all operations are read-only")
+			fmt.Fprintln(os.Stderr, "    Reason:", reason)
+			fmt.Fprintln(os.Stderr, "================================================================================")
+			fmt.Fprintln(os.Stderr, "")
+		}
+	}
+	// Set noElevate for downstream — elevation is off unless explicitly enabled
+	noElevate = !elevate
+
+	if reason == "" {
 		reason = "operator health check"
 	}
 
-	fmt.Fprintf(os.Stderr, "Clusters: %d, Operators: %v, No-elevate: %v, OCM: %s\n",
-		len(clusterIDs), operators, noElevate, ocmClient.Environment())
+	fmt.Fprintf(os.Stderr, "Clusters: %d, Operators: %v, Elevation: %v, OCM: %s\n",
+		len(clusterIDs), operators, elevate, ocmClient.Environment())
 
 	// Output file — default to results/ directory
 	if outputFile == "" {
@@ -638,8 +652,8 @@ func main() {
 
 				fmt.Fprintf(os.Stderr, "\n[hive] Processing: %s (%s, %s, %s)\n", meta.Name, meta.Product, meta.Provider, meta.Region)
 
-				// Hive clusters enforce no-elevate unless --reason provided
-				hiveNoElevate := reason == ""
+				// Hive clusters use the same elevation setting as managed clusters
+				hiveNoElevate := noElevate
 
 				client, connErr := kube.ConnectToClusterWithConn(rootCtx, hiveID, reason, hiveNoElevate, hiveOCM.Conn())
 				if connErr != nil {
