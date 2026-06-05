@@ -1979,29 +1979,31 @@
 
             const pct = (n) => totalClusters > 0 ? ((n/totalClusters)*100).toFixed(1) + '%' : '0%';
 
+            const statInfo = (title, desc) => `onclick="showOperatorInfo('${title}','${desc.replace(/'/g, "\\'")}')" style="cursor:help;" title="Click for details"`;
+
             summaryEl.innerHTML = '<h3 style="margin:0 0 8px;font-size:1em;">📊 Summary Overview</h3>' +
                 '<div class="stats-grid">' +
-                    '<div class="stat-card">' +
+                    '<div class="stat-card" ' + statInfo('Total Clusters', 'The total number of clusters discovered via OCM that matched the filter criteria. Includes both checked clusters (successfully connected and health-checked) and skipped clusters (limited support, not ready, or connection failed). This count reflects the scope of this health report run.') + '>' +
                         '<div class="stat-label">Total Clusters</div>' +
                         '<div class="stat-number">' + totalClusters + '</div>' +
                         '<div class="stat-label">' + checkedClusters + ' checked, ' + totalSkipped + ' skipped</div>' +
                     '</div>' +
-                    '<div class="stat-card healthy">' +
+                    '<div class="stat-card healthy" ' + statInfo('Healthy', 'Clusters where ALL health checks passed with no failures or warnings across every operator checked. A healthy cluster has all pods running, all metrics within thresholds, all expected resources present, and no firing alerts.') + '>' +
                         '<div class="stat-label">Healthy</div>' +
                         '<div class="stat-number healthy">' + healthyCount + '</div>' +
                         '<div class="stat-label">' + pct(healthyCount) + '</div>' +
                     '</div>' +
-                    '<div class="stat-card warning">' +
+                    '<div class="stat-card warning" ' + statInfo('Warnings', 'Clusters where one or more checks reported WARNING status but no FAIL. Warnings indicate degraded conditions that may not require immediate action but should be monitored: elevated pod restarts, missing optional resources, resource trend increases, or partial readiness.') + '>' +
                         '<div class="stat-label">Warnings</div>' +
                         '<div class="stat-number warning">' + warningCount + '</div>' +
                         '<div class="stat-label">' + pct(warningCount) + '</div>' +
                     '</div>' +
-                    '<div class="stat-card critical">' +
+                    '<div class="stat-card critical" ' + statInfo('Critical', 'Clusters where one or more checks reported FAIL status. Critical issues require investigation: pods not running, ImagePullBackOff, missing required secrets or ConfigMaps, API key failures, event loss, or completely non-functional components. Click on the cluster row to see which checks failed.') + '>' +
                         '<div class="stat-label">Critical</div>' +
                         '<div class="stat-number critical">' + criticalCount + '</div>' +
                         '<div class="stat-label">' + pct(criticalCount) + '</div>' +
                     '</div>' +
-                    '<div class="stat-card" style="border-color: var(--text-muted);">' +
+                    '<div class="stat-card" style="border-color: var(--text-muted);cursor:help;" ' + statInfo('Skipped / Unreachable', 'Clusters that were excluded from health checking. Reasons include: Limited Support (cluster has SLA suspension), Not Ready (cluster is provisioning or hibernating), Connection Failed (backplane login failed or cluster unreachable), No Access (requires explicit access request), Access Denied (insufficient RBAC permissions).') + '>' +
                         '<div class="stat-label">Skipped / Unreachable</div>' +
                         '<div class="stat-number" style="color: var(--text-muted);">' + (totalSkipped + noAccessCount) + '</div>' +
                         '<div class="stat-label">' + pct(totalSkipped + noAccessCount) + '</div>' +
@@ -2014,7 +2016,7 @@
                         '</div>' +
                     '</div>' +
                     (totalApiErrors > 0 ?
-                    '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);">' +
+                    '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);cursor:help;" ' + statInfo('Script/API Errors', 'Errors encountered during health check execution — API timeouts, RBAC failures, or script errors that prevented a check from completing. These are distinct from cluster health issues; they indicate problems with the health check tool\\'s ability to query the cluster. The affected operator and error count are shown below.') + '>' +
                         '<div class="stat-label">Script/API Errors</div>' +
                         '<div class="stat-number" style="color: #dc3545;">' + totalApiErrors + '</div>' +
                         '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS') + ': ' + n).join(', ') + '</div>' +
