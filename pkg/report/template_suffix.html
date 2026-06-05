@@ -2457,7 +2457,17 @@
             // Build tabs and tab content for each operator (always show tabs)
             operators.forEach((op, idx) => {
                 const opData = sortClusters(operatorGroups[op]);
-                const shortName = op.replace(/-operator$/, '').replace(/configure-alertmanager/, 'CAMO').replace(/route-monitor/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS');
+                const shortNameMap = {
+                    'configure-alertmanager-operator': 'CAMO',
+                    'route-monitor-operator': 'RMO',
+                    'osd-metrics-exporter': 'OME',
+                    'splunk-forwarder-operator': 'SFO',
+                    'splunk-audit-exporter': 'SAE',
+                    'rhobs-observability': 'RHOBS',
+                    'rosa-log-router': 'RLR',
+                    'pagerduty-operator': 'PDO',
+                };
+                const shortName = shortNameMap[op] || op.replace(/-operator$/, '').toUpperCase();
 
                 // Count statuses for badge — uses effective status to exclude API/script errors
                 let okCount = 0, warnCount = 0, critCount = 0, errCount = 0;
