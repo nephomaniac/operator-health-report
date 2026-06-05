@@ -114,7 +114,7 @@ func isRHOBSExpected(cc *checks.ClusterContext) bool {
 // --- Metric Collection (rhobs/configuration) ---
 
 func checkMonitoringStack(ctx context.Context, cc *checks.ClusterContext) bool {
-	cc.CurrentCheck = "rhobs_monitoring_stack"
+	cc.SetCheck("rhobs_monitoring_stack")
 
 	r := checks.Result{
 		Check:    "rhobs_monitoring_stack",
@@ -176,7 +176,7 @@ func checkMonitoringStack(ctx context.Context, cc *checks.ClusterContext) bool {
 }
 
 func checkMonitoringCredentials(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
-	cc.CurrentCheck = "rhobs_monitoring_credentials"
+	cc.SetCheck("rhobs_monitoring_credentials")
 
 	r := checks.Result{
 		Check:    "rhobs_monitoring_credentials",
@@ -224,7 +224,7 @@ func checkMonitoringCredentials(ctx context.Context, cc *checks.ClusterContext, 
 }
 
 func checkMetricsDestination(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
-	cc.CurrentCheck = "rhobs_metrics_destination"
+	cc.SetCheck("rhobs_metrics_destination")
 
 	r := checks.Result{
 		Check:    "rhobs_metrics_destination",
@@ -269,7 +269,7 @@ func checkMetricsDestination(ctx context.Context, cc *checks.ClusterContext, has
 }
 
 func checkRemoteWriteConfig(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
-	cc.CurrentCheck = "rhobs_remote_write_config"
+	cc.SetCheck("rhobs_remote_write_config")
 
 	r := checks.Result{
 		Check:    "rhobs_remote_write_config",
@@ -346,7 +346,7 @@ func checkRemoteWriteConfig(ctx context.Context, cc *checks.ClusterContext, hasR
 }
 
 func checkPrometheusHealth(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
-	cc.CurrentCheck = "rhobs_prometheus_health"
+	cc.SetCheck("rhobs_prometheus_health")
 
 	prometheusGVR := schema.GroupVersionResource{
 		Group: "monitoring.rhobs", Version: "v1", Resource: "prometheuses",
@@ -438,7 +438,7 @@ func checkPrometheusHealth(ctx context.Context, cc *checks.ClusterContext, hasRH
 }
 
 func checkPrometheusStatefulSets(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
-	cc.CurrentCheck = "rhobs_prometheus_statefulsets"
+	cc.SetCheck("rhobs_prometheus_statefulsets")
 
 	r := checks.Result{
 		Check:    "rhobs_prometheus_statefulsets",
@@ -527,7 +527,7 @@ func checkPrometheusStatefulSets(ctx context.Context, cc *checks.ClusterContext,
 // --- Log Collection (rhobs/configuration) ---
 
 func checkLogForwarder(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_log_forwarder"
+	cc.SetCheck("rhobs_log_forwarder")
 
 	r := checks.Result{
 		Check:    "rhobs_log_forwarder",
@@ -619,7 +619,7 @@ func checkLogForwarder(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkLogCollectorDaemonSet(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_log_collector_daemonset"
+	cc.SetCheck("rhobs_log_collector_daemonset")
 
 	r := checks.Result{
 		Check:    "rhobs_log_collector_daemonset",
@@ -691,7 +691,7 @@ func checkLogCollectorDaemonSet(ctx context.Context, cc *checks.ClusterContext) 
 }
 
 func checkLogEventCollector(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_log_event_collector"
+	cc.SetCheck("rhobs_log_event_collector")
 
 	r := checks.Result{
 		Check:    "rhobs_log_event_collector",
@@ -769,7 +769,7 @@ func checkLogEventCollector(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkLogTokenRefresher(ctx context.Context, cc *checks.ClusterContext, hasRHOBS bool) {
-	cc.CurrentCheck = "rhobs_log_token_refresher"
+	cc.SetCheck("rhobs_log_token_refresher")
 
 	r := checks.Result{
 		Check:    "rhobs_log_token_refresher",
@@ -824,7 +824,7 @@ func checkLogTokenRefresher(ctx context.Context, cc *checks.ClusterContext, hasR
 }
 
 func checkLogDestination(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_log_destination"
+	cc.SetCheck("rhobs_log_destination")
 
 	r := checks.Result{
 		Check:    "rhobs_log_destination",
@@ -879,7 +879,7 @@ func checkLogDestination(ctx context.Context, cc *checks.ClusterContext) {
 const cpLogForwardingNS = "hypershift-control-plane-log-forwarding"
 
 func checkControlPlaneLogForwarding(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_cp_log_forwarding"
+	cc.SetCheck("rhobs_cp_log_forwarding")
 
 	r := checks.Result{
 		Check:    "rhobs_cp_log_forwarding",
@@ -947,7 +947,7 @@ func checkControlPlaneLogForwarding(ctx context.Context, cc *checks.ClusterConte
 // --- Platform Rules (hypershift-platform-rhobs-rules) — MC only ---
 
 func checkPlatformRulesNamespace(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_platform_rules_namespace"
+	cc.SetCheck("rhobs_platform_rules_namespace")
 
 	r := checks.Result{
 		Check:    "rhobs_platform_rules_namespace",
@@ -989,7 +989,7 @@ func checkPlatformRulesNamespace(ctx context.Context, cc *checks.ClusterContext)
 }
 
 func checkPlatformRules(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_platform_rules"
+	cc.SetCheck("rhobs_platform_rules")
 
 	r := checks.Result{
 		Check:    "rhobs_platform_rules",
@@ -1051,7 +1051,7 @@ func checkPlatformRules(ctx context.Context, cc *checks.ClusterContext) {
 // --- CLF Conditions (rhobs/configuration) ---
 
 func checkCLFConditions(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_clf_conditions"
+	cc.SetCheck("rhobs_clf_conditions")
 
 	r := checks.Result{
 		Check:    "rhobs_clf_conditions",
@@ -1154,7 +1154,7 @@ func checkCLFConditions(ctx context.Context, cc *checks.ClusterContext) {
 // --- Metrics Forwarder (hypershift-dataplane-metrics-forwarder) — MC only ---
 
 func checkMetricsForwarder(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rhobs_metrics_forwarder"
+	cc.SetCheck("rhobs_metrics_forwarder")
 
 	r := checks.Result{
 		Check:    "rhobs_metrics_forwarder",

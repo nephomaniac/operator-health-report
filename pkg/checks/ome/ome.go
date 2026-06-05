@@ -69,7 +69,7 @@ var expectedMetrics = []metricSpec{
 
 // checkMetricsHealth verifies OME's custom Prometheus metrics are being scraped
 func checkMetricsHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "ome_metrics_health"
+	cc.SetCheck("ome_metrics_health")
 	log := logging.WithCheck("ome_metrics_health")
 
 	r := checks.Result{
@@ -227,7 +227,7 @@ func checkTriggerExists(ctx context.Context, cc *checks.ClusterContext, metric m
 
 // checkPullSecretHealth checks the pull_secret_valid metric
 func checkPullSecretHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "ome_pull_secret_health"
+	cc.SetCheck("ome_pull_secret_health")
 
 	r := checks.Result{
 		Check:    "ome_pull_secret_health",
@@ -274,7 +274,7 @@ func checkPullSecretHealth(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkProxyCAHealth checks proxy CA certificate validity
 func checkProxyCAHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "ome_proxy_ca_health"
+	cc.SetCheck("ome_proxy_ca_health")
 
 	r := checks.Result{
 		Check:    "ome_proxy_ca_health",
@@ -350,7 +350,7 @@ func checkProxyCAHealth(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkServiceMonitorHealth verifies OME's ServiceMonitor exists
 func checkServiceMonitorHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "ome_servicemonitor_health"
+	cc.SetCheck("ome_servicemonitor_health")
 
 	r := checks.Result{
 		Check:    "ome_servicemonitor_health",
@@ -398,7 +398,7 @@ func checkServiceMonitorHealth(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkIdentityProviders reports identity provider configuration (informational)
 func checkIdentityProviders(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "ome_identity_providers"
+	cc.SetCheck("ome_identity_providers")
 
 	r := checks.Result{
 		Check:    "ome_identity_providers",

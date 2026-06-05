@@ -60,7 +60,7 @@ func (c *PDOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkAPIKeySecret(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "pdo_api_key_secret"
+	cc.SetCheck("pdo_api_key_secret")
 
 	r := checks.Result{
 		Check:    "pdo_api_key_secret",
@@ -108,7 +108,7 @@ func checkAPIKeySecret(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "pdo_controller_availability"
+	cc.SetCheck("pdo_controller_availability")
 
 	r := checks.Result{
 		Check:    "pdo_controller_availability",
@@ -149,7 +149,7 @@ func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext)
 }
 
 func checkPDIStatus(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "pdo_pdi_status"
+	cc.SetCheck("pdo_pdi_status")
 
 	r := checks.Result{
 		Check:    "pdo_pdi_status",
@@ -240,7 +240,7 @@ func checkPDIStatus(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "pdo_prometheus_metrics"
+	cc.SetCheck("pdo_prometheus_metrics")
 
 	r := checks.Result{
 		Check:    "pdo_prometheus_metrics",
@@ -338,7 +338,7 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkReconciliationActivity(ctx context.Context, cc *checks.ClusterContext) int {
-	cc.CurrentCheck = "pdo_reconciliation_activity"
+	cc.SetCheck("pdo_reconciliation_activity")
 
 	r := checks.Result{
 		Check:    "pdo_reconciliation_activity",
@@ -383,7 +383,7 @@ func checkReconciliationActivity(ctx context.Context, cc *checks.ClusterContext)
 }
 
 func checkReconciliationBehavior(ctx context.Context, cc *checks.ClusterContext, recentLogCount int) {
-	cc.CurrentCheck = "pdo_reconciliation_behavior"
+	cc.SetCheck("pdo_reconciliation_behavior")
 
 	r := checks.Result{
 		Check:    "pdo_reconciliation_behavior",
@@ -409,7 +409,7 @@ func checkReconciliationBehavior(ctx context.Context, cc *checks.ClusterContext,
 }
 
 func checkConfigurationErrors(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "pdo_configuration_errors"
+	cc.SetCheck("pdo_configuration_errors")
 
 	r := checks.Result{
 		Check:    "pdo_configuration_errors",
@@ -476,7 +476,7 @@ func checkConfigurationErrors(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkFiringAlerts(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "pdo_firing_alerts"
+	cc.SetCheck("pdo_firing_alerts")
 
 	r := checks.Result{
 		Check:    "pdo_firing_alerts",

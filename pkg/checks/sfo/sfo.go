@@ -56,7 +56,7 @@ func (c *SFOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkControllerAvailability checks the operator deployment Available condition
 func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "sfo_controller_availability"
+	cc.SetCheck("sfo_controller_availability")
 
 	r := checks.Result{
 		Check:    "sfo_controller_availability",
@@ -106,7 +106,7 @@ func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext)
 // checkSplunkForwarderCR verifies the SplunkForwarder CR exists in openshift-security.
 // Returns true if at least one CR was found.
 func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) bool {
-	cc.CurrentCheck = "sfo_splunkforwarder_cr"
+	cc.SetCheck("sfo_splunkforwarder_cr")
 
 	r := checks.Result{
 		Check:    "sfo_splunkforwarder_cr",
@@ -181,7 +181,7 @@ func checkSplunkForwarderCR(ctx context.Context, cc *checks.ClusterContext) bool
 
 // checkSecrets verifies splunk auth and HEC token secrets in openshift-security
 func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
-	cc.CurrentCheck = "sfo_secrets"
+	cc.SetCheck("sfo_secrets")
 	log := logging.WithCheck("sfo_secrets")
 
 	r := checks.Result{
@@ -247,7 +247,7 @@ func checkSecrets(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
 
 // checkDaemonSetHealth verifies the splunk forwarder DaemonSet in openshift-security
 func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
-	cc.CurrentCheck = "sfo_daemonset_health"
+	cc.SetCheck("sfo_daemonset_health")
 
 	r := checks.Result{
 		Check:    "sfo_daemonset_health",
@@ -334,7 +334,7 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext, hasCR 
 
 // checkForwarderPods verifies forwarder pods are running on nodes
 func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
-	cc.CurrentCheck = "sfo_forwarder_pods"
+	cc.SetCheck("sfo_forwarder_pods")
 
 	r := checks.Result{
 		Check:    "sfo_forwarder_pods",
@@ -424,7 +424,7 @@ func checkForwarderPods(ctx context.Context, cc *checks.ClusterContext, hasCR bo
 
 // checkConfigMaps verifies the splunk configuration ConfigMaps in openshift-security
 func checkConfigMaps(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
-	cc.CurrentCheck = "sfo_configmaps"
+	cc.SetCheck("sfo_configmaps")
 
 	r := checks.Result{
 		Check:    "sfo_configmaps",
@@ -493,7 +493,7 @@ func checkConfigMaps(ctx context.Context, cc *checks.ClusterContext, hasCR bool)
 
 // checkAuditExporter verifies the audit-exporter DaemonSet runs on master nodes
 func checkAuditExporter(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "sfo_audit_exporter"
+	cc.SetCheck("sfo_audit_exporter")
 
 	r := checks.Result{
 		Check:    "sfo_audit_exporter",
@@ -548,7 +548,7 @@ func checkAuditExporter(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkForwarderMetrics queries Prometheus for splunk forwarder health and throughput metrics
 func checkForwarderMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
-	cc.CurrentCheck = "sfo_forwarder_metrics"
+	cc.SetCheck("sfo_forwarder_metrics")
 
 	r := checks.Result{
 		Check:    "sfo_forwarder_metrics",
@@ -687,7 +687,7 @@ func timeNow() int64 {
 
 // checkServiceMonitor verifies the splunk forwarder ServiceMonitor exists
 func checkServiceMonitor(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "sfo_servicemonitor"
+	cc.SetCheck("sfo_servicemonitor")
 
 	r := checks.Result{
 		Check:    "sfo_servicemonitor",
@@ -735,7 +735,7 @@ func checkServiceMonitor(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkPrometheusRule verifies the SplunkForwarderComponentUnhealthy alert rule exists
 func checkPrometheusRule(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "sfo_prometheusrule"
+	cc.SetCheck("sfo_prometheusrule")
 
 	r := checks.Result{
 		Check:    "sfo_prometheusrule",

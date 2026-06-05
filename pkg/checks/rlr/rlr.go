@@ -96,7 +96,7 @@ func sanitizeFloat(f float64) float64 {
 // --- Vector Collector Checks ---
 
 func checkVectorNamespace(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_namespace"
+	cc.SetCheck("rlr_vector_namespace")
 
 	r := checks.Result{
 		Check:    "rlr_vector_namespace",
@@ -134,7 +134,7 @@ func checkVectorNamespace(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkVectorDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_daemonset_health"
+	cc.SetCheck("rlr_vector_daemonset_health")
 
 	r := checks.Result{
 		Check:    "rlr_vector_daemonset_health",
@@ -229,7 +229,7 @@ func checkVectorDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) 
 }
 
 func checkVectorPodRestarts(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_pod_restarts"
+	cc.SetCheck("rlr_vector_pod_restarts")
 
 	r := checks.Result{
 		Check:    "rlr_vector_pod_restarts",
@@ -295,7 +295,7 @@ func checkVectorPodRestarts(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkVectorMetricsPresent(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_metrics_present"
+	cc.SetCheck("rlr_vector_metrics_present")
 
 	r := checks.Result{
 		Check:    "rlr_vector_metrics_present",
@@ -359,7 +359,7 @@ func checkVectorMetricsPresent(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkVectorIngestionRate(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_ingestion_rate"
+	cc.SetCheck("rlr_vector_ingestion_rate")
 
 	r := checks.Result{
 		Check:    "rlr_vector_ingestion_rate",
@@ -431,7 +431,7 @@ func checkVectorIngestionRate(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkVectorS3Delivery(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_s3_delivery"
+	cc.SetCheck("rlr_vector_s3_delivery")
 
 	r := checks.Result{
 		Check:    "rlr_vector_s3_delivery",
@@ -491,7 +491,7 @@ func checkVectorS3Delivery(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkVectorBufferUsage(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_buffer_usage"
+	cc.SetCheck("rlr_vector_buffer_usage")
 
 	r := checks.Result{
 		Check:    "rlr_vector_buffer_usage",
@@ -560,7 +560,7 @@ func checkVectorBufferUsage(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkVectorErrorRate(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_error_rate"
+	cc.SetCheck("rlr_vector_error_rate")
 
 	r := checks.Result{
 		Check:    "rlr_vector_error_rate",
@@ -633,7 +633,7 @@ func checkVectorErrorRate(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkVectorEventLoss(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_event_loss"
+	cc.SetCheck("rlr_vector_event_loss")
 
 	r := checks.Result{
 		Check:    "rlr_vector_event_loss",
@@ -693,7 +693,7 @@ func checkVectorEventLoss(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkVectorPipelineRatio(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_pipeline_ratio"
+	cc.SetCheck("rlr_vector_pipeline_ratio")
 
 	r := checks.Result{
 		Check:    "rlr_vector_pipeline_ratio",
@@ -774,7 +774,7 @@ func checkVectorPipelineRatio(ctx context.Context, cc *checks.ClusterContext) {
 // --- Heartbeat Checks ---
 
 func checkHeartbeatDeployment(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_heartbeat_deployment"
+	cc.SetCheck("rlr_heartbeat_deployment")
 
 	r := checks.Result{
 		Check:    "rlr_heartbeat_deployment",
@@ -834,7 +834,7 @@ func checkHeartbeatDeployment(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkHeartbeatPodHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_heartbeat_pod_health"
+	cc.SetCheck("rlr_heartbeat_pod_health")
 
 	r := checks.Result{
 		Check:    "rlr_heartbeat_pod_health",
@@ -907,7 +907,7 @@ func checkHeartbeatPodHealth(ctx context.Context, cc *checks.ClusterContext) {
 // --- Log Processor Checks ---
 
 func checkProcessorDeployment(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_processor_deployment"
+	cc.SetCheck("rlr_processor_deployment")
 
 	r := checks.Result{
 		Check:    "rlr_processor_deployment",
@@ -966,7 +966,7 @@ func checkProcessorDeployment(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkProcessorPodHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_processor_pod_health"
+	cc.SetCheck("rlr_processor_pod_health")
 
 	r := checks.Result{
 		Check:    "rlr_processor_pod_health",
@@ -1038,7 +1038,7 @@ func checkProcessorPodHealth(ctx context.Context, cc *checks.ClusterContext) {
 // --- PrometheusRule & Alert Checks ---
 
 func checkPrometheusRuleExists(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_prometheusrule_exists"
+	cc.SetCheck("rlr_prometheusrule_exists")
 
 	r := checks.Result{
 		Check:    "rlr_prometheusrule_exists",
@@ -1098,7 +1098,7 @@ func checkPrometheusRuleExists(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkPrometheusRuleAlerts(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_prometheusrule_alerts"
+	cc.SetCheck("rlr_prometheusrule_alerts")
 
 	r := checks.Result{
 		Check:    "rlr_prometheusrule_alerts",
@@ -1176,7 +1176,7 @@ func checkPrometheusRuleAlerts(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkActiveAlerts(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_active_alerts"
+	cc.SetCheck("rlr_active_alerts")
 
 	r := checks.Result{
 		Check:    "rlr_active_alerts",
@@ -1304,7 +1304,7 @@ const maxChartSeries = 10
 // --- Timeseries Collection (7-day trends for charts) ---
 
 func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rlr_vector_trends"
+	cc.SetCheck("rlr_vector_trends")
 
 	r := checks.Result{
 		Check:    "rlr_vector_trends",

@@ -136,6 +136,14 @@ type ClusterContext struct {
 	WarningCount  int
 }
 
+// SetCheck sets the current check name and syncs it to the client for audit tagging.
+func (cc *ClusterContext) SetCheck(name string) {
+	cc.CurrentCheck = name
+	if cc.Client != nil {
+		cc.Client.CurrentCheck = name
+	}
+}
+
 // AddResult appends a check result
 func (cc *ClusterContext) AddResult(r Result) {
 	cc.Results = append(cc.Results, r)

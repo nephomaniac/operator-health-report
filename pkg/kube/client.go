@@ -61,6 +61,7 @@ type ClusterClient struct {
 	ElevatedCallCount int64
 	ElevatedOps       []string
 	elevMu            sync.Mutex
+	CurrentCheck      string // set by check framework for audit tagging
 }
 
 // portForwardSession manages a port-forward to a Thanos/Prometheus pod.
@@ -365,6 +366,9 @@ func (cc *ClusterClient) checkElevatedError(err error) {
 func (cc *ClusterClient) recordElevatedOp(op string) {
 	cc.elevMu.Lock()
 	cc.ElevatedCallCount++
+	if cc.CurrentCheck != "" && !strings.HasPrefix(op, "[") {
+		op = fmt.Sprintf("[%s] %s", cc.CurrentCheck, op)
+	}
 	cc.ElevatedOps = append(cc.ElevatedOps, op)
 	cc.elevMu.Unlock()
 }

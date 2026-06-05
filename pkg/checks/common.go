@@ -91,7 +91,7 @@ func isPodProblematic(pod corev1.Pod) bool {
 
 // CheckNamespace verifies the operator namespace exists and is Active
 func CheckNamespace(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "namespace_status"
+	cc.SetCheck("namespace_status")
 
 	phase, err := cc.Client.GetNamespacePhase(ctx, cc.Operator.Namespace)
 	cc.RecordError("Get namespace phase", err)
@@ -131,7 +131,7 @@ func CheckNamespace(ctx context.Context, cc *ClusterContext) {
 
 // CheckDeployment verifies the operator deployment health
 func CheckDeployment(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "pod_status_and_restarts"
+	cc.SetCheck("pod_status_and_restarts")
 
 	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
 	cc.RecordError("Get deployment status", err)
@@ -250,7 +250,7 @@ func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 
 // CheckPKOHealth verifies ClusterPackage status
 func CheckPKOHealth(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "pko_clusterpackage_health"
+	cc.SetCheck("pko_clusterpackage_health")
 
 	packageName := cc.Operator.Name
 	if strings.Contains(packageName, "controller-manager") {
@@ -329,7 +329,7 @@ func CheckPKOHealth(ctx context.Context, cc *ClusterContext) {
 }
 
 func checkOLMSubscription(ctx context.Context, cc *ClusterContext, packageName string) {
-	cc.CurrentCheck = "olm_subscription_health"
+	cc.SetCheck("olm_subscription_health")
 
 	gvr := subscriptionGVR()
 	_, err := cc.Client.GetResource(ctx, gvr, cc.Operator.Namespace, packageName, false)
@@ -357,7 +357,7 @@ func checkOLMSubscription(ctx context.Context, cc *ClusterContext, packageName s
 
 // CheckResourceLeakDetection queries Thanos for CPU/memory timeseries
 func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "resource_leak_detection"
+	cc.SetCheck("resource_leak_detection")
 	log := logging.WithCheck("resource_leak_detection")
 
 	r := Result{
@@ -469,7 +469,7 @@ func CheckResourceLeakDetection(ctx context.Context, cc *ClusterContext) {
 
 // CheckVersionVerification compares the deployed operator version against the SAAS target
 func CheckVersionVerification(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "version_verification"
+	cc.SetCheck("version_verification")
 	log := logging.WithCheck("version_verification")
 
 	r := Result{
@@ -572,7 +572,7 @@ func CheckVersionVerification(ctx context.Context, cc *ClusterContext) {
 // CheckResourceLimits shows resource limit/request configuration and compares against actual usage.
 // Never fails for missing limits — presents values clearly and warns only if usage approaches or exceeds limits.
 func CheckResourceLimits(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "resource_limits_validation"
+	cc.SetCheck("resource_limits_validation")
 
 	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
 	cc.RecordError("Get deployment resources", err)
@@ -712,7 +712,7 @@ func CheckResourceLimits(ctx context.Context, cc *ClusterContext) {
 
 // CheckLeaderElection verifies the leader lease
 func CheckLeaderElection(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "leader_election"
+	cc.SetCheck("leader_election")
 
 	leaseNames := []string{
 		cc.Operator.Deployment + "-lock",
@@ -752,7 +752,7 @@ func CheckLeaderElection(ctx context.Context, cc *ClusterContext) {
 
 // CheckImagePull verifies no ImagePullBackOff on operator pods
 func CheckImagePull(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "image_pull_status"
+	cc.SetCheck("image_pull_status")
 
 	pods, err := cc.Client.GetPods(ctx, cc.Operator.Namespace, "")
 	cc.RecordError("Get pod status", err)
@@ -813,7 +813,7 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 
 // CheckPKOJobHealth verifies PKO cleanup jobs are healthy
 func CheckPKOJobHealth(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "pko_job_health"
+	cc.SetCheck("pko_job_health")
 
 	jobs, err := cc.Client.Clientset().BatchV1().Jobs(cc.Operator.Namespace).List(ctx, metav1.ListOptions{})
 	cc.RecordError("Get PKO jobs", err)
@@ -939,7 +939,7 @@ func CheckPKOJobHealth(ctx context.Context, cc *ClusterContext) {
 
 // CheckLogErrors analyzes operator logs for errors
 func CheckLogErrors(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "log_error_analysis"
+	cc.SetCheck("log_error_analysis")
 
 	// Get deployment to find pods
 	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
@@ -1016,7 +1016,7 @@ func CheckLogErrors(ctx context.Context, cc *ClusterContext) {
 
 // CheckEvents collects Kubernetes warning events for the operator deployment
 func CheckEvents(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "operator_events"
+	cc.SetCheck("operator_events")
 
 	events, err := cc.Client.GetEvents(ctx, cc.Operator.Namespace, cc.Operator.Deployment)
 	cc.RecordError("Get deployment events", err)
@@ -1062,7 +1062,7 @@ func CheckEvents(ctx context.Context, cc *ClusterContext) {
 
 // CheckDualInstallation detects both OLM and PKO deployed for the same operator
 func CheckDualInstallation(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "dual_installation_check"
+	cc.SetCheck("dual_installation_check")
 
 	r := Result{
 		Check:    "dual_installation_check",
@@ -1119,7 +1119,7 @@ func CheckDualInstallation(ctx context.Context, cc *ClusterContext) {
 
 // CheckOrphanedOLM checks for orphaned OLM artifacts (CSVs) on PKO-deployed clusters
 func CheckOrphanedOLM(ctx context.Context, cc *ClusterContext) {
-	cc.CurrentCheck = "orphaned_olm_artifacts"
+	cc.SetCheck("orphaned_olm_artifacts")
 
 	r := Result{
 		Check:    "orphaned_olm_artifacts",

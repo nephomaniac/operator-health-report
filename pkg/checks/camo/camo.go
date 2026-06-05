@@ -37,7 +37,7 @@ func (c *CAMOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) 
 
 // checkAlertmanagerPods checks AM pod status, restarts, and termination reasons
 func checkAlertmanagerPods(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "alertmanager_pods"
+	cc.SetCheck("alertmanager_pods")
 
 	r := checks.Result{
 		Check:    "alertmanager_pods",
@@ -139,7 +139,7 @@ func checkAlertmanagerPods(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkAlertmanagerStatefulset verifies the AM StatefulSet ready replicas
 func checkAlertmanagerStatefulset(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "alertmanager_statefulset"
+	cc.SetCheck("alertmanager_statefulset")
 
 	r := checks.Result{
 		Check:    "alertmanager_statefulset",
@@ -182,7 +182,7 @@ func checkAlertmanagerStatefulset(ctx context.Context, cc *checks.ClusterContext
 
 // checkControllerAvailability checks the deployment Available condition
 func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "controller_availability"
+	cc.SetCheck("controller_availability")
 
 	r := checks.Result{
 		Check:    "controller_availability",
@@ -228,7 +228,7 @@ func checkControllerAvailability(ctx context.Context, cc *checks.ClusterContext)
 // checkReconciliationActivity validates the operator is actively reconciling when resources change.
 // Returns the recent log count for reuse by checkReconciliationBehavior.
 func checkReconciliationActivity(ctx context.Context, cc *checks.ClusterContext) int {
-	cc.CurrentCheck = "reconciliation_activity"
+	cc.SetCheck("reconciliation_activity")
 	log := logging.WithCheck("reconciliation_activity")
 
 	r := checks.Result{
@@ -303,7 +303,7 @@ func checkReconciliationActivity(ctx context.Context, cc *checks.ClusterContext)
 
 // checkReconciliationBehavior detects reconciliation loops or broken watches
 func checkReconciliationBehavior(ctx context.Context, cc *checks.ClusterContext, recentLogCount int) {
-	cc.CurrentCheck = "reconciliation_behavior"
+	cc.SetCheck("reconciliation_behavior")
 
 	r := checks.Result{
 		Check:    "reconciliation_behavior",
@@ -336,7 +336,7 @@ func checkReconciliationBehavior(ctx context.Context, cc *checks.ClusterContext,
 
 // checkAlertmanagerSecret checks AM secret and the secrets/configmaps CAMO watches for reconciliation
 func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "alertmanager_secret"
+	cc.SetCheck("alertmanager_secret")
 
 	r := checks.Result{
 		Check:    "alertmanager_secret",
@@ -431,7 +431,7 @@ func checkAlertmanagerSecret(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkConfigurationErrors counts config-related error patterns in recent logs
 func checkConfigurationErrors(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "configuration_errors"
+	cc.SetCheck("configuration_errors")
 
 	r := checks.Result{
 		Check:    "configuration_errors",
@@ -483,7 +483,7 @@ func checkConfigurationErrors(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkPrometheusMetrics queries all 10 CAMO-specific Prometheus metrics
 func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "prometheus_metrics"
+	cc.SetCheck("prometheus_metrics")
 	log := logging.WithCheck("prometheus_metrics")
 
 	r := checks.Result{
@@ -577,7 +577,7 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkAlertmanagerLogs analyzes AM pod logs with DNS warning filtering
 func checkAlertmanagerLogs(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "alertmanager_logs"
+	cc.SetCheck("alertmanager_logs")
 
 	r := checks.Result{
 		Check:    "alertmanager_logs",
@@ -656,7 +656,7 @@ func checkAlertmanagerLogs(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkAlertmanagerEvents checks K8s warning events for AM pods
 func checkAlertmanagerEvents(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "alertmanager_events"
+	cc.SetCheck("alertmanager_events")
 
 	r := checks.Result{
 		Check:    "alertmanager_events",
@@ -714,7 +714,7 @@ func checkAlertmanagerEvents(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkCAMOEvents checks K8s warning events for the CAMO deployment itself
 func checkCAMOEvents(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "camo_events"
+	cc.SetCheck("camo_events")
 
 	r := checks.Result{
 		Check:    "camo_events",

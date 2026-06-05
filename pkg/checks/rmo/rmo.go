@@ -95,7 +95,7 @@ func countItems(list *unstructured.UnstructuredList) int {
 
 // checkControllerManager verifies the RMO controller pod status
 func checkControllerManager(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_controller_manager"
+	cc.SetCheck("rmo_controller_manager")
 
 	r := checks.Result{
 		Check:    "rmo_controller_manager",
@@ -175,7 +175,7 @@ func checkControllerManager(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkBlackboxExporter verifies the blackbox-exporter deployment
 func checkBlackboxExporter(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
-	cc.CurrentCheck = "rmo_blackbox_exporter"
+	cc.SetCheck("rmo_blackbox_exporter")
 
 	r := checks.Result{
 		Check:    "rmo_blackbox_exporter",
@@ -241,7 +241,7 @@ func checkBlackboxExporter(ctx context.Context, cc *checks.ClusterContext, rmLis
 
 // checkRouteMonitorStatus validates RouteMonitor and ClusterUrlMonitor CRs
 func checkRouteMonitorStatus(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
-	cc.CurrentCheck = "rmo_routemonitor_status"
+	cc.SetCheck("rmo_routemonitor_status")
 
 	r := checks.Result{
 		Check:    "rmo_routemonitor_status",
@@ -359,7 +359,7 @@ func checkRouteMonitorStatus(ctx context.Context, cc *checks.ClusterContext, rmL
 
 // checkSREProbeExpectations verifies SRE probe-missing PrometheusRules
 func checkSREProbeExpectations(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
-	cc.CurrentCheck = "rmo_sre_probe_expectations"
+	cc.SetCheck("rmo_sre_probe_expectations")
 
 	r := checks.Result{
 		Check:    "rmo_sre_probe_expectations",
@@ -412,7 +412,7 @@ func checkSREProbeExpectations(ctx context.Context, cc *checks.ClusterContext, r
 
 // checkProbeHealth verifies blackbox probe_success metrics
 func checkProbeHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
-	cc.CurrentCheck = "rmo_probe_health"
+	cc.SetCheck("rmo_probe_health")
 
 	r := checks.Result{
 		Check:    "rmo_probe_health",
@@ -500,7 +500,7 @@ func checkProbeHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cu
 
 // checkServiceMonitorHealth verifies ServiceMonitors referenced by monitors exist
 func checkServiceMonitorHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
-	cc.CurrentCheck = "rmo_servicemonitor_health"
+	cc.SetCheck("rmo_servicemonitor_health")
 
 	r := checks.Result{
 		Check:    "rmo_servicemonitor_health",
@@ -586,7 +586,7 @@ func checkServiceMonitorHealth(ctx context.Context, cc *checks.ClusterContext, r
 
 // checkPrometheusRuleHealth verifies PrometheusRules referenced by monitors
 func checkPrometheusRuleHealth(ctx context.Context, cc *checks.ClusterContext, rmList, cumList *unstructured.UnstructuredList) {
-	cc.CurrentCheck = "rmo_prometheusrule_health"
+	cc.SetCheck("rmo_prometheusrule_health")
 
 	r := checks.Result{
 		Check:    "rmo_prometheusrule_health",
@@ -668,7 +668,7 @@ func checkPrometheusRuleHealth(ctx context.Context, cc *checks.ClusterContext, r
 
 // checkOperatorMetrics queries RMO-specific Prometheus metrics
 func checkOperatorMetrics(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_operator_metrics"
+	cc.SetCheck("rmo_operator_metrics")
 	log := logging.WithCheck("rmo_operator_metrics")
 
 	r := checks.Result{
@@ -750,7 +750,7 @@ func checkOperatorMetrics(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkConfig validates the RMO ConfigMap
 func checkConfig(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_config"
+	cc.SetCheck("rmo_config")
 
 	r := checks.Result{
 		Check:    "rmo_config",
@@ -795,7 +795,7 @@ func checkConfig(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkHCPCoverage checks HCP RouteMonitor coverage on management clusters
 func checkHCPCoverage(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_hcp_coverage"
+	cc.SetCheck("rmo_hcp_coverage")
 
 	r := checks.Result{
 		Check:    "rmo_hcp_coverage",
@@ -910,7 +910,7 @@ func checkHCPCoverage(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkHCPProbeCoverage queries RHOBS Prometheus for actual HCP probe health (MC only)
 func checkHCPProbeCoverage(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_hcp_probe_coverage"
+	cc.SetCheck("rmo_hcp_probe_coverage")
 
 	r := checks.Result{
 		Check:    "rmo_hcp_probe_coverage",
@@ -976,7 +976,7 @@ func checkHCPProbeCoverage(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkHCPState queries RHOBS for HCP state breakdown (MC only, informational)
 func checkHCPState(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_hcp_state"
+	cc.SetCheck("rmo_hcp_state")
 
 	r := checks.Result{
 		Check:    "rmo_hcp_state",
@@ -1024,7 +1024,7 @@ func checkHCPState(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkRHOBSAPIHealth queries RHOBS for per-operation API request metrics (MC only)
 func checkRHOBSAPIHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_rhobs_api_health"
+	cc.SetCheck("rmo_rhobs_api_health")
 
 	r := checks.Result{
 		Check:    "rmo_rhobs_api_health",
@@ -1154,7 +1154,7 @@ func checkRHOBSAPIHealth(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkRHOBSIntegration verifies RHOBS synthetics config and OIDC token health (all cluster types)
 func checkRHOBSIntegration(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_rhobs_integration"
+	cc.SetCheck("rmo_rhobs_integration")
 
 	r := checks.Result{
 		Check:    "rmo_rhobs_integration",
@@ -1251,7 +1251,7 @@ func checkRHOBSIntegration(ctx context.Context, cc *checks.ClusterContext) {
 // checkDualInstallation detects both OLM and PKO installed
 // checkLimitedSupportDisagreement detects when HCP labels and Prometheus metrics disagree
 func checkLimitedSupportDisagreement(ctx context.Context, cc *checks.ClusterContext) {
-	cc.CurrentCheck = "rmo_limited_support_disagreement"
+	cc.SetCheck("rmo_limited_support_disagreement")
 	log := logging.WithCheck("rmo_limited_support_disagreement")
 
 	r := checks.Result{
