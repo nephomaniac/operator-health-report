@@ -2016,7 +2016,7 @@
                         '</div>' +
                     '</div>' +
                     (totalApiErrors > 0 ?
-                    '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);cursor:help;" ' + statInfo('Script/API Errors', 'Errors encountered during health check execution — API timeouts, RBAC failures, or script errors that prevented a check from completing. These are distinct from cluster health issues; they indicate problems with the health check tool\\'s ability to query the cluster. The affected operator and error count are shown below.') + '>' +
+                    '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);cursor:help;" ' + statInfo('Script/API Errors', 'Errors encountered during health check execution — API timeouts, RBAC failures, or script errors that prevented a check from completing. These are distinct from cluster health issues; they indicate problems with the health check tooling ability to query the cluster. The affected operator and error count are shown below.') + '>' +
                         '<div class="stat-label">Script/API Errors</div>' +
                         '<div class="stat-number" style="color: #dc3545;">' + totalApiErrors + '</div>' +
                         '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS') + ': ' + n).join(', ') + '</div>' +
