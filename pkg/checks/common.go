@@ -815,11 +815,11 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 			}
 			available, regErr := CheckImageInRegistry(image)
 			if regErr != nil {
-				check["registry_check"] = fmt.Sprintf("error: %v", regErr)
+				check["registry_api_result"] = fmt.Sprintf("error: %v", regErr)
 			} else if available {
-				check["registry_check"] = "image exists in registry — pull failure may be auth/network issue"
+				check["registry_api_result"] = "image exists (verified via registry API) — pull failure is likely a cluster auth or network issue"
 			} else {
-				check["registry_check"] = "image NOT found in registry — tag or repo may not exist"
+				check["registry_api_result"] = "image NOT found (verified via registry API) — tag or repo does not exist"
 			}
 			check["available"] = available
 			imageChecks = append(imageChecks, check)
@@ -838,7 +838,7 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 			if len(img) > 40 {
 				img = img[:37] + "..."
 			}
-			regResult := ic["registry_check"].(string)
+			regResult := ic["registry_api_result"].(string)
 			imageSummaries = append(imageSummaries, fmt.Sprintf("%s (%s)", img, regResult))
 		}
 		r.Message = fmt.Sprintf("%d pod(s) with image pull errors in %s — %s",
@@ -889,9 +889,9 @@ func CheckImageInRegistry(imageRef string) (bool, error) {
 			}
 			return false, fmt.Errorf("tag not found in public repo")
 		case 401, 403:
-			return false, fmt.Errorf("private repo (HTTP %d) — requires pull secret auth, verify cluster pull secret has access to %s", resp.StatusCode, repo)
+			return false, fmt.Errorf("private repo (Quay API returned HTTP %d) — anonymous access denied, cluster pull secret required. Verify pull secret has access to quay.io/%s", resp.StatusCode, repo)
 		case 404:
-			return false, fmt.Errorf("repo or tag not found (HTTP 404) — image may not exist in quay.io/%s", repo)
+			return false, fmt.Errorf("repo or tag not found (Quay API returned HTTP 404) — image may not exist at quay.io/%s", repo)
 		default:
 			return false, fmt.Errorf("quay API returned HTTP %d", resp.StatusCode)
 		}
@@ -919,9 +919,9 @@ func CheckImageInRegistry(imageRef string) (bool, error) {
 	case 200:
 		return true, nil
 	case 401, 403:
-		return false, fmt.Errorf("private repo (HTTP %d) — requires pull secret auth", resp.StatusCode)
+		return false, fmt.Errorf("private repo (registry returned HTTP %d) — anonymous access denied, cluster pull secret required", resp.StatusCode)
 	case 404:
-		return false, fmt.Errorf("image not found (HTTP 404)")
+		return false, fmt.Errorf("image not found (registry returned HTTP 404)")
 	default:
 		return false, fmt.Errorf("registry returned HTTP %d", resp.StatusCode)
 	}

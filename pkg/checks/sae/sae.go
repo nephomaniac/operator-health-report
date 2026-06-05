@@ -134,11 +134,11 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
 			check := map[string]any{"image": img}
 			available, regErr := checks.CheckImageInRegistry(img)
 			if regErr != nil {
-				check["registry_check"] = fmt.Sprintf("error: %v", regErr)
+				check["registry_api_result"] = fmt.Sprintf("error: %v", regErr)
 			} else if available {
-				check["registry_check"] = "image exists in registry — pull failure may be auth/network issue"
+				check["registry_api_result"] = "image exists (verified via registry API) — pull failure is likely a cluster auth or network issue"
 			} else {
-				check["registry_check"] = "image NOT found in registry — tag or repo may not exist"
+				check["registry_api_result"] = "image NOT found (verified via registry API) — tag or repo does not exist"
 			}
 			check["available"] = available
 			imageChecks = append(imageChecks, check)
@@ -151,7 +151,7 @@ func checkDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) {
 		r.Status = checks.StatusFail
 		regNote := ""
 		if imageChecks, ok := r.Details["image_registry_verification"].([]map[string]any); ok && len(imageChecks) > 0 {
-			regNote = " — " + imageChecks[0]["registry_check"].(string)
+			regNote = " — " + imageChecks[0]["registry_api_result"].(string)
 		}
 		r.Message = fmt.Sprintf("audit-exporter %d pod(s) with ImagePullBackOff (%d/%d ready)%s", imagePullErrors, ready, desired, regNote)
 	case crashlooping > 0:
