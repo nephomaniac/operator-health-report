@@ -316,6 +316,15 @@ var (
 		SkipCommonChecks: true,
 	}
 
+	SAEConfig = OperatorConfig{
+		Name:             "splunk-audit-exporter",
+		ShortName:        "sae",
+		Namespace:        "openshift-security",
+		Deployment:       "",
+		OLMSaas:          "saas-sae.yaml",
+		SkipCommonChecks: true,
+	}
+
 	AllOperators = map[string]OperatorConfig{
 		"camo":  CAMOConfig,
 		"rmo":   RMOConfig,
@@ -324,5 +333,6 @@ var (
 		"rhobs": RHOBSConfig,
 		"rlr":   RLRConfig,
 		"pdo":   PDOConfig,
+		"sae":   SAEConfig,
 	}
 )

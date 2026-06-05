@@ -31,6 +31,7 @@ import (
 	_ "github.com/openshift/operator-health-report/pkg/checks/ome"
 	_ "github.com/openshift/operator-health-report/pkg/checks/pdo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rhobs"
+	_ "github.com/openshift/operator-health-report/pkg/checks/sae"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rlr"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rmo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/sfo"
