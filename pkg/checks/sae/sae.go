@@ -35,11 +35,15 @@ func (c *SAEChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	checkDaemonSetHealth(ctx, cc)
 	checkAuditPolicy(ctx, cc)
 	checkTLSCerts(ctx, cc)
+	checkServiceMonitor(ctx, cc)
 	checkEventFlow(ctx, cc)
 	checkFilterErrors(ctx, cc)
 	checkQueueDepth(ctx, cc)
 	checkDedupCache(ctx, cc)
 	checkFilterDecisions(ctx, cc)
+	checkCloudWatchHealth(ctx, cc)
+	checkPerPodHealth(ctx, cc)
+	checkThroughputTrends(ctx, cc)
 	checkLogErrors(ctx, cc)
 	checkResourceTrends(ctx, cc)
 }
@@ -477,6 +481,280 @@ func checkFilterDecisions(ctx context.Context, cc *checks.ClusterContext) {
 		r.Message = "No events being processed — SAE may not be running or KAS audit logging is disabled"
 	}
 
+	cc.AddResult(r)
+}
+
+func checkServiceMonitor(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("sae_servicemonitor")
+
+	r := checks.Result{
+		Check:    "sae_servicemonitor",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     securityNS,
+			"description":   "Validates the audit-exporter ServiceMonitor exists, which tells Prometheus how to scrape SAE metrics on port 9090. Without it, all SAE health metrics are invisible to the monitoring stack.",
+			"pass_criteria": "PASS: ServiceMonitor found. WARN: Not found — SAE metrics not being scraped.",
+		},
+	}
+
+	smGVR := checks.ServiceMonitorGVR()
+	_, err := cc.Client.GetResource(ctx, smGVR, securityNS, "audit-exporter", true)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusWarning
+		r.Message = "audit-exporter ServiceMonitor not found — SAE metrics may not be scraped by Prometheus"
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = "audit-exporter ServiceMonitor present"
+	}
+	cc.AddResult(r)
+}
+
+func checkCloudWatchHealth(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("sae_cloudwatch")
+
+	r := checks.Result{
+		Check:    "sae_cloudwatch",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     securityNS,
+			"description":   "Checks CloudWatch integration health for HCP audit log forwarding. On MCs, SAE may forward filtered audit logs to CloudWatch in addition to Splunk. Checks enabled status, configuration validity, and delivery errors.",
+			"pass_criteria": "PASS: CloudWatch disabled (normal for non-HCP) or enabled with no errors. WARN: CloudWatch errors or invalid configuration. SKIP: Metrics unavailable.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Check if CloudWatch is enabled
+	enabledBody, _ := cc.Client.QueryMetrics(ctx,
+		fmt.Sprintf(`splunkforwarder_audit_filter_cloudwatch_enabled{namespace="%s"}`, securityNS))
+
+	if !thanos.HasResults(enabledBody) {
+		r.Status = checks.StatusPass
+		r.Message = "CloudWatch integration not configured (normal for non-HCP clusters)"
+		cc.AddResult(r)
+		return
+	}
+
+	enabled, _ := thanos.InstantFloat(enabledBody)
+	r.Details["cloudwatch_enabled"] = enabled == 1
+
+	if enabled != 1 {
+		r.Status = checks.StatusPass
+		r.Message = "CloudWatch integration disabled"
+		cc.AddResult(r)
+		return
+	}
+
+	// Check configuration validity
+	configBody, _ := cc.Client.QueryMetrics(ctx,
+		fmt.Sprintf(`splunkforwarder_audit_filter_cloudwatch_configuration_invalid{namespace="%s"}`, securityNS))
+	if thanos.HasResults(configBody) {
+		if val, ok := thanos.InstantFloat(configBody); ok && val == 1 {
+			r.Status = checks.StatusFail
+			r.Severity = checks.SeverityCritical
+			r.Message = "CloudWatch configuration invalid — check AWS credentials and role ARN"
+			r.Details["config_invalid"] = true
+			cc.AddResult(r)
+			return
+		}
+	}
+
+	// Check delivery errors
+	errBody, _ := cc.Client.QueryMetrics(ctx,
+		fmt.Sprintf(`sum(rate(splunkforwarder_audit_filter_cloudwatch_errors_total{namespace="%s"}[5m]))`, securityNS))
+	cwErrRate := 0.0
+	if thanos.HasResults(errBody) {
+		if val, ok := thanos.InstantFloat(errBody); ok {
+			cwErrRate = val
+		}
+	}
+
+	// Check PutLogEvents errors by error code
+	putErrBody, _ := cc.Client.QueryMetrics(ctx,
+		fmt.Sprintf(`sum by (error_code) (rate(splunkforwarder_audit_filter_cloudwatch_put_log_errors_total{namespace="%s"}[5m]))`, securityNS))
+	var putErrors []string
+	if thanos.HasResults(putErrBody) {
+		resp, _ := thanos.Parse(putErrBody)
+		for _, result := range resp.Data.Result {
+			val, ok := thanos.ToFloat(result)
+			if ok && val > 0 {
+				code := result.Metric["error_code"]
+				putErrors = append(putErrors, fmt.Sprintf("%s: %.4f/s", code, val))
+			}
+		}
+	}
+
+	r.Details["cloudwatch_error_rate"] = thanos.Round(cwErrRate, 4)
+	if len(putErrors) > 0 {
+		r.Details["put_log_errors"] = putErrors
+	}
+
+	// Check processed events
+	processedBody, _ := cc.Client.QueryMetrics(ctx,
+		fmt.Sprintf(`sum(rate(splunkforwarder_audit_filter_cloudwatch_events_processed_total{namespace="%s"}[5m]))`, securityNS))
+	if thanos.HasResults(processedBody) {
+		if val, ok := thanos.InstantFloat(processedBody); ok {
+			r.Details["cloudwatch_events_per_sec"] = thanos.Round(val, 2)
+		}
+	}
+
+	switch {
+	case len(putErrors) > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("CloudWatch enabled with PutLogEvents errors: %s", strings.Join(putErrors, ", "))
+	case cwErrRate > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("CloudWatch enabled with %.4f errors/sec", cwErrRate)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = "CloudWatch enabled and healthy"
+	}
+	cc.AddResult(r)
+}
+
+func checkPerPodHealth(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("sae_per_pod_health")
+
+	r := checks.Result{
+		Check:    "sae_per_pod_health",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     securityNS,
+			"description":   "Checks per-pod event processing rates across master nodes. Each SAE pod independently reads from its local KAS audit log file. A pod with 0 events while others are processing indicates a node-specific issue (file access, inotify, or audit log not being written).",
+			"pass_criteria": "PASS: All pods processing events. WARN: One or more pods at 0 events. SKIP: Metrics unavailable.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	body, err := cc.Client.QueryMetrics(ctx,
+		fmt.Sprintf(`sum by (pod) (rate(splunkforwarder_audit_filter_events_total{namespace="%s"}[5m]))`, securityNS))
+
+	if err != nil || !thanos.HasResults(body) {
+		r.Status = checks.StatusWarning
+		r.Message = "Per-pod event metrics not found — SAE may not be running"
+		cc.AddResult(r)
+		return
+	}
+
+	resp, _ := thanos.Parse(body)
+	totalPods := len(resp.Data.Result)
+	activePods := 0
+	silentPods := []string{}
+
+	for _, result := range resp.Data.Result {
+		val, ok := thanos.ToFloat(result)
+		pod := result.Metric["pod"]
+		if ok && val > 0 {
+			activePods++
+		} else if pod != "" {
+			silentPods = append(silentPods, pod)
+		}
+	}
+
+	r.Details["total_pods"] = totalPods
+	r.Details["active_pods"] = activePods
+	r.Details["silent_pods"] = silentPods
+
+	switch {
+	case totalPods == 0:
+		r.Status = checks.StatusWarning
+		r.Message = "No per-pod event metrics found"
+	case len(silentPods) > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d/%d pod(s) not processing events: %s", len(silentPods), totalPods, strings.Join(silentPods, ", "))
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d pod(s) actively processing events", activePods)
+	}
+	cc.AddResult(r)
+}
+
+func checkThroughputTrends(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("sae_throughput_trends")
+
+	r := checks.Result{
+		Check:    "sae_throughput_trends",
+		Severity: checks.SeverityInfo,
+		Details: map[string]any{
+			"namespace":      securityNS,
+			"description":    "7-day timeseries of SAE event throughput: total events read, events forwarded to Splunk, and events dropped by filters. Shows filtering effectiveness and volume trends over time.",
+			"pass_criteria":  "INFO: Timeseries data collected. WARN: No data. Charts show in HTML report.",
+			"lookback_hours": 168.0,
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	now := time.Now().Unix()
+	start := now - 604800
+	step := 1800
+	seriesCollected := 0
+
+	// Total events read
+	totalQuery := fmt.Sprintf(`sum(rate(splunkforwarder_audit_filter_events_total{namespace="%s"}[5m]))`, securityNS)
+	if totalData, err := cc.Client.QueryMetricsRange(ctx, totalQuery, start, now, step); err == nil {
+		if points, _ := thanos.Timeseries(totalData); len(points) > 0 {
+			r.Details["total_events_timeseries"] = thanos.PointsToJSON(points)
+			r.Details["total_events_peak"] = thanos.Round(thanos.Peak(points), 1)
+			seriesCollected++
+		}
+	}
+
+	// Events forwarded
+	fwdQuery := fmt.Sprintf(`sum(rate(splunkforwarder_audit_filter_events_processed_total{namespace="%s",decision="forward"}[5m]))`, securityNS)
+	if fwdData, err := cc.Client.QueryMetricsRange(ctx, fwdQuery, start, now, step); err == nil {
+		if points, _ := thanos.Timeseries(fwdData); len(points) > 0 {
+			r.Details["forwarded_events_timeseries"] = thanos.PointsToJSON(points)
+			r.Details["forwarded_events_peak"] = thanos.Round(thanos.Peak(points), 1)
+			seriesCollected++
+		}
+	}
+
+	// Events dropped
+	dropQuery := fmt.Sprintf(`sum(rate(splunkforwarder_audit_filter_events_processed_total{namespace="%s",decision="drop"}[5m]))`, securityNS)
+	if dropData, err := cc.Client.QueryMetricsRange(ctx, dropQuery, start, now, step); err == nil {
+		if points, _ := thanos.Timeseries(dropData); len(points) > 0 {
+			r.Details["dropped_events_timeseries"] = thanos.PointsToJSON(points)
+			r.Details["dropped_events_peak"] = thanos.Round(thanos.Peak(points), 1)
+			seriesCollected++
+		}
+	}
+
+	// Errors over time
+	errQuery := fmt.Sprintf(`sum(rate(splunkforwarder_audit_filter_errors_total{namespace="%s"}[5m]))`, securityNS)
+	if errData, err := cc.Client.QueryMetricsRange(ctx, errQuery, start, now, step); err == nil {
+		if points, _ := thanos.Timeseries(errData); len(points) > 0 {
+			errorPoints := thanos.FilterNonZero(points)
+			r.Details["error_events_timeseries"] = thanos.PointsToJSON(points)
+			r.Details["error_events_count"] = len(errorPoints)
+			seriesCollected++
+		}
+	}
+
+	r.Details["series_collected"] = seriesCollected
+
+	if seriesCollected == 0 {
+		r.Status = checks.StatusWarning
+		r.Message = "No SAE throughput metrics found — SAE may not be running"
+	} else {
+		r.Status = checks.StatusInfo
+		r.Message = fmt.Sprintf("Collected %d throughput timeseries for trending", seriesCollected)
+	}
 	cc.AddResult(r)
 }
 

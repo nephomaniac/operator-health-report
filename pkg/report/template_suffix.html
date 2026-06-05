@@ -74,6 +74,14 @@
                             if (chartType === 'rlr-cpu') createRLRTimeseriesChart(el.id, chartData.cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
                             if (chartType === 'sae-memory') createRLRTimeseriesChart(el.id, chartData.memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
                             if (chartType === 'sae-cpu') createRLRTimeseriesChart(el.id, chartData.cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
+                            if (chartType === 'sae-throughput') {
+                                const datasets = [];
+                                if (chartData.total_events_timeseries) datasets.push({label:'Total Read',data:chartData.total_events_timeseries.map(p=>({x:p[0]*1000,y:parseFloat(p[1])})),borderColor:'#6c8cff',backgroundColor:'transparent',tension:0.3,pointRadius:0,borderWidth:1.5});
+                                if (chartData.forwarded_events_timeseries) datasets.push({label:'Forwarded',data:chartData.forwarded_events_timeseries.map(p=>({x:p[0]*1000,y:parseFloat(p[1])})),borderColor:'#2dd4a0',backgroundColor:'transparent',tension:0.3,pointRadius:0,borderWidth:1.5});
+                                if (chartData.dropped_events_timeseries) datasets.push({label:'Dropped',data:chartData.dropped_events_timeseries.map(p=>({x:p[0]*1000,y:parseFloat(p[1])})),borderColor:'#f5c542',backgroundColor:'transparent',tension:0.3,pointRadius:0,borderWidth:1.5});
+                                if (chartData.error_events_timeseries) datasets.push({label:'Errors',data:chartData.error_events_timeseries.map(p=>({x:p[0]*1000,y:parseFloat(p[1])})),borderColor:'#f25c5c',backgroundColor:'transparent',tension:0.3,pointRadius:0,borderWidth:1.5});
+                                if (datasets.length > 0) new Chart(document.getElementById(el.id),{type:'line',data:{datasets},options:{responsive:true,maintainAspectRatio:true,plugins:{legend:{display:true,position:'top'},tooltip:{mode:'index',intersect:false,callbacks:{title:ctx=>new Date(ctx[0].parsed.x).toLocaleString(),label:ctx=>ctx.dataset.label+': '+ctx.parsed.y.toFixed(1)+'/s'}}},scales:{x:{type:'time',time:{unit:'hour',displayFormats:{hour:'MMM d, HH:mm'}},title:{display:true,text:'Time'}},y:{beginAtZero:true,title:{display:true,text:'Events/sec'}}}}});
+                            }
                             if (chartType === 'sfr-memory') createRLRTimeseriesChart(el.id, chartData.forwarder_memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
                             if (chartType === 'sfr-cpu') createRLRTimeseriesChart(el.id, chartData.forwarder_cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
                         }, 50);
@@ -380,6 +388,10 @@
                 'sae_queue_depth': 'Queue Depth',
                 'sae_dedup_cache': 'Dedup Cache',
                 'sae_filter_decisions': 'Filter Stats',
+                'sae_servicemonitor': 'ServiceMonitor',
+                'sae_cloudwatch': 'CloudWatch',
+                'sae_per_pod_health': 'Per-Pod Health',
+                'sae_throughput_trends': 'Throughput',
                 'sae_log_errors': 'Log Errors',
                 'sae_resource_trends': 'AE Resources',
                 'sfo_forwarder_metrics': 'SFO Metrics',
@@ -1529,7 +1541,29 @@
                 }
             }
 
-            // SAE-specific charts (audit-exporter resource trending)
+            // SAE-specific charts
+            const saeThroughputCheck = (cluster.health_checks || []).find(c => c.check === 'sae_throughput_trends');
+            if (saeThroughputCheck && saeThroughputCheck.details && (saeThroughputCheck.details.series_collected || 0) > 0) {
+                const saeTp = saeThroughputCheck.details;
+                const saeTpJson = JSON.stringify(saeTp).replace(/'/g, "&#39;");
+                const tpDiv = document.createElement('div');
+                tpDiv.className = 'chart-wrapper';
+                tpDiv.innerHTML = `
+                    <h3>Audit Exporter — Event Throughput (7d)</h3>
+                    <canvas id="sae-throughput-chart-${clusterIdx}" class="chart-canvas"
+                        data-pending-chart="sae-throughput"
+                        data-chart-data='${saeTpJson}'
+                    ></canvas>
+                    <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                        <strong>Total Read:</strong> ${saeTp.total_events_peak || 0}/s peak &nbsp;|&nbsp;
+                        <strong>Forwarded:</strong> ${saeTp.forwarded_events_peak || 0}/s peak &nbsp;|&nbsp;
+                        <strong>Dropped:</strong> ${saeTp.dropped_events_peak || 0}/s peak
+                        &nbsp;|&nbsp; ${saeTp.error_events_count || 0} error data points
+                    </div>
+                `;
+                chartsDiv.appendChild(tpDiv);
+            }
+
             const saeTrendsCheck = (cluster.health_checks || []).find(c => c.check === 'sae_resource_trends');
             if (saeTrendsCheck && saeTrendsCheck.details) {
                 const sae = saeTrendsCheck.details;

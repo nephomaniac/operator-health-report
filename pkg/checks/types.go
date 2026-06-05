@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/openshift/operator-health-report/pkg/kube"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Status represents the outcome of a health check
@@ -59,6 +60,13 @@ type OperatorConfig struct {
 	PKOSaas          string `json:"pko_saas"`
 	OLMSaas          string `json:"olm_saas"`
 	SkipCommonChecks bool   `json:"skip_common_checks,omitempty"`
+}
+
+// ServiceMonitorGVR returns the GVR for monitoring.coreos.com/v1 ServiceMonitors
+func ServiceMonitorGVR() schema.GroupVersionResource {
+	return schema.GroupVersionResource{
+		Group: "monitoring.coreos.com", Version: "v1", Resource: "servicemonitors",
+	}
 }
 
 // ClusterMetadata holds OCM cluster properties for display in reports
