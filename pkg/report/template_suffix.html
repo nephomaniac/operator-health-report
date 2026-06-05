@@ -2650,13 +2650,15 @@
                 if (target) checkedCounts[target] = (checkedCounts[target] || 0) + 1;
             });
 
-            // Determine node health status from check results
+            // Determine node health status from check results (using effective status)
             const nodeHealth = {};
             opData.forEach(c => {
                 const vc = (c.health_checks || []).find(ch => ch.check === 'version_verification');
                 const target = vc?.details?.saas_target || '';
                 if (!target) return;
-                const status = c.health_summary?.overall_status || 'UNKNOWN';
+                const realFail = hasRealFail(c);
+                const realWarn = hasRealWarn(c);
+                const status = realFail ? 'CRITICAL' : (realWarn ? 'WARNING' : 'HEALTHY');
                 if (!nodeHealth[target] || status === 'CRITICAL') nodeHealth[target] = status;
                 else if (status === 'WARNING' && nodeHealth[target] === 'HEALTHY') nodeHealth[target] = status;
             });
