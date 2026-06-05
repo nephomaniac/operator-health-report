@@ -2460,20 +2460,23 @@
                 const shortName = op.replace(/-operator$/, '').replace(/configure-alertmanager/, 'CAMO').replace(/route-monitor/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS');
 
                 // Count statuses for badge — uses effective status to exclude API/script errors
-                let okCount = 0, warnCount = 0, critCount = 0;
+                let okCount = 0, warnCount = 0, critCount = 0, errCount = 0;
                 opData.forEach(c => {
                     const hasFail = hasRealFail(c);
                     const hasWarn = hasRealWarn(c);
+                    const hasErr = hasScriptError(c);
                     if (hasFail) critCount++;
-                    if (hasWarn) warnCount++;
-                    if (!hasFail && !hasWarn) okCount++;
+                    else if (hasWarn) warnCount++;
+                    else if (hasErr) errCount++;
+                    else okCount++;
                 });
 
                 // Tab button — show all 3 counts as colored numbers
                 const tab = document.createElement('button');
                 tab.className = `operator-tab${idx === 0 ? ' active' : ''}`;
                 tab.dataset.operator = op;
-                const badgeHTML = `<span style="color:#5eecc0;">${okCount}</span> / <span style="color:#fdd76b;">${warnCount}</span> / <span style="color:#ff8a8a;">${critCount}</span>`;
+                const badgeHTML = `<span style="color:#5eecc0;">${okCount}</span> / <span style="color:#fdd76b;">${warnCount}</span> / <span style="color:#ff8a8a;">${critCount}</span>` +
+                    (errCount > 0 ? ` / <span style="color:#ffa500;">${errCount}</span>` : '');
                 const desc = operatorDescriptions[op] || '';
                 const infoIcon = desc ? ` <span onclick="event.stopPropagation();showOperatorInfo('${shortName}','${desc.replace(/'/g, "\\'")}')" style="display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;background:#1a3a8a;color:#ffffff;font-size:0.7em;cursor:help;margin-left:4px;vertical-align:middle;font-weight:900;text-shadow:0 0 2px rgba(255,255,255,0.5);" title="Click for operator info">?</span>` : '';
                 tab.innerHTML = `${shortName}${infoIcon} <span class="tab-badge" style="background:rgba(255,255,255,0.08);">${badgeHTML}</span>`;
