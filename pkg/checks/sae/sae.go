@@ -252,8 +252,8 @@ func checkEventFlow(ctx context.Context, cc *checks.ClusterContext) {
 	cc.RecordError("Query SAE event rate", err)
 
 	if err != nil || !thanos.HasResults(body) {
-		r.Status = checks.StatusSkip
-		r.Message = "SAE event metrics not found — pods may not be running"
+		r.Status = checks.StatusWarning
+		r.Message = "SAE event metrics not found — pods may not be running or metrics endpoint is down"
 		cc.AddResult(r)
 		return
 	}
@@ -343,15 +343,15 @@ func checkQueueDepth(ctx context.Context, cc *checks.ClusterContext) {
 		fmt.Sprintf(`max(splunkforwarder_audit_filter_queue_depth{namespace="%s"})`, securityNS))
 
 	if err != nil || !thanos.HasResults(body) {
-		r.Status = checks.StatusSkip
-		r.Message = "Queue depth metrics not found"
+		r.Status = checks.StatusWarning
+		r.Message = "Queue depth metrics not found — SAE may not be running"
 		cc.AddResult(r)
 		return
 	}
 
 	depth, ok := thanos.InstantFloat(body)
 	if !ok {
-		r.Status = checks.StatusSkip
+		r.Status = checks.StatusWarning
 		r.Message = "Could not parse queue depth"
 		cc.AddResult(r)
 		return
@@ -448,8 +448,8 @@ func checkFilterDecisions(ctx context.Context, cc *checks.ClusterContext) {
 	dropRate, dropOK := thanos.InstantFloat(dropBody)
 
 	if !fwdOK && !dropOK {
-		r.Status = checks.StatusSkip
-		r.Message = "Filter decision metrics not found"
+		r.Status = checks.StatusWarning
+		r.Message = "Filter decision metrics not found — SAE may not be processing events"
 		cc.AddResult(r)
 		return
 	}
@@ -506,8 +506,8 @@ func checkLogErrors(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if err != nil || pods == nil || len(pods.Items) == 0 {
-		r.Status = checks.StatusSkip
-		r.Message = "No audit-exporter pods found for log analysis"
+		r.Status = checks.StatusWarning
+		r.Message = "No audit-exporter pods found — cannot analyze logs"
 		cc.AddResult(r)
 		return
 	}
@@ -524,8 +524,8 @@ func checkLogErrors(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	if logOutput == "" {
-		r.Status = checks.StatusSkip
-		r.Message = "Could not retrieve audit-exporter logs — pods may not be running"
+		r.Status = checks.StatusWarning
+		r.Message = "Could not retrieve logs — pods may not be running"
 		cc.AddResult(r)
 		return
 	}
