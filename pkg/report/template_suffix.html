@@ -2176,16 +2176,16 @@
                 elevCard.style.cssText = 'border-color:' + borderColor + ';background:' + bg + ';cursor:help;';
                 elevCard.title = 'Click for details';
                 elevCard.onclick = () => showOperatorInfo('Elevated API Calls',
-                    'All operations are strictly READ-ONLY — no cluster state is ever modified.\\n\\n' +
+                    'All operations are strictly READ-ONLY — no cluster state is ever modified.\n\n' +
                     'Elevated calls use backplane-cluster-admin impersonation to read protected resources like Secrets and custom resources (CRDs). ' +
-                    'Non-elevated calls use port-forward for Prometheus metrics and standard k8s API for pods, deployments, and namespaces.\\n\\n' +
-                    'DEFAULT BEHAVIOR:\\n' +
-                    '• Integration/Staging: Elevation enabled (use --reason JIRA-TICKET)\\n' +
-                    '• Production: Elevation automatically disabled\\n\\n' +
-                    'FORCE DISABLE: --no-elevate (simulates production restrictions in staging)\\n' +
-                    'FORCE ENABLE: --reason JIRA-TICKET (provides elevation justification)\\n\\n' +
+                    'Non-elevated calls use port-forward for Prometheus metrics and standard k8s API for pods, deployments, and namespaces.\n\n' +
+                    'DEFAULT BEHAVIOR:\n' +
+                    '• Integration/Staging: Elevation enabled (use --reason JIRA-TICKET)\n' +
+                    '• Production: Elevation automatically disabled\n\n' +
+                    'FORCE DISABLE: --no-elevate (simulates production restrictions in staging)\n' +
+                    'FORCE ENABLE: --reason JIRA-TICKET (provides elevation justification)\n\n' +
                     'When elevation is disabled, metrics queries fall back to port-forward (no elevation needed). ' +
-                    'Secret and CRD checks will SKIP.\\n\\n' +
+                    'Secret and CRD checks will SKIP.\n\n' +
                     'Expand any cluster detail panel to see the per-operation audit under ELEVATED API CALLS.');
                 elevCard.innerHTML =
                     '<div class="stat-label">Elevated API Calls</div>' +
