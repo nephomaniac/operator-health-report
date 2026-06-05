@@ -2417,6 +2417,12 @@
                 'pagerduty-operator': 'Manages PagerDuty service integrations on hive clusters — creates PD services for each ClusterDeployment and syncs integration keys via SyncSets.',
             };
 
+            // Add "Operators" label before tabs
+            const tabLabel = document.createElement('div');
+            tabLabel.className = 'operator-tabs-label';
+            tabLabel.innerHTML = '&#9654; Operators';
+            tabsContainer.appendChild(tabLabel);
+
             // Build tabs and tab content for each operator (always show tabs)
             operators.forEach((op, idx) => {
                 const opData = sortClusters(operatorGroups[op]);
