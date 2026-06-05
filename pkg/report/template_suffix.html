@@ -72,6 +72,10 @@
                             if (chartType === 'rlr-write-pods') createRLRMultiSeriesChart(el.id, chartData.write_ratio_timeseries_by_pod, 'Write Ratio', 1, [{y: 0.99, label: 'SLO (0.99)', color: '#dc3545'}]);
                             if (chartType === 'rlr-memory') createRLRTimeseriesChart(el.id, chartData.memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
                             if (chartType === 'rlr-cpu') createRLRTimeseriesChart(el.id, chartData.cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
+                            if (chartType === 'sae-memory') createRLRTimeseriesChart(el.id, chartData.memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
+                            if (chartType === 'sae-cpu') createRLRTimeseriesChart(el.id, chartData.cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
+                            if (chartType === 'sfr-memory') createRLRTimeseriesChart(el.id, chartData.forwarder_memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
+                            if (chartType === 'sfr-cpu') createRLRTimeseriesChart(el.id, chartData.forwarder_cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
                         }, 50);
                     });
                 }
@@ -1512,6 +1516,89 @@
                         <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
                             <strong>Peak:</strong> ${rlr.peak_cpu_millicores || 0}m &nbsp;|&nbsp;
                             <strong>Trend:</strong> ${rlr.cpu_increase_percent || 0}% change over 7d
+                        </div>
+                    `;
+                    chartsDiv.appendChild(cpuDiv);
+                }
+            }
+
+            // SAE-specific charts (audit-exporter resource trending)
+            const saeTrendsCheck = (cluster.health_checks || []).find(c => c.check === 'sae_resource_trends');
+            if (saeTrendsCheck && saeTrendsCheck.details) {
+                const sae = saeTrendsCheck.details;
+                const saeJson = JSON.stringify(sae).replace(/'/g, "&#39;");
+
+                if (sae.memory_timeseries && sae.memory_timeseries.length > 0) {
+                    const memDiv = document.createElement('div');
+                    memDiv.className = 'chart-wrapper';
+                    memDiv.innerHTML = `
+                        <h3>Audit Exporter — Memory Usage (7d)</h3>
+                        <canvas id="sae-mem-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="sae-memory"
+                            data-chart-data='${saeJson}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Peak:</strong> ${sae.peak_memory_mb || 0} MB &nbsp;|&nbsp;
+                            <strong>Trend:</strong> ${sae.memory_trend || 'unknown'} (${sae.memory_increase_percent || 0}%)
+                            &nbsp;|&nbsp; 0 MB = pods not running
+                        </div>
+                    `;
+                    chartsDiv.appendChild(memDiv);
+                }
+
+                if (sae.cpu_timeseries && sae.cpu_timeseries.length > 0) {
+                    const cpuDiv = document.createElement('div');
+                    cpuDiv.className = 'chart-wrapper';
+                    cpuDiv.innerHTML = `
+                        <h3>Audit Exporter — CPU Usage (7d)</h3>
+                        <canvas id="sae-cpu-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="sae-cpu"
+                            data-chart-data='${saeJson}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Peak:</strong> ${sae.peak_cpu_millicores || 0}m &nbsp;|&nbsp;
+                            <strong>Trend:</strong> ${sae.cpu_increase_percent || 0}% change over 7d
+                        </div>
+                    `;
+                    chartsDiv.appendChild(cpuDiv);
+                }
+            }
+
+            // SFO forwarder resource charts
+            const sfoResourceCheck = (cluster.health_checks || []).find(c => c.check === 'sfo_forwarder_resources');
+            if (sfoResourceCheck && sfoResourceCheck.details) {
+                const sfr = sfoResourceCheck.details;
+                const sfrJson = JSON.stringify(sfr).replace(/'/g, "&#39;");
+
+                if (sfr.forwarder_memory_timeseries && sfr.forwarder_memory_timeseries.length > 0) {
+                    const memDiv = document.createElement('div');
+                    memDiv.className = 'chart-wrapper';
+                    memDiv.innerHTML = `
+                        <h3>Splunk Forwarder — Memory Usage (7d)</h3>
+                        <canvas id="sfr-mem-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="sfr-memory"
+                            data-chart-data='${sfrJson}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Peak:</strong> ${sfr.forwarder_peak_memory_mb || 0} MB &nbsp;|&nbsp;
+                            <strong>Trend:</strong> ${sfr.forwarder_memory_trend || 'unknown'} (${sfr.forwarder_memory_increase_percent || 0}%)
+                        </div>
+                    `;
+                    chartsDiv.appendChild(memDiv);
+                }
+
+                if (sfr.forwarder_cpu_timeseries && sfr.forwarder_cpu_timeseries.length > 0) {
+                    const cpuDiv = document.createElement('div');
+                    cpuDiv.className = 'chart-wrapper';
+                    cpuDiv.innerHTML = `
+                        <h3>Splunk Forwarder — CPU Usage (7d)</h3>
+                        <canvas id="sfr-cpu-chart-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="sfr-cpu"
+                            data-chart-data='${sfrJson}'
+                        ></canvas>
+                        <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
+                            <strong>Peak:</strong> ${sfr.forwarder_peak_cpu_millicores || 0}m &nbsp;|&nbsp;
+                            <strong>Trend:</strong> ${sfr.forwarder_cpu_increase_percent || 0}% change over 7d
                         </div>
                     `;
                     chartsDiv.appendChild(cpuDiv);
