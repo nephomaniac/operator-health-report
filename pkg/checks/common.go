@@ -776,15 +776,22 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 		return
 	}
 
+	type imagePullFailure struct {
+		reason  string
+		message string // the actual error message from the pull attempt
+	}
 	pullErrors := 0
-	failingImages := map[string]string{} // image → waiting reason
+	failingImages := map[string]imagePullFailure{} // image → failure details
 	for _, pod := range pods.Items {
 		for _, cs := range append(pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses...) {
 			if cs.State.Waiting != nil {
 				reason := cs.State.Waiting.Reason
 				if reason == "ImagePullBackOff" || reason == "ErrImagePull" {
 					pullErrors++
-					failingImages[cs.Image] = reason
+					failingImages[cs.Image] = imagePullFailure{
+						reason:  reason,
+						message: cs.State.Waiting.Message,
+					}
 				}
 			}
 		}
@@ -798,10 +805,13 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 
 		// Verify image availability via registry API
 		var imageChecks []map[string]any
-		for image, reason := range failingImages {
+		for image, failure := range failingImages {
 			check := map[string]any{
 				"image":  image,
-				"reason": reason,
+				"reason": failure.reason,
+			}
+			if failure.message != "" {
+				check["cluster_error"] = failure.message
 			}
 			available, regErr := CheckImageInRegistry(image)
 			if regErr != nil {
@@ -841,10 +851,10 @@ func CheckImagePull(ctx context.Context, cc *ClusterContext) {
 	cc.AddResult(r)
 }
 
-// checkImageInRegistry verifies if an image exists in its registry via API.
-// Supports quay.io and generic registries via HEAD on the manifest endpoint.
+// CheckImageInRegistry verifies if an image exists in its registry via API.
+// Returns (available, error) where error contains diagnostic details.
+// Distinguishes: public+exists, private repo (401/403), not found (404), unreachable.
 func CheckImageInRegistry(imageRef string) (bool, error) {
-	// Parse image reference: registry/repo:tag or registry/repo@sha256:digest
 	ref := imageRef
 	tag := "latest"
 	if atIdx := strings.Index(ref, "@"); atIdx >= 0 {
@@ -862,23 +872,29 @@ func CheckImageInRegistry(imageRef string) (bool, error) {
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Get(apiURL)
 		if err != nil {
-			return false, fmt.Errorf("quay API request failed: %w", err)
+			return false, fmt.Errorf("quay API unreachable: %w", err)
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode == 404 {
-			return false, nil
+		switch resp.StatusCode {
+		case 200:
+			var result struct {
+				Tags []struct{ Name string `json:"name"` } `json:"tags"`
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if err := json.Unmarshal(body, &result); err != nil {
+				return false, fmt.Errorf("parsing quay response: %w", err)
+			}
+			if len(result.Tags) > 0 {
+				return true, nil
+			}
+			return false, fmt.Errorf("tag not found in public repo")
+		case 401, 403:
+			return false, fmt.Errorf("private repo (HTTP %d) — requires pull secret auth, verify cluster pull secret has access to %s", resp.StatusCode, repo)
+		case 404:
+			return false, fmt.Errorf("repo or tag not found (HTTP 404) — image may not exist in quay.io/%s", repo)
+		default:
+			return false, fmt.Errorf("quay API returned HTTP %d", resp.StatusCode)
 		}
-		if resp.StatusCode != 200 {
-			return false, fmt.Errorf("quay API returned %d", resp.StatusCode)
-		}
-		var result struct {
-			Tags []struct{ Name string `json:"name"` } `json:"tags"`
-		}
-		body, _ := io.ReadAll(resp.Body)
-		if err := json.Unmarshal(body, &result); err != nil {
-			return false, fmt.Errorf("parsing quay response: %w", err)
-		}
-		return len(result.Tags) > 0, nil
 	}
 
 	// Generic registry: try HEAD on /v2/{repo}/manifests/{tag}
@@ -896,10 +912,19 @@ func CheckImageInRegistry(imageRef string) (bool, error) {
 	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("registry request failed: %w", err)
+		return false, fmt.Errorf("registry unreachable: %w", err)
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == 200, nil
+	switch resp.StatusCode {
+	case 200:
+		return true, nil
+	case 401, 403:
+		return false, fmt.Errorf("private repo (HTTP %d) — requires pull secret auth", resp.StatusCode)
+	case 404:
+		return false, fmt.Errorf("image not found (HTTP 404)")
+	default:
+		return false, fmt.Errorf("registry returned HTTP %d", resp.StatusCode)
+	}
 }
 
 // CheckPKOJobHealth verifies PKO cleanup jobs are healthy
