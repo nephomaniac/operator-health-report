@@ -49,6 +49,8 @@ func (c *SFOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	checkForwarderPods(ctx, cc, hasCR)
 	checkConfigMaps(ctx, cc, hasCR)
 	checkAuditExporter(ctx, cc)
+	checkAuditExporterMetrics(ctx, cc)
+	checkForwarderResourceMetrics(ctx, cc, hasCR)
 	checkForwarderMetrics(ctx, cc, hasCR)
 	checkServiceMonitor(ctx, cc)
 	checkPrometheusRule(ctx, cc)
@@ -491,16 +493,16 @@ func checkConfigMaps(ctx context.Context, cc *checks.ClusterContext, hasCR bool)
 	cc.AddResult(r)
 }
 
-// checkAuditExporter verifies the audit-exporter DaemonSet runs on master nodes
+// checkAuditExporter verifies the audit-exporter DaemonSet health on master nodes
 func checkAuditExporter(ctx context.Context, cc *checks.ClusterContext) {
 	cc.SetCheck("sfo_audit_exporter")
 
 	r := checks.Result{
 		Check:    "sfo_audit_exporter",
-		Severity: checks.SeverityWarning,
+		Severity: checks.SeverityCritical,
 		Details: map[string]any{
-			"description":   "Checks the audit-exporter DaemonSet in openshift-security, which runs on master nodes to filter Kubernetes API server audit logs before forwarding them to Splunk. Also validates the osd-audit-policy ConfigMap that defines audit log filtering rules. Deployed via SSS independently from the SplunkForwarder CR.",
-			"pass_criteria": "PASS: audit-exporter DaemonSet fully ready on all master nodes and osd-audit-policy ConfigMap present. WARN: DaemonSet not fully ready, audit policy ConfigMap missing, or DaemonSet not found (audit log filtering not active).",
+			"description":   "Checks the audit-exporter DaemonSet in openshift-security, which runs on master nodes to filter Kubernetes API server audit logs before forwarding them to Splunk. Validates pod health, restart counts, crashlooping status, and the osd-audit-policy ConfigMap. Deployed via SSS independently from the SplunkForwarder CR.",
+			"pass_criteria": "PASS: All pods ready, restarts <=10, audit policy present. WARN: Elevated restarts or policy missing. FAIL: Pods not ready or crashlooping. SKIP: DaemonSet not found.",
 			"namespace":     securityNamespace,
 		},
 	}
@@ -513,6 +515,7 @@ func checkAuditExporter(ctx context.Context, cc *checks.ClusterContext) {
 			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		} else {
 			r.Status = checks.StatusWarning
+			r.Severity = checks.SeverityWarning
 			r.Message = fmt.Sprintf("audit-exporter DaemonSet not found in %s — audit log filtering not active", securityNamespace)
 			r.Details["investigation"] = "audit-exporter is deployed via SSS to filter KAS audit logs before forwarding to Splunk."
 			cc.AddResult(r)
@@ -522,25 +525,225 @@ func checkAuditExporter(ctx context.Context, cc *checks.ClusterContext) {
 
 	desired := int(ds.Status.DesiredNumberScheduled)
 	ready := int(ds.Status.NumberReady)
+	misscheduled := int(ds.Status.NumberMisscheduled)
 
 	r.Details["daemonset"] = fmt.Sprintf("%s/audit-exporter", securityNamespace)
 	r.Details["desired"] = desired
 	r.Details["ready"] = ready
+	r.Details["misscheduled"] = misscheduled
+	r.Details["updated"] = int(ds.Status.UpdatedNumberScheduled)
+
+	// Get pod details using DaemonSet's label selector
+	podSelector := ""
+	if ds.Spec.Selector != nil {
+		if sel, selErr := metav1.LabelSelectorAsSelector(ds.Spec.Selector); selErr == nil {
+			podSelector = sel.String()
+		}
+	}
+	pods, podErr := cc.Client.GetPods(ctx, securityNamespace, podSelector)
+	totalRestarts := 0
+	crashlooping := 0
+	if podErr == nil {
+		for _, pod := range pods.Items {
+			for _, cs := range pod.Status.ContainerStatuses {
+				totalRestarts += int(cs.RestartCount)
+				if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+					crashlooping++
+				}
+			}
+		}
+		r.Details["pod_count"] = len(pods.Items)
+		r.Details["total_restarts"] = totalRestarts
+		r.Details["crashlooping"] = crashlooping
+		if problematic := checks.ProblematicPods(pods.Items); len(problematic) > 0 {
+			r.Details["failing_pods"] = problematic
+		}
+	}
 
 	// Check audit policy ConfigMap
 	_, policyErr := cc.Client.Clientset().CoreV1().ConfigMaps(securityNamespace).Get(ctx, "osd-audit-policy", metav1.GetOptions{})
 	r.Details["audit_policy_configmap"] = policyErr == nil
 
 	switch {
+	case crashlooping > 0:
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("audit-exporter %d pod(s) crashlooping (%d/%d ready, %d restarts)", crashlooping, ready, desired, totalRestarts)
 	case ready != desired:
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("audit-exporter not fully ready (%d/%d on master nodes, %d restarts)", ready, desired, totalRestarts)
+	case totalRestarts > 10:
 		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("audit-exporter %s/audit-exporter not fully ready (%d/%d on master nodes)", securityNamespace, ready, desired)
+		r.Severity = checks.SeverityWarning
+		r.Message = fmt.Sprintf("audit-exporter ready (%d/%d) but elevated restarts (%d)", ready, desired, totalRestarts)
 	case policyErr != nil:
 		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("audit-exporter running (%d/%d) but %s/osd-audit-policy ConfigMap missing", ready, desired, securityNamespace)
+		r.Severity = checks.SeverityWarning
+		r.Message = fmt.Sprintf("audit-exporter running (%d/%d) but osd-audit-policy ConfigMap missing", ready, desired)
 	default:
 		r.Status = checks.StatusPass
-		r.Message = fmt.Sprintf("audit-exporter healthy (%d/%d master nodes), audit policy configured", ready, desired)
+		r.Message = fmt.Sprintf("audit-exporter healthy (%d/%d master nodes, %d restarts), audit policy configured", ready, desired, totalRestarts)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkAuditExporterMetrics queries resource usage timeseries for audit-exporter pods
+func checkAuditExporterMetrics(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("sfo_audit_exporter_metrics")
+
+	r := checks.Result{
+		Check:    "sfo_audit_exporter_metrics",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":      securityNamespace,
+			"description":    "Queries 7-day CPU and memory timeseries for audit-exporter pods to detect resource leaks, OOM trends, or capacity issues. Audit-exporter runs on master nodes and processes all KAS audit logs — resource exhaustion causes audit log loss.",
+			"pass_criteria":  "PASS: Memory and CPU trends stable (increase <50%). WARN: Resource trend increasing. SKIP: Metrics unavailable.",
+			"lookback_hours": 168.0,
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	now := timeNow()
+	start := now - 604800
+	step := 1800
+
+	memQuery := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s",pod=~"audit-exporter-.*",container!=""})`, securityNamespace)
+	memData, memErr := cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step)
+
+	cpuQuery := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"audit-exporter-.*",container!=""}[5m]))`, securityNamespace)
+	cpuData, cpuErr := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step)
+
+	memPoints, _ := thanos.Timeseries(memData)
+	cpuPoints, _ := thanos.Timeseries(cpuData)
+
+	if len(memPoints) == 0 && len(cpuPoints) == 0 {
+		if memErr != nil || cpuErr != nil {
+			r.Status = checks.StatusUnknown
+			r.Message = "Could not query audit-exporter metrics"
+		} else {
+			r.Status = checks.StatusSkip
+			r.Message = "No audit-exporter metrics found"
+		}
+		cc.AddResult(r)
+		return
+	}
+
+	if len(memPoints) > 0 {
+		r.Details["memory_timeseries"] = thanos.PointsToJSON(memPoints)
+		peak := thanos.Peak(memPoints)
+		r.Details["peak_memory_mb"] = thanos.Round(peak/(1024*1024), 1)
+		_, _, memPct := thanos.Trend(memPoints)
+		r.Details["memory_increase_percent"] = thanos.Round(memPct, 2)
+		r.Details["memory_trend"] = "stable"
+		if memPct > 50 && peak/(1024*1024) > 50 {
+			r.Details["memory_trend"] = "increasing"
+		}
+	}
+
+	if len(cpuPoints) > 0 {
+		r.Details["cpu_timeseries"] = thanos.PointsToJSON(cpuPoints)
+		peak := thanos.Peak(cpuPoints)
+		r.Details["peak_cpu_millicores"] = thanos.Round(peak*1000, 0)
+		_, _, cpuPct := thanos.Trend(cpuPoints)
+		r.Details["cpu_increase_percent"] = thanos.Round(cpuPct, 2)
+	}
+
+	memTrend, _ := r.Details["memory_trend"].(string)
+	peakMemAE, _ := r.Details["peak_memory_mb"].(float64)
+	peakCPUAE, _ := r.Details["peak_cpu_millicores"].(float64)
+
+	if memTrend == "increasing" {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("audit-exporter memory trend increasing (peak: %.0f MB)", peakMemAE)
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("audit-exporter resources stable (peak: %.0f MB, %.0fm CPU)", peakMemAE, peakCPUAE)
+	}
+
+	cc.AddResult(r)
+}
+
+// checkForwarderResourceMetrics queries resource usage timeseries for splunk-forwarder DaemonSet pods
+func checkForwarderResourceMetrics(ctx context.Context, cc *checks.ClusterContext, hasCR bool) {
+	cc.SetCheck("sfo_forwarder_resources")
+
+	r := checks.Result{
+		Check:    "sfo_forwarder_resources",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":      securityNamespace,
+			"description":    "Queries 7-day CPU and memory timeseries for splunk-forwarder DaemonSet pods to detect resource leaks or capacity issues. The forwarder runs on every node and forwards logs to Splunk — resource exhaustion causes log loss.",
+			"pass_criteria":  "PASS: Memory and CPU trends stable. WARN: Resource trend increasing. SKIP: No CR or metrics unavailable.",
+			"lookback_hours": 168.0,
+		},
+	}
+
+	if !hasCR {
+		r.Status = checks.StatusSkip
+		r.Message = "No SplunkForwarder CR — forwarder not deployed"
+		cc.AddResult(r)
+		return
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	now := timeNow()
+	start := now - 604800
+	step := 1800
+
+	memQuery := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s",pod=~"splunk-forwarder-.*",container!=""})`, securityNamespace)
+	memData, _ := cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step)
+
+	cpuQuery := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"splunk-forwarder-.*",container!=""}[5m]))`, securityNamespace)
+	cpuData, _ := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step)
+
+	memPoints, _ := thanos.Timeseries(memData)
+	cpuPoints, _ := thanos.Timeseries(cpuData)
+
+	if len(memPoints) == 0 && len(cpuPoints) == 0 {
+		r.Status = checks.StatusSkip
+		r.Message = "No splunk-forwarder resource metrics found"
+		cc.AddResult(r)
+		return
+	}
+
+	if len(memPoints) > 0 {
+		r.Details["forwarder_memory_timeseries"] = thanos.PointsToJSON(memPoints)
+		peak := thanos.Peak(memPoints)
+		r.Details["forwarder_peak_memory_mb"] = thanos.Round(peak/(1024*1024), 1)
+		_, _, memPct := thanos.Trend(memPoints)
+		r.Details["forwarder_memory_increase_percent"] = thanos.Round(memPct, 2)
+		r.Details["forwarder_memory_trend"] = "stable"
+		if memPct > 50 && peak/(1024*1024) > 50 {
+			r.Details["forwarder_memory_trend"] = "increasing"
+		}
+	}
+
+	if len(cpuPoints) > 0 {
+		r.Details["forwarder_cpu_timeseries"] = thanos.PointsToJSON(cpuPoints)
+		peak := thanos.Peak(cpuPoints)
+		r.Details["forwarder_peak_cpu_millicores"] = thanos.Round(peak*1000, 0)
+		_, _, cpuPct := thanos.Trend(cpuPoints)
+		r.Details["forwarder_cpu_increase_percent"] = thanos.Round(cpuPct, 2)
+	}
+
+	memTrend, _ := r.Details["forwarder_memory_trend"].(string)
+	peakMem, _ := r.Details["forwarder_peak_memory_mb"].(float64)
+	peakCPU, _ := r.Details["forwarder_peak_cpu_millicores"].(float64)
+
+	if memTrend == "increasing" {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("splunk-forwarder memory trend increasing (peak: %.0f MB)", peakMem)
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("splunk-forwarder resources stable (peak: %.0f MB, %.0fm CPU)", peakMem, peakCPU)
 	}
 
 	cc.AddResult(r)
