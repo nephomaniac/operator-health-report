@@ -484,9 +484,31 @@ func CheckVersionVerification(ctx context.Context, cc *ClusterContext) {
 		},
 	}
 
+	// Fetch the deployed image first — always report on-cluster version
+	deployedImage := ""
+	if cc.Operator.Deployment != "" {
+		deploy, dErr := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
+		cc.RecordError("Get operator image", dErr)
+		if dErr == nil && len(deploy.Spec.Template.Spec.Containers) > 0 {
+			deployedImage = deploy.Spec.Template.Spec.Containers[0].Image
+		}
+	}
+	r.Details["deployed_image"] = deployedImage
+
+	deployedVersion := ""
+	if deployedImage != "" {
+		deployedVersion = extractVersionFromImage(deployedImage)
+		r.Details["deployed_version"] = deployedVersion
+	}
+
 	if cc.HiveShard == "" || cc.HiveShard == "unknown" {
-		r.Status = StatusSkip
-		r.Message = "Hive shard unknown — cannot resolve SAAS target"
+		if deployedVersion != "" {
+			r.Status = StatusInfo
+			r.Message = fmt.Sprintf("Running %s — hive shard unknown, cannot verify against SAAS target", deployedVersion)
+		} else {
+			r.Status = StatusSkip
+			r.Message = "Hive shard unknown — cannot resolve SAAS target"
+		}
 		cc.AddResult(r)
 		return
 	}
@@ -495,8 +517,13 @@ func CheckVersionVerification(ctx context.Context, cc *ClusterContext) {
 		cc.Operator.PKOSaas, cc.Operator.OLMSaas, cc.Operator.ShortName)
 	if err != nil {
 		log.WithField("error", err).Debug("SAAS target resolution failed")
-		r.Status = StatusSkip
-		r.Message = fmt.Sprintf("Could not resolve SAAS target: %v", err)
+		if deployedVersion != "" {
+			r.Status = StatusInfo
+			r.Message = fmt.Sprintf("Running %s — SAAS target resolution failed: %v", deployedVersion, err)
+		} else {
+			r.Status = StatusSkip
+			r.Message = fmt.Sprintf("Could not resolve SAAS target: %v", err)
+		}
 		cc.AddResult(r)
 		return
 	}
@@ -517,29 +544,16 @@ func CheckVersionVerification(ctx context.Context, cc *ClusterContext) {
 	r.Details["saas_file"] = target.SaasFile
 	r.Details["deploy_method"] = target.Method
 
-	// Get the deployed image
-	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
-	cc.RecordError("Get operator image", err)
-
-	deployedImage := ""
-	if err == nil && len(deploy.Spec.Template.Spec.Containers) > 0 {
-		deployedImage = deploy.Spec.Template.Spec.Containers[0].Image
-	}
-	r.Details["deployed_image"] = deployedImage
-
 	if deployedImage == "" {
 		r.Status = StatusWarning
-		r.Message = "Could not determine deployed image"
+		r.Message = fmt.Sprintf("Could not determine deployed image — expected %s via %s", displayVersion, target.Method)
 		cc.AddResult(r)
 		return
 	}
 
-	deployedVersion := extractVersionFromImage(deployedImage)
-	r.Details["deployed_version"] = deployedVersion
-
 	if target.Version == "" {
 		r.Status = StatusSkip
-		r.Message = "No expected version in SAAS target"
+		r.Message = fmt.Sprintf("Running %s — no expected version in SAAS target", deployedVersion)
 		cc.AddResult(r)
 		return
 	}

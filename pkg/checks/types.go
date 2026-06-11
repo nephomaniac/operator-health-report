@@ -213,8 +213,8 @@ func (cc *ClusterContext) ElevationSkipResult(checkName string) Result {
 		r.Status = StatusAccessDenied
 		r.Message = "Elevation denied — insufficient permissions on this cluster"
 	default:
-		r.Status = StatusSkip
-		r.Message = "Skipped — elevation not enabled (use --reason to enable)"
+		r.Status = StatusAccessDenied
+		r.Message = "Requires elevation — re-run with --elevate --reason <JIRA-TICKET>"
 	}
 	return r
 }
@@ -343,14 +343,23 @@ var (
 		SkipCommonChecks: true,
 	}
 
+	ClusterConfig = OperatorConfig{
+		Name:             "cluster-health",
+		ShortName:        "cluster",
+		Namespace:        "",
+		Deployment:       "",
+		SkipCommonChecks: true,
+	}
+
 	AllOperators = map[string]OperatorConfig{
-		"camo":  CAMOConfig,
-		"rmo":   RMOConfig,
-		"ome":   OMEConfig,
-		"sfo":   SFOConfig,
-		"rhobs": RHOBSConfig,
-		"rlr":   RLRConfig,
-		"pdo":   PDOConfig,
-		"sae":   SAEConfig,
+		"camo":    CAMOConfig,
+		"rmo":     RMOConfig,
+		"ome":     OMEConfig,
+		"sfo":     SFOConfig,
+		"rhobs":   RHOBSConfig,
+		"rlr":     RLRConfig,
+		"pdo":     PDOConfig,
+		"sae":     SAEConfig,
+		"cluster": ClusterConfig,
 	}
 )

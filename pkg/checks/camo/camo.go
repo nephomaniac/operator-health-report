@@ -483,15 +483,15 @@ func checkConfigurationErrors(ctx context.Context, cc *checks.ClusterContext) {
 
 // checkPrometheusMetrics queries all 10 CAMO-specific Prometheus metrics
 func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("prometheus_metrics")
-	log := logging.WithCheck("prometheus_metrics")
+	cc.SetCheck("camo_alerting_config")
+	log := logging.WithCheck("camo_alerting_config")
 
 	r := checks.Result{
-		Check:    "prometheus_metrics",
+		Check:    "camo_alerting_config",
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
 			"description":   "Queries 10 CAMO-specific Prometheus metrics that reflect the health of alert routing configuration. These metrics are emitted by CAMO itself and cover: config validation status, existence of the AM secret, PagerDuty/DeadMansSnitch/GoAlert secrets, namespace configmaps, and whether the AM secret contains the expected receiver configurations. These are the primary signals for detecting silent alerting failures.",
-			"pass_criteria": "PASS: all metrics report healthy values (config validation not failed, AM secret exists, configmaps present). FAIL: config validation failed or AM secret missing — these are critical because alerts will not be delivered. WARN: namespace configmaps missing — alert routing may be incomplete but core delivery is functional. SKIP: elevation not available (Thanos queries require elevated access).",
+			"pass_criteria": "PASS: all metrics report healthy values (config validation not failed, AM secret exists, configmaps present). FAIL: config validation failed or AM secret missing — these are critical because alerts will not be delivered. WARN: namespace configmaps missing — alert routing may be incomplete but core delivery is functional. SKIP: metrics not available.",
 		},
 	}
 
@@ -518,6 +518,7 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 		{"am_secret_contains_dms", false},
 	}
 
+	// queryMetric returns the metric value, or "" if the query failed or returned no data.
 	queryMetric := func(name string) string {
 		rawQuery := fmt.Sprintf(`%s{namespace="%s"}`, name, cc.Operator.Namespace)
 		result, err := cc.Client.QueryMetrics(ctx, rawQuery)
@@ -527,38 +528,53 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 				return val
 			}
 		}
-		return "0"
+		return ""
 	}
 
 	issues := []string{}
 	metricValues := map[string]string{}
+	queryFailures := 0
 
 	for _, m := range metrics {
 		val := queryMetric(m.name)
 		metricValues[m.name] = val
-		r.Details[m.name] = val
+		if val == "" {
+			queryFailures++
+			r.Details[m.name] = "unavailable"
+		} else {
+			r.Details[m.name] = val
+		}
+	}
+
+	// If all metrics failed to query, report as INFO rather than false failures
+	if queryFailures == len(metrics) {
+		r.Status = checks.StatusInfo
+		r.Severity = checks.SeverityInfo
+		r.Message = "CAMO alerting metrics not available — operator may not be emitting metrics yet"
+		cc.AddResult(r)
+		return
 	}
 
 	// Critical: config validation failed
 	if metricValues["alertmanager_config_validation_failed"] == "1" {
 		issues = append(issues, "Config validation failed")
 	}
-	// Critical: AM secret missing
-	if metricValues["am_secret_exists"] != "1" {
+	// Critical: AM secret missing (only flag if metric was actually queried)
+	if metricValues["am_secret_exists"] != "" && metricValues["am_secret_exists"] != "1" {
 		issues = append(issues, "AM secret missing")
 	}
-	// Warning: ConfigMaps missing
-	if metricValues["managed_namespaces_configmap_exists"] != "1" {
+	// Warning: ConfigMaps missing (only flag if metric was actually queried)
+	if metricValues["managed_namespaces_configmap_exists"] != "" && metricValues["managed_namespaces_configmap_exists"] != "1" {
 		issues = append(issues, "Managed namespaces ConfigMap missing")
 	}
-	if metricValues["ocp_namespaces_configmap_exists"] != "1" {
+	if metricValues["ocp_namespaces_configmap_exists"] != "" && metricValues["ocp_namespaces_configmap_exists"] != "1" {
 		issues = append(issues, "OCP namespaces ConfigMap missing")
 	}
 
-	log.WithField("issues", len(issues)).Debug("CAMO metrics evaluated")
+	log.WithField("issues", len(issues)).Debug("CAMO alerting config metrics evaluated")
 
 	hasCritical := metricValues["alertmanager_config_validation_failed"] == "1" ||
-		metricValues["am_secret_exists"] != "1"
+		(metricValues["am_secret_exists"] != "" && metricValues["am_secret_exists"] != "1")
 
 	switch {
 	case hasCritical:
@@ -569,7 +585,11 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 		r.Message = strings.Join(issues, "; ")
 	default:
 		r.Status = checks.StatusPass
-		r.Message = "All metrics healthy"
+		if queryFailures > 0 {
+			r.Message = fmt.Sprintf("Available metrics healthy (%d of %d metrics unavailable)", queryFailures, len(metrics))
+		} else {
+			r.Message = "All alerting config metrics healthy"
+		}
 	}
 
 	cc.AddResult(r)

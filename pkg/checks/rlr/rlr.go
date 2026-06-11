@@ -36,6 +36,10 @@ const (
 	bufferCritBytes = 10200547328 // 9.5 GB (95%)
 )
 
+// ExpectedVectorImage is the expected Vector container image from the OSDFM
+// deploy config, set once per run by main.go. Empty if unavailable.
+var ExpectedVectorImage string
+
 var (
 	prometheusRuleGVR = schema.GroupVersionResource{
 		Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules",
@@ -60,6 +64,7 @@ func (c *RLRChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	// Vector Collector
 	checkVectorNamespace(ctx, cc)
 	checkVectorDaemonSetHealth(ctx, cc)
+	checkVectorVersionVerification(ctx, cc)
 	checkVectorPodRestarts(ctx, cc)
 	checkVectorMetricsPresent(ctx, cc)
 	checkVectorIngestionRate(ctx, cc)
@@ -225,6 +230,62 @@ func checkVectorDaemonSetHealth(ctx context.Context, cc *checks.ClusterContext) 
 		}
 		r.Message = fmt.Sprintf("Vector DaemonSet degraded — %s", strings.Join(parts, ", "))
 	}
+	cc.AddResult(r)
+}
+
+func checkVectorVersionVerification(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_version_verification")
+
+	r := checks.Result{
+		Check:    "rlr_version_verification",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     vectorNS,
+			"description":   "Compares the running Vector container image against the expected version from the OSDFM deploy config in app-interface. A mismatch means the cluster is running an unexpected version — either a rollout is in progress, OSDFM hasn't reconciled, or the DaemonSet was manually modified.",
+			"pass_criteria": "PASS: deployed image matches expected. WARN: version mismatch. INFO: expected version unavailable (GitLab fetch failed).",
+		},
+	}
+
+	// Fetch the DaemonSet to get the running image
+	var ds *appsv1.DaemonSet
+	for _, name := range []string{vectorDS, "vector-logs"} {
+		candidate, err := cc.Client.Clientset().AppsV1().DaemonSets(vectorNS).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			ds = candidate
+			break
+		}
+	}
+
+	deployedImage := ""
+	if ds != nil && len(ds.Spec.Template.Spec.Containers) > 0 {
+		deployedImage = ds.Spec.Template.Spec.Containers[0].Image
+	}
+	r.Details["deployed_image"] = deployedImage
+
+	if deployedImage == "" {
+		r.Status = checks.StatusSkip
+		r.Message = "Could not determine deployed Vector image"
+		cc.AddResult(r)
+		return
+	}
+
+	if ExpectedVectorImage == "" {
+		r.Status = checks.StatusInfo
+		r.Message = fmt.Sprintf("Running %s — expected version unavailable (OSDFM config not fetched)", deployedImage)
+		cc.AddResult(r)
+		return
+	}
+
+	r.Details["expected_image"] = ExpectedVectorImage
+
+	if deployedImage == ExpectedVectorImage {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Image matches OSDFM config: %s", deployedImage)
+	} else {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Image mismatch — running %s, expected %s", deployedImage, ExpectedVectorImage)
+	}
+
 	cc.AddResult(r)
 }
 

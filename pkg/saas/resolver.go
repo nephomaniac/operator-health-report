@@ -113,6 +113,15 @@ func ResolveTarget(ctx context.Context, hiveShard, ocmEnv, pkoSaas, olmSaas, tar
 }
 
 func matchTarget(targets []Target, hiveShard, targetPrefix, saasFile, method string) *Target {
+	// Direct match on HiveCluster field (most reliable — extracted from namespace ref)
+	for i := range targets {
+		if targets[i].HiveCluster == hiveShard {
+			targets[i].SaasFile = saasFile
+			targets[i].Method = method
+			return &targets[i]
+		}
+	}
+
 	simplified := strings.TrimPrefix(hiveShard, "hive-")
 	candidates := []string{
 		fmt.Sprintf("%s-pko-%s", targetPrefix, simplified),
@@ -376,6 +385,55 @@ func extractHiveFromRef(ref string) string {
 		}
 	}
 	return ""
+}
+
+const osdfmDeployURL = "https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data/services/ocm/osd-fleet-manager/cicd/deploy.yaml?ref_type=heads"
+
+// FetchOSDFMVectorImage fetches the expected Vector image from the OSDFM deploy
+// config in app-interface. Returns the image path for the given OCM environment.
+func FetchOSDFMVectorImage(ctx context.Context, ocmEnv string) (string, error) {
+	log := logging.Log
+
+	req, err := http.NewRequestWithContext(ctx, "GET", osdfmDeployURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetching OSDFM deploy config: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("GitLab returned %d for OSDFM deploy config", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var sf saasFile
+	if err := yaml.Unmarshal(body, &sf); err != nil {
+		return "", fmt.Errorf("parsing OSDFM deploy YAML: %w", err)
+	}
+
+	envTarget := "osd-fleet-manager-" + ocmEnv
+	if ocmEnv == "staging" {
+		envTarget = "osd-fleet-manager-stage"
+	}
+
+	for _, rt := range sf.ResourceTemplates {
+		if rt.Name != envTarget {
+			continue
+		}
+		if img, ok := rt.Parameters["OPENSHIFT_LOGGING_VECTOR_IMAGE_PATH"]; ok {
+			if imgStr, ok := img.(string); ok && imgStr != "" {
+				log.WithField("image", imgStr).WithField("env", ocmEnv).Debug("Resolved OSDFM Vector image")
+				return imgStr, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("OPENSHIFT_LOGGING_VECTOR_IMAGE_PATH not found for environment %s", ocmEnv)
 }
 
 // extractNumber returns the first numeric sequence from a string

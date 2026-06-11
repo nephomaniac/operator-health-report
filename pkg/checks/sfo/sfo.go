@@ -523,10 +523,10 @@ func checkForwarderResourceMetrics(ctx context.Context, cc *checks.ClusterContex
 	start := now - 604800
 	step := 1800
 
-	memQuery := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s",pod=~"splunk-forwarder-.*",container!=""})`, securityNamespace)
+	memQuery := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s",pod=~"splunkforwarder-.*",container!=""})`, securityNamespace)
 	memData, _ := cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step)
 
-	cpuQuery := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"splunk-forwarder-.*",container!=""}[5m]))`, securityNamespace)
+	cpuQuery := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"splunkforwarder-.*",container!=""}[5m]))`, securityNamespace)
 	cpuData, _ := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step)
 
 	memPoints, _ := thanos.Timeseries(memData)

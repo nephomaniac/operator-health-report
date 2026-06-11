@@ -28,12 +28,13 @@ import (
 
 	// Import operator checkers for init() registration
 	_ "github.com/openshift/operator-health-report/pkg/checks/camo"
+	_ "github.com/openshift/operator-health-report/pkg/checks/mcc"
 	_ "github.com/openshift/operator-health-report/pkg/checks/ome"
 	_ "github.com/openshift/operator-health-report/pkg/checks/pdo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rhobs"
-	_ "github.com/openshift/operator-health-report/pkg/checks/sae"
-	_ "github.com/openshift/operator-health-report/pkg/checks/rlr"
+	"github.com/openshift/operator-health-report/pkg/checks/rlr"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rmo"
+	_ "github.com/openshift/operator-health-report/pkg/checks/sae"
 	_ "github.com/openshift/operator-health-report/pkg/checks/sfo"
 )
 
@@ -134,12 +135,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	if clusterList == "" && !saasOnly {
-		fmt.Fprintln(os.Stderr, "Error: --cluster-list is required (or use --saas-only)")
-		flag.Usage()
-		os.Exit(1)
-	}
-
 	// Default to all registered operators if none specified
 	if len(operators) == 0 {
 		for name := range checks.AllOperators {
@@ -164,9 +159,24 @@ func main() {
 		opConfigs = append(opConfigs, cfg)
 	}
 
-	// Read cluster IDs (skip if saas-only mode)
+	// Check if any selected operators need managed clusters
+	needsManagedClusters := false
+	for _, op := range opConfigs {
+		if op.ClusterScope != checks.ScopeHive {
+			needsManagedClusters = true
+			break
+		}
+	}
+
+	if clusterList == "" && !saasOnly && needsManagedClusters {
+		fmt.Fprintln(os.Stderr, "Error: --cluster-list is required (or use --saas-only)")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Read cluster IDs (skip if saas-only mode or no managed operators)
 	var clusterIDs []string
-	if !saasOnly {
+	if !saasOnly && clusterList != "" {
 		var readErr error
 		clusterIDs, readErr = readClusterList(clusterList)
 		if readErr != nil {
@@ -201,13 +211,14 @@ func main() {
 
 	// Elevation logic:
 	// --no-elevate always wins (explicit disable)
-	// --elevate requires --reason (explicit enable with justification)
-	// Without either flag: elevation disabled by default
+	// --elevate --reason TICKET: explicit enable (required for production)
+	// Neither flag on staging/integration: auto-elevate with default reason
+	// Neither flag on production: no elevation
+	// Hive clusters are always production — only elevate with explicit --elevate --reason
+	explicitElevate := elevate
 	if noElevate {
-		// Explicit disable — takes priority over everything
 		elevate = false
 	} else if elevate {
-		// Explicit enable — requires --reason with a real ticket/incident reference
 		if reason == "" || reason == "operator health check" || reason == cfg.Reason {
 			fmt.Fprintln(os.Stderr, "Error: --elevate requires --reason with a JIRA ticket or PD incident (e.g., --reason SREP-1234)")
 			os.Exit(1)
@@ -220,8 +231,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "================================================================================")
 			fmt.Fprintln(os.Stderr, "")
 		}
+	} else if !isProd {
+		elevate = true
+		if reason == "" || reason == cfg.Reason {
+			reason = "SREP-operator-health-check"
+		}
 	}
-	// Set noElevate for downstream — elevation is off unless explicitly enabled
 	noElevate = !elevate
 
 	if reason == "" {
@@ -315,6 +330,14 @@ func main() {
 		Name      string `json:"cluster_name"`
 		Reason    string `json:"reason"`
 		Status    string `json:"skip_status"` // "limited_support", "not_ready", "connection_failed", "metadata_failed"
+	}
+
+	// Fetch OSDFM deploy config for RLR expected Vector image
+	if vectorImage, osdfmErr := saas.FetchOSDFMVectorImage(context.Background(), ocmClient.Environment()); osdfmErr == nil {
+		rlr.ExpectedVectorImage = vectorImage
+		fmt.Fprintf(os.Stderr, "OSDFM Vector image (%s): %s\n", ocmClient.Environment(), vectorImage)
+	} else {
+		logging.Log.WithError(osdfmErr).Debug("Could not fetch OSDFM Vector image — RLR version check will report INFO")
 	}
 
 	// Signal handling — graceful shutdown on ctrl-c
@@ -652,8 +675,8 @@ func main() {
 
 				fmt.Fprintf(os.Stderr, "\n[hive] Processing: %s (%s, %s, %s)\n", meta.Name, meta.Product, meta.Provider, meta.Region)
 
-				// Hive clusters use the same elevation setting as managed clusters
-				hiveNoElevate := noElevate
+				// Hive clusters are always production — only elevate with explicit --elevate --reason
+				hiveNoElevate := !explicitElevate
 
 				client, connErr := kube.ConnectToClusterWithConn(rootCtx, hiveID, reason, hiveNoElevate, hiveOCM.Conn())
 				if connErr != nil {

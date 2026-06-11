@@ -486,6 +486,24 @@ func (cc *ClusterClient) GetPodLogs(ctx context.Context, namespace, podName stri
 	})
 }
 
+// GetContainerLogs returns the last N lines from a specific container in a pod.
+func (cc *ClusterClient) GetContainerLogs(ctx context.Context, namespace, podName, container string, tailLines int64) (string, error) {
+	return withRetryResult(ctx, "get logs "+podName+"/"+container, func() (string, error) {
+		req := cc.clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+			Container: container,
+			TailLines: &tailLines,
+		})
+		stream, err := req.Stream(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer stream.Close()
+		buf := new(bytes.Buffer)
+		_, err = io.Copy(buf, stream)
+		return buf.String(), err
+	})
+}
+
 // GetEvents returns events for a specific object
 func (cc *ClusterClient) GetEvents(ctx context.Context, namespace, objectName string) (*corev1.EventList, error) {
 	return withRetryResult(ctx, "get events "+objectName, func() (*corev1.EventList, error) {

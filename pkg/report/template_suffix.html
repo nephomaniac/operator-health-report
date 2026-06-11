@@ -84,6 +84,12 @@
                             }
                             if (chartType === 'sfr-memory') createRLRTimeseriesChart(el.id, chartData.forwarder_memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
                             if (chartType === 'sfr-cpu') createRLRTimeseriesChart(el.id, chartData.forwarder_cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
+                            if (chartType === 'mcc-cpu-master') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_master, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'mcc-mem-master') createRLRMultiSeriesChart(el.id, chartData.memory_timeseries_master, 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'mcc-cpu-infra') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_infra, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'mcc-mem-infra') createRLRMultiSeriesChart(el.id, chartData.memory_timeseries_infra, 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'mcc-cpu-worker') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_worker, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'mcc-mem-worker') createRLRMultiSeriesChart(el.id, chartData.memory_timeseries_worker, 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                         }, 50);
                     });
                 }
@@ -96,6 +102,17 @@
                 details.classList.toggle('expanded');
             }
         }
+
+        // Click outside any expanded cluster detail panel to collapse it
+        document.addEventListener('click', function(e) {
+            const expanded = document.querySelectorAll('.cluster-details-row.expanded');
+            expanded.forEach(row => {
+                const mainRow = row.previousElementSibling;
+                if (row.contains(e.target) || (mainRow && mainRow.contains(e.target))) return;
+                row.classList.remove('expanded');
+                if (mainRow) mainRow.classList.remove('expanded');
+            });
+        });
 
         function getStatusIcon(status) {
             return {
@@ -212,7 +229,7 @@
                 'reconciliation_activity',
                 'reconciliation_behavior',
                 'configuration_errors',
-                'prometheus_metrics',
+                'camo_alerting_config',
                 'alertmanager_secret',
                 'camo_configmap',
                 'pagerduty_secret',
@@ -267,7 +284,12 @@
         const MEM_ERROR_THRESHOLD = 100;     // MB
 
         function getResourceValues(cluster) {
-            const resourceCheck = (cluster.health_checks || []).find(c => c.check === 'resource_leak_detection');
+            let resourceCheck = (cluster.health_checks || []).find(c => c.check === 'resource_leak_detection');
+            if (!resourceCheck || !resourceCheck.details) {
+                // Fallback: SAE/RLR/SFO resource trend checks
+                resourceCheck = (cluster.health_checks || []).find(c =>
+                    c.check === 'sae_resource_trends' || c.check === 'sfo_forwarder_resources');
+            }
             if (!resourceCheck || !resourceCheck.details) {
                 return {
                     cpu: 'N/A',
@@ -317,26 +339,28 @@
 
         function getPodRestarts(cluster) {
             const podCheck = (cluster.health_checks || []).find(c => c.check === 'pod_status_and_restarts');
-            if (!podCheck || !podCheck.details) {
-                return 'N/A';
-            }
-            return podCheck.details.total_restarts || 0;
+            if (podCheck && podCheck.details) return podCheck.details.total_restarts || 0;
+            // Fallback: SAE DaemonSet, RLR Vector DaemonSet
+            const dsCheck = (cluster.health_checks || []).find(c =>
+                c.check === 'sae_daemonset_health' || c.check === 'rlr_vector_daemonset_health');
+            if (dsCheck && dsCheck.details) return dsCheck.details.total_restarts || 0;
+            return 'N/A';
         }
 
         function getLogErrors(cluster) {
             const logCheck = (cluster.health_checks || []).find(c => c.check === 'log_error_analysis');
-            if (!logCheck || !logCheck.details) {
-                return 'N/A';
-            }
-            return logCheck.details.error_count || 0;
+            if (logCheck && logCheck.details) return logCheck.details.error_count || 0;
+            const saeCheck = (cluster.health_checks || []).find(c => c.check === 'sae_log_errors');
+            if (saeCheck && saeCheck.details) return saeCheck.details.critical_errors || 0;
+            return 'N/A';
         }
 
         function getLogWarnings(cluster) {
             const logCheck = (cluster.health_checks || []).find(c => c.check === 'log_error_analysis');
-            if (!logCheck || !logCheck.details) {
-                return 'N/A';
-            }
-            return logCheck.details.warning_count || 0;
+            if (logCheck && logCheck.details) return logCheck.details.warning_count || 0;
+            const saeCheck = (cluster.health_checks || []).find(c => c.check === 'sae_log_errors');
+            if (saeCheck && saeCheck.details) return saeCheck.details.warning_errors || 0;
+            return 'N/A';
         }
 
         function formatCheckName(checkName) {
@@ -351,7 +375,7 @@
                 'reconciliation_activity': 'Reconciliation',
                 'reconciliation_behavior': 'Recon Behavior',
                 'configuration_errors': 'Config Errors',
-                'prometheus_metrics': 'Metrics',
+                'camo_alerting_config': 'Alerting Config',
                 'alertmanager_secret': 'AM Secret',
                 'camo_configmap': 'CAMO Config',
                 'pagerduty_secret': 'PD Secret',
@@ -412,6 +436,14 @@
                 'sfo_forwarder_metrics': 'SFO Metrics',
                 'sfo_servicemonitor': 'SFO SvcMon',
                 'sfo_prometheusrule': 'SFO PromRule',
+                'mcc_node_health': 'Node Health',
+                'mcc_node_resources': 'Node Resources',
+                'mcc_node_counts': 'Node Counts',
+                'mcc_node_pod_failures': 'Pod Failures',
+                'mcc_machine_api_logs': 'Machine API Logs',
+                'mcc_machine_health': 'Machine Health',
+                'mcc_managed_boot_images': 'Boot Images',
+                'mcc_ami_consistency': 'AMI Consistency',
                 'rhobs_cluster_type': 'Cluster Type',
                 'rhobs_monitoring_stack': 'MonitoringStack',
                 'rhobs_monitoring_credentials': 'RHOBS Creds',
@@ -432,6 +464,7 @@
                 'rlr_cluster_type': 'Cluster Type',
                 'rlr_vector_namespace': 'Vector NS',
                 'rlr_vector_daemonset_health': 'Vector DS',
+                'rlr_version_verification': 'Vector Version',
                 'rlr_vector_pod_restarts': 'Vector Restarts',
                 'rlr_vector_metrics_present': 'Metrics Scraped',
                 'rlr_vector_ingestion_rate': 'Ingestion Rate',
@@ -1661,6 +1694,50 @@
                 }
             }
 
+            // MCC node CPU/memory charts — per role
+            const mccMetricsCheck = (cluster.health_checks || []).find(c => c.check === 'mcc_node_metrics');
+            if (mccMetricsCheck && mccMetricsCheck.details) {
+                const mccData = mccMetricsCheck.details;
+                const mccJson = JSON.stringify(mccData).replace(/'/g, "&#39;");
+
+                const roles = [
+                    {key: 'master', label: 'Master Nodes', note: 'per-node'},
+                    {key: 'infra', label: 'Infra Nodes', note: 'per-node'},
+                    {key: 'worker', label: 'Worker Nodes', note: 'avg across pool'},
+                ];
+
+                for (const role of roles) {
+                    const hasCPU = mccData['cpu_timeseries_' + role.key] && mccData['cpu_timeseries_' + role.key].length > 0;
+                    const hasMem = mccData['memory_timeseries_' + role.key] && mccData['memory_timeseries_' + role.key].length > 0;
+                    if (!hasCPU && !hasMem) continue;
+
+                    if (hasCPU) {
+                        const div = document.createElement('div');
+                        div.className = 'chart-wrapper';
+                        div.innerHTML = `
+                            <h3>${role.label} — CPU Usage % (7d) <span style="font-size:0.7em;color:#999;">(${role.note})</span></h3>
+                            <canvas id="mcc-cpu-${role.key}-${clusterIdx}" class="chart-canvas"
+                                data-pending-chart="mcc-cpu-${role.key}"
+                                data-chart-data='${mccJson}'
+                            ></canvas>
+                        `;
+                        chartsDiv.appendChild(div);
+                    }
+                    if (hasMem) {
+                        const div = document.createElement('div');
+                        div.className = 'chart-wrapper';
+                        div.innerHTML = `
+                            <h3>${role.label} — Memory Usage % (7d) <span style="font-size:0.7em;color:#999;">(${role.note})</span></h3>
+                            <canvas id="mcc-mem-${role.key}-${clusterIdx}" class="chart-canvas"
+                                data-pending-chart="mcc-mem-${role.key}"
+                                data-chart-data='${mccJson}'
+                            ></canvas>
+                        `;
+                        chartsDiv.appendChild(div);
+                    }
+                }
+            }
+
             detailsDiv.appendChild(chartsDiv);
 
             // Health checks
@@ -1868,13 +1945,13 @@
 
             detailsDiv.appendChild(checksDiv);
 
-            // Elevated operations audit
+            // Elevated operations audit — always shown so users can confirm no elevation was used
             const elevOps = cluster.elevated_ops || [];
+            const elevDiv = document.createElement('div');
+            elevDiv.className = 'health-check';
+            elevDiv.style.marginTop = '16px';
+            const elevId = `elev-${clusterIdx}`;
             if (elevOps.length > 0) {
-                const elevDiv = document.createElement('div');
-                elevDiv.className = 'health-check';
-                elevDiv.style.marginTop = '16px';
-                const elevId = `elev-${clusterIdx}`;
                 elevDiv.innerHTML = `
                     <div class="check-header" onclick="toggleCheckDetails('${elevId}')" style="background:#fff3cd;">
                         <div>
@@ -1892,8 +1969,23 @@
                         </div>
                     </div>
                 `;
-                checksDiv.appendChild(elevDiv);
+            } else {
+                elevDiv.innerHTML = `
+                    <div class="check-header" onclick="toggleCheckDetails('${elevId}')" style="background:rgba(46,204,113,0.08);">
+                        <div>
+                            <span class="check-icon pass">&#10004;</span>
+                            <span class="check-title">ELEVATED API CALLS</span>
+                        </div>
+                        <span class="status-badge pass">0 calls</span>
+                    </div>
+                    <div class="check-details" id="check-details-${elevId}">
+                        <div style="padding:8px 10px;background:rgba(46,204,113,0.06);border-left:3px solid #2ecc71;border-radius:3px;font-size:0.85em;color:#333;">
+                            No elevated API calls were made for this cluster. All checks used standard access or port-forward for metrics.
+                        </div>
+                    </div>
+                `;
             }
+            checksDiv.appendChild(elevDiv);
 
             // Close button at bottom of details panel
             const closeDiv = document.createElement('div');
@@ -2214,20 +2306,32 @@
         function renderOperatorTable(operatorData, tableHeader, tableBody, idPrefix) {
             const checkTypes = getAllCheckTypes(operatorData);
 
+            const isMCC = operatorData.length > 0 && operatorData[0].operator_name === 'cluster-health';
+
             let headerHTML = '<tr><th>Cluster Name</th><th class="check-name-header" title="Backplane Login"><div>Backplane Login</div></th>';
             checkTypes.forEach(checkType => {
                 headerHTML += `<th class="check-name-header" title="${formatCheckName(checkType)}"><div>${formatCheckName(checkType)}</div></th>`;
             });
-            headerHTML += '<th class="check-name-header resource-header-diagonal" title="Restarts"><div>Restarts</div></th>';
-            headerHTML += '<th class="check-name-header resource-header-diagonal" title="Logged Errors"><div>Logged Errors</div></th>';
-            headerHTML += '<th class="check-name-header resource-header-diagonal" title="Logged Warnings"><div>Logged Warnings</div></th>';
-            headerHTML += '<th class="check-name-header resource-header-diagonal" title="CPU"><div>CPU</div></th>';
-            headerHTML += '<th class="check-name-header resource-header-diagonal" title="Memory"><div>Memory</div></th></tr>';
+            if (isMCC) {
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Master node CPU% (per node)"><div>Master CPU%</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Master node Memory% (per node)"><div>Master Mem%</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Infra node CPU% (per node)"><div>Infra CPU%</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Infra node Memory% (per node)"><div>Infra Mem%</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Worker node count"><div>Workers</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Managed Boot Images status"><div>Boot Img</div></th>';
+            } else {
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Restarts"><div>Restarts</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Logged Errors"><div>Logged Errors</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Logged Warnings"><div>Logged Warnings</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="CPU"><div>CPU</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Memory"><div>Memory</div></th>';
+            }
+            headerHTML += '</tr>';
             tableHeader.innerHTML = headerHTML;
 
             let currentShard = null;
             let shardIdx = 0;
-            const totalColumns = checkTypes.length + 7;
+            const totalColumns = checkTypes.length + (isMCC ? 8 : 7);
             operatorData.forEach((cluster, idx) => {
                 const clusterIdx = `${idPrefix}-${idx}`;
                 const clusterShard = cluster.hive_shard || cluster.health_checks?.find(c => c.check === 'version_verification')?.details?.target_name || 'unknown';
@@ -2319,11 +2423,63 @@
                     const titleSuffix = effectiveStatus === 'ERROR' ? ' (API/script error — not an operator issue)' : '';
                     rowHTML += `<td class="check-status-cell" onclick="event.stopPropagation(); expandToCheck('${clusterIdx}', '${checkId}')"><span class="status-icon ${statusClass}" title="${checkType}: ${rawStatus}${titleSuffix}">${icon}</span></td>`;
                 });
-                rowHTML += `<td class="resource-cell">${restarts}</td>`;
-                rowHTML += `<td class="resource-cell">${errors}</td>`;
-                rowHTML += `<td class="resource-cell">${warnings}</td>`;
-                rowHTML += `<td class="resource-cell"><span class="resource-value resource-${resources.cpuLevel}">${resources.cpu}</span></td>`;
-                rowHTML += `<td class="resource-cell"><span class="resource-value resource-${resources.memLevel}">${resources.memory}</span></td>`;
+                if (isMCC) {
+                    const nr = (cluster.health_checks || []).find(c => c.check === 'mcc_node_resources');
+                    const nodes = nr?.details?.node_resources || [];
+                    const byRole = {master: {count: 0, cpu: 0, mem: 0}, infra: {count: 0, cpu: 0, mem: 0}, worker: {count: 0, cpu: 0, mem: 0}};
+                    nodes.forEach(n => {
+                        const role = n.role === 'control-plane' ? 'master' : (byRole[n.role] ? n.role : 'worker');
+                        byRole[role].count++;
+                        byRole[role].cpu += parseInt(n.cpu_capacity) || 0;
+                        byRole[role].mem += parseFloat(n.mem_capacity_gb) || 0;
+                    });
+                    // Per-node utilization from metrics API
+                    const ru = nr?.details?.role_utilization || {};
+                    const pctColor = (p) => {
+                        if (p >= 70) return '#dc3545';
+                        if (p >= 60) return '#fd7e14';
+                        if (p >= 50) return '#ffc107';
+                        return '#2ecc71';
+                    };
+                    const fmtPcts = (pcts) => {
+                        if (!pcts || pcts.length === 0) return '-';
+                        return pcts.map(p => `<span style="color:${pctColor(p)}">${p}%</span>`).join('/');
+                    };
+                    const masterCPUs = ru.master?.cpu_pcts || [];
+                    const masterMems = ru.master?.mem_pcts || [];
+                    const infraCPUs = ru.infra?.cpu_pcts || [];
+                    const infraMems = ru.infra?.mem_pcts || [];
+                    rowHTML += `<td class="resource-cell" style="white-space:nowrap;font-size:0.75em">${fmtPcts(masterCPUs)}</td>`;
+                    rowHTML += `<td class="resource-cell" style="white-space:nowrap;font-size:0.75em">${fmtPcts(masterMems)}</td>`;
+                    rowHTML += `<td class="resource-cell" style="white-space:nowrap;font-size:0.75em">${fmtPcts(infraCPUs)}</td>`;
+                    rowHTML += `<td class="resource-cell" style="white-space:nowrap;font-size:0.75em">${fmtPcts(infraMems)}</td>`;
+                    rowHTML += `<td class="resource-cell">${byRole.worker.count || '-'}</td>`;
+
+                    const bootCheck = (cluster.health_checks || []).find(c => c.check === 'mcc_managed_boot_images');
+                    const bootIdx = (cluster.health_checks || []).findIndex(c => c.check === 'mcc_managed_boot_images');
+                    const bootCheckId = `${clusterIdx}-${bootIdx}`;
+                    let bootLabel = '-';
+                    let bootClass = '';
+                    if (bootCheck) {
+                        const enabled = bootCheck.details?.managed_boot_images_enabled;
+                        if (bootCheck.status === 'PASS') {
+                            bootLabel = enabled ? 'ON' : 'OFF';
+                            bootClass = 'status-pass';
+                        } else if (bootCheck.status === 'WARNING') {
+                            bootLabel = enabled ? 'ON (unexpected)' : 'OFF (expected ON)';
+                            bootClass = 'status-warning';
+                        } else if (bootCheck.status === 'INFO') {
+                            bootLabel = 'N/A';
+                        }
+                    }
+                    rowHTML += `<td class="resource-cell" onclick="event.stopPropagation(); expandToCheck('${clusterIdx}', '${bootCheckId}')" style="cursor:pointer"><span class="${bootClass}" title="${(bootCheck?.message || '').replace(/"/g, '&quot;')}">${bootLabel}</span></td>`;
+                } else {
+                    rowHTML += `<td class="resource-cell">${restarts}</td>`;
+                    rowHTML += `<td class="resource-cell">${errors}</td>`;
+                    rowHTML += `<td class="resource-cell">${warnings}</td>`;
+                    rowHTML += `<td class="resource-cell"><span class="resource-value resource-${resources.cpuLevel}">${resources.cpu}</span></td>`;
+                    rowHTML += `<td class="resource-cell"><span class="resource-value resource-${resources.memLevel}">${resources.memory}</span></td>`;
+                }
                 mainRow.innerHTML = rowHTML;
                 tableBody.appendChild(mainRow);
 
@@ -2446,12 +2602,13 @@
                 'rhobs-observability': 'Manages the RHOBS monitoring stack on MC/SC clusters — deploys Prometheus, Alertmanager, log collectors, and remote-write configuration for HCP metrics and log forwarding.',
                 'rosa-log-router': 'HCP log forwarding pipeline — Vector DaemonSet collects HCP control plane logs and writes to S3. Lambda/processor delivers to customer CloudWatch or S3 destinations.',
                 'pagerduty-operator': 'Manages PagerDuty service integrations on hive clusters — creates PD services for each ClusterDeployment and syncs integration keys via SyncSets.',
+                'cluster-health': 'Cluster infrastructure health — node readiness and utilization, machine/MachineSet status, AMI consistency, managed boot images configuration, and machine-api log analysis.',
             };
 
             // Add "Operators" label before tabs
             const tabLabel = document.createElement('div');
             tabLabel.className = 'operator-tabs-label';
-            tabLabel.innerHTML = '&#9654; Operators';
+            tabLabel.innerHTML = '&#9654; Health Checks';
             tabsContainer.appendChild(tabLabel);
 
             // Build tabs and tab content for each operator (always show tabs)
@@ -2466,6 +2623,7 @@
                     'rhobs-observability': 'RHOBS',
                     'rosa-log-router': 'RLR',
                     'pagerduty-operator': 'PDO',
+                    'cluster-health': 'CLUSTER',
                 };
                 const shortName = shortNameMap[op] || op.replace(/-operator$/, '').toUpperCase();
 

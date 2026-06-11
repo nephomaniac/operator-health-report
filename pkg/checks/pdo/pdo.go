@@ -38,8 +38,7 @@ func (c *PDOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	checkControllerAvailability(ctx, cc)
 	checkPDIStatus(ctx, cc)
 	checkPrometheusMetrics(ctx, cc)
-	recentLogCount := checkReconciliationActivity(ctx, cc)
-	checkReconciliationBehavior(ctx, cc, recentLogCount)
+	checkReconciliationActivity(ctx, cc)
 	checkConfigurationErrors(ctx, cc)
 	checkFiringAlerts(ctx, cc)
 }
@@ -58,12 +57,13 @@ func checkAPIKeySecret(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
+	// Secrets always require elevation — do not attempt without it (may trigger security alerts)
 	if !cc.Client.CanElevate() {
 		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
 		return
 	}
 
-	cc.Client.RecordElevatedOp(fmt.Sprintf("[%s] ", cc.CurrentCheck) + fmt.Sprintf("get secrets/pagerduty-api-key in %s", cc.Operator.Namespace))
+	cc.Client.RecordElevatedOp(fmt.Sprintf("[%s] get secrets/pagerduty-api-key in %s", cc.CurrentCheck, cc.Operator.Namespace))
 	secret, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, "pagerduty-api-key", metav1.GetOptions{})
 	cc.RecordError("Get pagerduty-api-key secret", err)
 
@@ -146,21 +146,22 @@ func checkPDIStatus(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
-		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
-		return
-	}
-
-	// Check if this is a hive cluster by probing for ClusterDeployment CRD
+	// Try standard client first, fall back to elevated if available
 	isHive := false
-	_, cdErr := cc.Client.ListResources(ctx, clusterDeploymentGVR, "", true)
+	_, cdErr := cc.Client.ListResources(ctx, clusterDeploymentGVR, "", false)
+	if cdErr != nil && checks.IsAccessError(cdErr) && cc.Client.CanElevate() {
+		_, cdErr = cc.Client.ListResources(ctx, clusterDeploymentGVR, "", true)
+	}
 	if cdErr == nil {
 		isHive = true
 	}
 	r.Details["is_hive_cluster"] = isHive
 
-	// List PagerDutyIntegration CRs
-	pdiList, err := cc.Client.ListResources(ctx, pagerDutyIntegrationGVR, cc.Operator.Namespace, true)
+	// List PagerDutyIntegration CRs — try standard, fall back to elevated
+	pdiList, err := cc.Client.ListResources(ctx, pagerDutyIntegrationGVR, cc.Operator.Namespace, false)
+	if err != nil && checks.IsAccessError(err) && cc.Client.CanElevate() {
+		pdiList, err = cc.Client.ListResources(ctx, pagerDutyIntegrationGVR, cc.Operator.Namespace, true)
+	}
 	cc.RecordError("List PagerDutyIntegrations", err)
 
 	if err != nil {
@@ -322,74 +323,143 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 	cc.AddResult(r)
 }
 
-func checkReconciliationActivity(ctx context.Context, cc *checks.ClusterContext) int {
+func checkReconciliationActivity(ctx context.Context, cc *checks.ClusterContext) {
 	cc.SetCheck("pdo_reconciliation_activity")
 
 	r := checks.Result{
 		Check:    "pdo_reconciliation_activity",
-		Severity: checks.SeverityInfo,
+		Severity: checks.SeverityWarning,
 		Details: map[string]any{
 			"namespace":     cc.Operator.Namespace,
-			"description":   "Checks recent PDO logs for reconciliation activity and detects if a cluster upgrade is in progress. During upgrades, elevated reconciliation activity is expected.",
-			"pass_criteria": "INFO: Reports recent log line count and upgrade status.",
+			"cluster_type":  cc.ClusterType,
+			"description":   "Parses recent PDO controller logs to extract reconciliation activity: completed reconcile cycles, PD service creates/deletes, limited-support actions, and errors. On hive clusters, PDO reconciles PagerDutyIntegration CRs against ClusterDeployments to manage PagerDuty services.",
+			"pass_criteria": "PASS: Active reconciliation with no errors. WARN: Errors detected in recent logs. INFO: No recent logs or unable to fetch.",
 		},
 	}
 
-	logOutput := ""
 	deploy, err := cc.Client.Clientset().AppsV1().Deployments(cc.Operator.Namespace).Get(ctx, cc.Operator.Deployment, metav1.GetOptions{})
-	if err == nil {
-		selector, sErr := metav1.LabelSelectorAsSelector(deploy.Spec.Selector)
-		if sErr == nil {
-			pods, pErr := cc.Client.GetPods(ctx, cc.Operator.Namespace, selector.String())
-			if pErr == nil && len(pods.Items) > 0 {
-				logOutput, _ = cc.Client.GetPodLogs(ctx, cc.Operator.Namespace, pods.Items[0].Name, 50)
+	if err != nil {
+		r.Status = checks.StatusInfo
+		r.Message = "Could not fetch deployment to read logs"
+		cc.AddResult(r)
+		return
+	}
+
+	selector, sErr := metav1.LabelSelectorAsSelector(deploy.Spec.Selector)
+	if sErr != nil {
+		r.Status = checks.StatusInfo
+		r.Message = "Could not determine pod selector"
+		cc.AddResult(r)
+		return
+	}
+
+	pods, pErr := cc.Client.GetPods(ctx, cc.Operator.Namespace, selector.String())
+	if pErr != nil || len(pods.Items) == 0 {
+		r.Status = checks.StatusInfo
+		r.Message = "No PDO controller pods found"
+		cc.AddResult(r)
+		return
+	}
+
+	logOutput, logErr := cc.Client.GetPodLogs(ctx, cc.Operator.Namespace, pods.Items[0].Name, 200)
+	if logErr != nil || logOutput == "" {
+		r.Status = checks.StatusInfo
+		r.Message = "No recent PDO log output"
+		cc.AddResult(r)
+		return
+	}
+
+	var reconcileStarts, reconcileCompletes int
+	var creates, deletes, lsDisables, lsEnables int
+	var errors []string
+	var lastReconcileDuration string
+
+	for _, line := range strings.Split(logOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+
+		switch {
+		case strings.Contains(line, "Reconciling PagerDutyIntegration"):
+			reconcileStarts++
+		case strings.Contains(line, "Reconcile complete"):
+			reconcileCompletes++
+			if idx := strings.Index(line, "Duration"); idx >= 0 {
+				rest := line[idx:]
+				if eqIdx := strings.IndexByte(rest, '='); eqIdx >= 0 {
+					val := strings.TrimSpace(rest[eqIdx+1:])
+					if commaIdx := strings.IndexAny(val, ", \t\""); commaIdx > 0 {
+						val = val[:commaIdx]
+					}
+					lastReconcileDuration = val
+				}
+			}
+		case strings.Contains(line, "Creating PD service"):
+			creates++
+		case strings.Contains(line, "Deleting PD service") || strings.Contains(line, "Deleting PD SyncSet"):
+			deletes++
+		case strings.Contains(lower, "limited-support") && strings.Contains(lower, "disabling"):
+			lsDisables++
+		case strings.Contains(lower, "limited-support") || strings.Contains(lower, "support exception"):
+			if strings.Contains(lower, "enabling") || strings.Contains(lower, "re-enabling") {
+				lsEnables++
+			}
+		case strings.Contains(lower, "error") && !strings.Contains(lower, "level=info"):
+			if len(errors) < 5 {
+				if len(line) > 200 {
+					line = line[:200] + "..."
+				}
+				errors = append(errors, line)
 			}
 		}
 	}
 
-	recentLogCount := 0
-	if logOutput != "" {
-		for _, line := range strings.Split(logOutput, "\n") {
-			if strings.TrimSpace(line) != "" {
-				recentLogCount++
-			}
-		}
+	r.Details["reconcile_starts"] = reconcileStarts
+	r.Details["reconcile_completes"] = reconcileCompletes
+	r.Details["service_creates"] = creates
+	r.Details["service_deletes"] = deletes
+	r.Details["limited_support_disables"] = lsDisables
+	r.Details["limited_support_enables"] = lsEnables
+	r.Details["error_count"] = len(errors)
+	if lastReconcileDuration != "" {
+		r.Details["last_reconcile_duration"] = lastReconcileDuration
+	}
+	if len(errors) > 0 {
+		r.Details["recent_errors"] = errors
 	}
 
-	r.Details["recent_log_count"] = recentLogCount
-	r.Status = checks.StatusInfo
-	r.Message = fmt.Sprintf("PDO producing logs — %d recent lines", recentLogCount)
-	if recentLogCount == 0 {
-		r.Message = "No recent PDO log output detected"
+	// Build summary
+	var parts []string
+	parts = append(parts, fmt.Sprintf("%d reconcile cycles", reconcileCompletes))
+	if lastReconcileDuration != "" {
+		parts = append(parts, fmt.Sprintf("last duration %s", lastReconcileDuration))
+	}
+	if creates > 0 {
+		parts = append(parts, fmt.Sprintf("%d service creates", creates))
+	}
+	if deletes > 0 {
+		parts = append(parts, fmt.Sprintf("%d service deletes", deletes))
+	}
+	if lsDisables > 0 || lsEnables > 0 {
+		parts = append(parts, fmt.Sprintf("%d LS disables, %d LS enables", lsDisables, lsEnables))
 	}
 
-	cc.AddResult(r)
-	return recentLogCount
-}
-
-func checkReconciliationBehavior(ctx context.Context, cc *checks.ClusterContext, recentLogCount int) {
-	cc.SetCheck("pdo_reconciliation_behavior")
-
-	r := checks.Result{
-		Check:    "pdo_reconciliation_behavior",
-		Severity: checks.SeverityInfo,
-		Details: map[string]any{
-			"namespace":        cc.Operator.Namespace,
-			"recent_log_count": recentLogCount,
-			"lookback_window":  "50 lines",
-			"cluster_type":     cc.ClusterType,
-			"description":      "Analyzes reconciliation log volume to detect hot loops. On hive/management clusters, elevated reconciliation is expected due to many ClusterDeployments.",
-			"pass_criteria":    "INFO: Reports log volume with cluster type context.",
-		},
-	}
-
-	r.Status = checks.StatusInfo
-	if cc.ClusterType == "management_cluster" {
-		r.Message = fmt.Sprintf("Reconciliation log volume: %d lines — elevated activity expected on MC (many ClusterDeployments)", recentLogCount)
-		r.Details["note"] = "Management clusters have many ClusterDeployments, so PDO reconciliation volume is naturally higher"
+	if len(errors) > 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Reconciliation active with errors — %s, %d errors", strings.Join(parts, ", "), len(errors))
+	} else if reconcileCompletes > 0 {
+		r.Status = checks.StatusPass
+		r.Message = strings.Join(parts, ", ")
+	} else if reconcileStarts > 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d reconcile starts but no completions in recent logs", reconcileStarts)
 	} else {
-		r.Message = fmt.Sprintf("Reconciliation log volume: %d lines", recentLogCount)
+		r.Status = checks.StatusInfo
+		r.Message = "No reconciliation activity in recent logs"
 	}
+
 	cc.AddResult(r)
 }
 
