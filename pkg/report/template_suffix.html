@@ -2874,7 +2874,6 @@
                         }
                     }
                     rowHTML += `<td class="resource-cell" onclick="event.stopPropagation(); expandToCheck('${clusterIdx}', '${bootCheckId}')" style="cursor:pointer"><span class="${bootClass}" title="${(bootCheck?.message || '').replace(/"/g, '&quot;')}">${bootLabel}</span></td>`;
-                } else {
                 } else if (isHCP) {
                     const nsCheck = (cluster.health_checks || []).find(c => c.check === 'hcp_namespace_health');
                     const podCheck = (cluster.health_checks || []).find(c => c.check === 'hcp_pod_health');
