@@ -587,40 +587,17 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 	start := now - 604800
 	step := 3600
 
-	// Query aggregated by workload owner via kube_pod_owner join
-	// This groups pods by their owning Deployment/StatefulSet/DaemonSet/ReplicaSet
-	memQuery := `sum by (owner_name) (
-  container_memory_working_set_bytes{namespace=~"clusters-.*|ocm-.*",container!=""}
-  * on(namespace, pod) group_left(owner_name) kube_pod_owner{namespace=~"clusters-.*|ocm-.*"}
-) / 1048576`
+	// Query per-pod, then aggregate by workload name in Go
+	// The kube_pod_owner join approach fails with "duplicate series" errors
+	memQuery := `sum by (namespace, pod) (container_memory_working_set_bytes{namespace=~"clusters-.*|ocm-.*",container!=""}) / 1048576`
 	memData, memErr := cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step)
-	cc.RecordError("HCP workload memory trends", memErr)
+	cc.RecordError("HCP pod memory trends", memErr)
 
-	// Fallback: if kube_pod_owner join fails, query per-pod and aggregate in Go
-	if memErr != nil || memData == "" {
-		memQuery = `sum by (namespace, pod) (container_memory_working_set_bytes{namespace=~"clusters-.*|ocm-.*",container!=""}) / 1048576`
-		memData, memErr = cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step)
-		cc.RecordError("HCP pod memory trends (fallback)", memErr)
-	}
-
-	cpuQuery := `sum by (owner_name) (
-  rate(container_cpu_usage_seconds_total{namespace=~"clusters-.*|ocm-.*",container!=""}[5m])
-  * on(namespace, pod) group_left(owner_name) kube_pod_owner{namespace=~"clusters-.*|ocm-.*"}
-) * 1000`
+	cpuQuery := `sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{namespace=~"clusters-.*|ocm-.*",container!=""}[5m])) * 1000`
 	cpuData, cpuErr := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step)
-	cc.RecordError("HCP workload CPU trends", cpuErr)
-
-	if cpuErr != nil || cpuData == "" {
-		cpuQuery = `sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{namespace=~"clusters-.*|ocm-.*",container!=""}[5m])) * 1000`
-		cpuData, cpuErr = cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step)
-		cc.RecordError("HCP pod CPU trends (fallback)", cpuErr)
-	}
+	cc.RecordError("HCP pod CPU trends", cpuErr)
 
 	workloadLabel := func(m map[string]string) string {
-		if name := m["owner_name"]; name != "" {
-			return name
-		}
-		// Fallback: derive from pod name
 		if pod := m["pod"]; pod != "" {
 			return podToWorkload(m["namespace"] + "/" + pod)
 		}

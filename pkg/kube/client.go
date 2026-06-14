@@ -749,14 +749,18 @@ func (cc *ClusterClient) CanQueryMetrics() bool {
 func (cc *ClusterClient) QueryMetrics(ctx context.Context, rawQuery string) (string, error) {
 	log := logging.WithCheck("query_metrics")
 
+	var pfErr, execErr error
+
 	// Try 1: Port-forward to Thanos (no elevation needed)
 	result, err := cc.QueryThanosViaPortForward(ctx, rawQuery)
 	if err == nil {
 		return result, nil
 	}
 	if cc.pfSetupErr != nil {
-		log.WithField("error", cc.pfSetupErr).Debug("Port-forward unavailable, trying exec")
+		pfErr = cc.pfSetupErr
+		log.WithField("error", pfErr).Debug("Port-forward unavailable, trying exec")
 	} else {
+		pfErr = err
 		log.WithField("error", err).Debug("Port-forward query failed, trying exec")
 	}
 
@@ -767,6 +771,7 @@ func (cc *ClusterClient) QueryMetrics(ctx context.Context, rawQuery string) (str
 		if err == nil {
 			return result, nil
 		}
+		execErr = err
 		log.WithField("error", err).Debug("Thanos exec failed, trying RHOBS remote")
 	}
 
@@ -775,8 +780,15 @@ func (cc *ClusterClient) QueryMetrics(ctx context.Context, rawQuery string) (str
 		return cc.rhobsClient.QueryInstant(rawQuery)
 	}
 
-	return "", fmt.Errorf("metrics unavailable: tried port-forward (%v), exec (elevation: %v), no RHOBS remote configured",
-		cc.pfSetupErr, cc.CanElevate())
+	// Build descriptive error with each method's failure reason
+	parts := []string{fmt.Sprintf("port-forward: %v", pfErr)}
+	if cc.CanElevate() {
+		parts = append(parts, fmt.Sprintf("exec: %v", execErr))
+	} else {
+		parts = append(parts, "exec: elevation not available")
+	}
+	parts = append(parts, "RHOBS remote: not configured")
+	return "", fmt.Errorf("metrics unavailable — %s", strings.Join(parts, " | "))
 }
 
 // QueryMetricsRange runs a PromQL range query using the best available method.
@@ -784,10 +796,17 @@ func (cc *ClusterClient) QueryMetrics(ctx context.Context, rawQuery string) (str
 func (cc *ClusterClient) QueryMetricsRange(ctx context.Context, rawQuery string, start, end int64, step int) (string, error) {
 	log := logging.WithCheck("query_metrics_range")
 
+	var pfErr, execErr error
+
 	// Try 1: Port-forward
 	result, err := cc.QueryThanosRangeViaPortForward(ctx, rawQuery, start, end, step)
 	if err == nil {
 		return result, nil
+	}
+	if cc.pfSetupErr != nil {
+		pfErr = cc.pfSetupErr
+	} else {
+		pfErr = err
 	}
 
 	// Try 2: Thanos exec
@@ -797,6 +816,7 @@ func (cc *ClusterClient) QueryMetricsRange(ctx context.Context, rawQuery string,
 		if err == nil {
 			return result, nil
 		}
+		execErr = err
 		log.WithField("error", err).Debug("Thanos exec range failed, trying RHOBS remote")
 	}
 
@@ -805,8 +825,14 @@ func (cc *ClusterClient) QueryMetricsRange(ctx context.Context, rawQuery string,
 		return cc.rhobsClient.QueryRange(rawQuery, start, end, step)
 	}
 
-	return "", fmt.Errorf("metrics unavailable: tried port-forward (%v), exec (elevation: %v), no RHOBS remote configured",
-		cc.pfSetupErr, cc.CanElevate())
+	parts := []string{fmt.Sprintf("port-forward: %v", pfErr)}
+	if cc.CanElevate() {
+		parts = append(parts, fmt.Sprintf("exec: %v", execErr))
+	} else {
+		parts = append(parts, "exec: elevation not available")
+	}
+	parts = append(parts, "RHOBS remote: not configured")
+	return "", fmt.Errorf("metrics unavailable — %s", strings.Join(parts, " | "))
 }
 
 // setupPortForward establishes a port-forward to a Prometheus-compatible pod.
