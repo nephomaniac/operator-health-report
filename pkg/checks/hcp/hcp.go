@@ -904,7 +904,7 @@ func checkPodLogs(ctx context.Context, cc *checks.ClusterContext, concerningPods
 	case logsUnavailable == len(logTargets):
 		r.Status = checks.StatusInfo
 		r.Severity = checks.SeverityInfo
-		r.Message = "Pod logs unavailable — in production, use RHOBS for log analysis"
+		r.Message = fmt.Sprintf("Pod logs unavailable for %d pod(s) — may require elevation or RHOBS remote access", logsUnavailable)
 	case len(findings) > 0:
 		totalErrors := 0
 		for _, f := range findings {
