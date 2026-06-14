@@ -2262,7 +2262,8 @@
                                                 const diffMs = end - start;
                                                 if (diffMs > 0) {
                                                     const mins = Math.round(diffMs / 60000);
-                                                    if (mins < 60) timeSpan = ' over ' + mins + 'm';
+                                                    if (mins < 1) timeSpan = ' in <1m';
+                                                    else if (mins < 60) timeSpan = ' over ' + mins + 'm';
                                                     else if (mins < 1440) timeSpan = ' over ' + Math.round(mins/60) + 'h';
                                                     else timeSpan = ' over ' + Math.round(mins/1440) + 'd';
                                                 }
