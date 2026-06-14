@@ -1152,6 +1152,14 @@
                 restartsByWorkload[wl].push(evt.timestamp * 1000);
             });
 
+            // Add workloads that have restarts but no data in this chart (e.g., audit-webhook in memory chart)
+            const chartedLabels = new Set(sorted.map(s => s.label));
+            Object.keys(restartsByWorkload).forEach(wl => {
+                if (!chartedLabels.has(wl)) {
+                    sorted.push({ label: wl, values: [], origIdx: sorted.length });
+                }
+            });
+
             // Build all workload data (line + restart scatter)
             const workloads = sorted.map((s, sortIdx) => {
                 const color = getColor(s.label, sortIdx);
@@ -1162,19 +1170,25 @@
                 const wlRestarts = restartsByWorkload[s.label] || [];
                 const restartPoints = [];
                 wlRestarts.forEach(ts => {
-                    let closestY = null, closestDist = Infinity;
-                    lineData.forEach(d => {
-                        const dist = Math.abs(d.x - ts);
-                        if (dist < closestDist) { closestDist = dist; closestY = d.y; }
-                    });
-                    if (closestY !== null && closestDist < 7200000) {
-                        restartPoints.push({ x: ts, y: closestY });
+                    if (lineData.length === 0) {
+                        // No resource data for this workload in this chart — show at y=0
+                        restartPoints.push({ x: ts, y: 0 });
+                    } else {
+                        let closestY = null, closestDist = Infinity;
+                        lineData.forEach(d => {
+                            const dist = Math.abs(d.x - ts);
+                            if (dist < closestDist) { closestDist = dist; closestY = d.y; }
+                        });
+                        if (closestY !== null && closestDist < 7200000) {
+                            restartPoints.push({ x: ts, y: closestY });
+                        }
                     }
                 });
 
                 return {
                     label: s.label, color, lineData, restartPoints, peak,
-                    restartCount: wlRestarts.length, active: sortIdx < 5
+                    hasData: lineData.length > 0,
+                    restartCount: wlRestarts.length, active: sortIdx < 5 && lineData.length > 0
                 };
             });
 
@@ -1296,7 +1310,8 @@
                 pill.innerHTML = `<span class="pill-dot" style="background:${w.color}"></span>${w.label}` +
                     concernIcon +
                     (w.restartCount > 0 ? `<span class="pill-restart">↻${w.restartCount}</span>` : '') +
-                    `<span style="font-size:0.8em;color:#999;margin-left:3px">${Math.round(w.peak)}</span>`;
+                    (w.hasData ? `<span style="font-size:0.8em;color:#999;margin-left:3px">${Math.round(w.peak)}</span>` :
+                     `<span style="font-size:0.7em;color:#999;margin-left:3px;font-style:italic">restarts only</span>`);
                 pill.onclick = () => {
                     w.active = !w.active;
                     updateChart();
@@ -2047,7 +2062,7 @@
                         })()}
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
-                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health' || key === 'hcp_status' || key === 'hcp_namespaces' || key === 'node_resources' || key === 'role_utilization' || key === 'nodes' || key === 'degraded_names') return '';
+                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health' || key === 'hcp_status' || key === 'hcp_namespaces' || key === 'node_resources' || key === 'role_utilization' || key === 'nodes' || key === 'degraded_names' || key === 'findings') return '';
 
                                 // Custom rendering for OME per-metric table
                                 if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {
@@ -2164,16 +2179,16 @@
                                 <strong style="display: block; margin-bottom: 8px; color: #667eea;">Concerning Pods (${check.details.concerning_pods.length}):</strong>
                                 <div style="overflow-x: auto;">
                                 <table style="width:100%;border-collapse:collapse;font-size:0.8em;font-family:var(--mono);">
-                                    <thead><tr style="border-bottom:2px solid #d0d4e0;background:#f0f2f6;">
-                                        <th style="text-align:left;padding:5px 8px;">Pod</th>
-                                        <th style="text-align:left;padding:5px 8px;">Namespace</th>
-                                        <th style="text-align:center;padding:5px 8px;">Phase</th>
-                                        <th style="text-align:right;padding:5px 8px;">Mem</th>
-                                        <th style="text-align:right;padding:5px 8px;">Req</th>
-                                        <th style="text-align:right;padding:5px 8px;">Ratio</th>
-                                        <th style="text-align:right;padding:5px 8px;">CPU</th>
-                                        <th style="text-align:right;padding:5px 8px;">Restarts</th>
-                                        <th style="text-align:center;padding:5px 8px;">Flags</th>
+                                    <thead><tr style="border-bottom:2px solid #667eea;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;">
+                                        <th style="text-align:left;padding:6px 8px;color:#444;">Pod</th>
+                                        <th style="text-align:left;padding:6px 8px;color:#444;">Namespace</th>
+                                        <th style="text-align:center;padding:6px 8px;color:#444;">Phase</th>
+                                        <th style="text-align:right;padding:6px 8px;color:#444;">Mem</th>
+                                        <th style="text-align:right;padding:6px 8px;color:#444;">Req</th>
+                                        <th style="text-align:right;padding:6px 8px;color:#444;">Ratio</th>
+                                        <th style="text-align:right;padding:6px 8px;color:#444;">CPU</th>
+                                        <th style="text-align:right;padding:6px 8px;color:#444;">Restarts</th>
+                                        <th style="text-align:center;padding:6px 8px;color:#444;">Flags</th>
                                     </tr></thead>
                                     <tbody>
                                     ${check.details.concerning_pods.map(p => {
@@ -2229,6 +2244,21 @@
                                     </tbody>
                                 </table>
                                 </div>
+                            </div>
+                        ` : ''}
+                        ${check.details?.findings && Array.isArray(check.details.findings) && check.details.findings.length > 0 ? `
+                            <div style="margin-top: 12px;">
+                                <strong style="display: block; margin-bottom: 8px; color: #667eea;">Log Findings (${check.details.findings.length} pod(s)):</strong>
+                                ${check.details.findings.map(f => `
+                                    <div style="margin-bottom: 12px; background: #f8f9fa; border-radius: 4px; border-left: 3px solid #dc3545; padding: 10px;">
+                                        <div style="font-family:var(--mono);font-size:0.85em;font-weight:600;margin-bottom:6px;color:#333;">
+                                            ${f.pod} <span style="color:#dc3545;font-weight:700;">(${f.errors} errors)</span>
+                                        </div>
+                                        ${(f.samples || []).map(s => `
+                                            <div style="font-family:var(--mono);font-size:0.78em;color:#555;padding:4px 8px;margin:3px 0;background:#fff;border:1px solid #e8eaf0;border-radius:3px;word-break:break-all;white-space:pre-wrap;max-height:80px;overflow-y:auto;">${s.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+                                        `).join('')}
+                                    </div>
+                                `).join('')}
                             </div>
                         ` : ''}
                         ${check.check === 'alertmanager_pods' && check.details && check.details.restart_details && Array.isArray(check.details.restart_details) && check.details.restart_details.length > 0 ? `
