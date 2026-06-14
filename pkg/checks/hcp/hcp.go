@@ -842,6 +842,15 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 	r.Details["rising_workloads"] = len(risingWorkloads)
 	r.Details["sawtooth_workloads"] = len(sawtoothWorkloads)
 	r.Details["total_restart_events"] = totalRestarts
+	if len(leakWorkloads) > 0 {
+		r.Details["leak_workload_list"] = leakWorkloads
+	}
+	if len(risingWorkloads) > 0 {
+		r.Details["rising_workload_list"] = risingWorkloads
+	}
+	if len(sawtoothWorkloads) > 0 {
+		r.Details["sawtooth_workload_list"] = sawtoothWorkloads
+	}
 
 	var parts []string
 	severity := checks.SeverityInfo

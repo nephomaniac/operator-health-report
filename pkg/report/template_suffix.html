@@ -1118,6 +1118,34 @@
             });
         }
 
+        // Activate a workload in HCP charts — finds the pill and clicks it, scrolls chart into view
+        function activateHCPWorkload(el, workloadName) {
+            // Find the closest chart-wrapper ancestor, then look for the pill selector
+            const detailsSection = el.closest('.cluster-section') || el.closest('.cluster-details-cell');
+            if (!detailsSection) return;
+            const selectors = detailsSection.querySelectorAll('.hcp-chart-selector');
+            selectors.forEach(sel => {
+                const pills = sel.querySelectorAll('.hcp-pill');
+                pills.forEach(pill => {
+                    // Check if this pill's text contains the workload name
+                    if (pill.textContent.includes(workloadName)) {
+                        // Activate if not already active
+                        if (pill.classList.contains('inactive')) {
+                            pill.click();
+                        }
+                        // Scroll the chart into view
+                        const chartWrapper = sel.closest('.chart-wrapper');
+                        if (chartWrapper) {
+                            chartWrapper.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                        }
+                        // Briefly flash the pill
+                        pill.style.outline = '2px solid #667eea';
+                        setTimeout(() => { pill.style.outline = ''; }, 2000);
+                    }
+                });
+            });
+        }
+
         function createHCPChart(canvasId, seriesData, restartEvents, yLabel, scaleFactor, thresholds, colorMap) {
             if (!seriesData || seriesData.length === 0) return;
             const defaultColors = ['#6c8cff','#2dd4a0','#f5c542','#f25c5c','#56b8e6','#ff9f40','#a855f7','#ec4899',
@@ -2062,7 +2090,7 @@
                         })()}
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
-                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health' || key === 'hcp_status' || key === 'hcp_namespaces' || key === 'node_resources' || key === 'role_utilization' || key === 'nodes' || key === 'degraded_names' || key === 'findings') return '';
+                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health' || key === 'hcp_status' || key === 'hcp_namespaces' || key === 'node_resources' || key === 'role_utilization' || key === 'nodes' || key === 'degraded_names' || key === 'findings' || key.endsWith('_workload_list')) return '';
 
                                 // Custom rendering for OME per-metric table
                                 if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {
@@ -2279,6 +2307,23 @@
                                         ).join('')}
                                     </div>
                                 `).join('')}
+                            </div>
+                        ` : ''}
+                        ${check.check === 'hcp_resource_trends' && (check.details?.sawtooth_workload_list || check.details?.rising_workload_list || check.details?.leak_workload_list) ? `
+                            <div style="margin-top: 12px;">
+                                <strong style="display: block; margin-bottom: 8px; color: #667eea;">Workload Concerns — click to view in chart:</strong>
+                                ${(check.details.sawtooth_workload_list || []).map(w => {
+                                    const name = w.split(' (')[0];
+                                    return '<div style="margin:4px 0;padding:6px 10px;background:#fff;border:1px solid #dc3545;border-radius:4px;display:inline-block;margin-right:6px;cursor:pointer;" onclick="activateHCPWorkload(this, \\''+name+'\\')"><span style="color:#dc3545;font-weight:700;">⚠ Sawtooth:</span> ' + w.replace(/</g,'&lt;') + '</div>';
+                                }).join('')}
+                                ${(check.details.rising_workload_list || []).map(w => {
+                                    const name = w.split(' (')[0];
+                                    return '<div style="margin:4px 0;padding:6px 10px;background:#fff;border:1px solid #ff9f40;border-radius:4px;display:inline-block;margin-right:6px;cursor:pointer;" onclick="activateHCPWorkload(this, \\''+name+'\\')"><span style="color:#ff9f40;font-weight:700;">↗ Rising:</span> ' + w.replace(/</g,'&lt;') + '</div>';
+                                }).join('')}
+                                ${(check.details.leak_workload_list || []).map(w => {
+                                    const name = w.split(' (')[0];
+                                    return '<div style="margin:4px 0;padding:6px 10px;background:#fff;border:1px solid #ffc107;border-radius:4px;display:inline-block;margin-right:6px;cursor:pointer;" onclick="activateHCPWorkload(this, \\''+name+'\\')"><span style="color:#ffc107;font-weight:700;">⬆ High mem:</span> ' + w.replace(/</g,'&lt;') + '</div>';
+                                }).join('')}
                             </div>
                         ` : ''}
                         ${check.check === 'alertmanager_pods' && check.details && check.details.restart_details && Array.isArray(check.details.restart_details) && check.details.restart_details.length > 0 ? `
