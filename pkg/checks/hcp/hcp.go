@@ -323,6 +323,11 @@ func checkPodHealth(ctx context.Context, cc *checks.ClusterContext, hcpNamespace
 }
 
 func analyzePod(pod *corev1.Pod, podMetrics map[string]podMetric) *concerningPod {
+	// Completed Jobs (Succeeded phase) are not concerning
+	if pod.Status.Phase == corev1.PodSucceeded {
+		return nil
+	}
+
 	isConcerning := false
 	cp := &concerningPod{
 		Namespace: pod.Namespace,

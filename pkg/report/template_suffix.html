@@ -1106,6 +1106,50 @@
             if (!seriesData || seriesData.length === 0) return;
             const colors = ['#6c8cff','#2dd4a0','#f5c542','#f25c5c','#56b8e6','#ff9f40','#a855f7','#ec4899',
                             '#14b8a6','#f97316','#8b5cf6','#06b6d4','#84cc16','#e11d48','#0ea5e9'];
+
+            // Sort by peak value descending
+            const sorted = seriesData.map((s, i) => ({...s, origIdx: i}));
+            sorted.sort((a, b) => {
+                const peakA = Math.max(...(a.values || []).map(p => parseFloat(p[1]) * scaleFactor));
+                const peakB = Math.max(...(b.values || []).map(p => parseFloat(p[1]) * scaleFactor));
+                return peakB - peakA;
+            });
+
+            // Group restarts by workload
+            const restartsByWorkload = {};
+            (restartEvents || []).forEach(evt => {
+                const wl = evt.workload || 'unknown';
+                if (!restartsByWorkload[wl]) restartsByWorkload[wl] = [];
+                restartsByWorkload[wl].push(evt.timestamp * 1000);
+            });
+
+            // Build all workload data (line + restart scatter)
+            const workloads = sorted.map((s, sortIdx) => {
+                const color = colors[sortIdx % colors.length];
+                const lineData = (s.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * scaleFactor }));
+                const peak = lineData.length > 0 ? Math.max(...lineData.map(d => d.y)) : 0;
+
+                // Find restart points on this workload's line
+                const wlRestarts = restartsByWorkload[s.label] || [];
+                const restartPoints = [];
+                wlRestarts.forEach(ts => {
+                    let closestY = null, closestDist = Infinity;
+                    lineData.forEach(d => {
+                        const dist = Math.abs(d.x - ts);
+                        if (dist < closestDist) { closestDist = dist; closestY = d.y; }
+                    });
+                    if (closestY !== null && closestDist < 7200000) {
+                        restartPoints.push({ x: ts, y: closestY });
+                    }
+                });
+
+                return {
+                    label: s.label, color, lineData, restartPoints, peak,
+                    restartCount: wlRestarts.length, active: sortIdx < 3
+                };
+            });
+
+            // Threshold annotations
             const annotations = {};
             (thresholds || []).forEach((t, i) => {
                 annotations['threshold_' + i] = {
@@ -1114,41 +1158,54 @@
                     label: { display: true, content: t.label, position: 'end', backgroundColor: t.color + '80', color: '#fff', font: { size: 10, weight: 'bold' }, padding: 3 }
                 };
             });
-            // Add restart events as vertical markers
-            (restartEvents || []).forEach((evt, i) => {
-                if (i > 20) return; // limit markers
-                annotations['restart_' + i] = {
-                    type: 'line',
-                    xMin: evt.timestamp * 1000, xMax: evt.timestamp * 1000,
-                    borderColor: '#ff9f40', borderWidth: 1.5,
-                    label: { display: i < 5, content: '↻ ' + (evt.workload || 'restart'), position: 'start', backgroundColor: '#ff9f4080', color: '#fff', font: { size: 8 }, padding: 2, rotation: -90 }
-                };
-            });
-            const thresholdDatasets = (thresholds || []).map(t => ({
-                label: t.label, data: [], borderColor: t.color, borderDash: [6, 3], borderWidth: 1.5, pointRadius: 0, backgroundColor: 'transparent',
-            }));
-            const restartDataset = (restartEvents && restartEvents.length > 0) ? [{
-                label: '↻ Restart events', data: [], borderColor: '#ff9f40', borderDash: [2, 4], borderWidth: 1.5, pointRadius: 0, backgroundColor: 'transparent',
-            }] : [];
-            const datasets = seriesData.map((s, i) => ({
-                label: s.label || `workload-${i}`,
-                data: (s.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * scaleFactor })),
-                borderColor: colors[i % colors.length],
-                backgroundColor: 'transparent',
-                tension: 0.3, pointRadius: 0, borderWidth: 1.5
-            }));
-            new Chart(document.getElementById(canvasId), {
+
+            // Build initial datasets (top 3 active)
+            function buildDatasets() {
+                const ds = [];
+                workloads.forEach(w => {
+                    ds.push({
+                        label: w.label,
+                        data: w.lineData,
+                        borderColor: w.color,
+                        backgroundColor: 'transparent',
+                        tension: 0.3, pointRadius: 0, borderWidth: 2,
+                        hidden: !w.active
+                    });
+                    if (w.restartPoints.length > 0) {
+                        ds.push({
+                            label: '↻ ' + w.label,
+                            data: w.restartPoints,
+                            type: 'scatter',
+                            backgroundColor: '#dc3545',
+                            borderColor: w.color,
+                            pointRadius: 7, pointStyle: 'crossRot',
+                            pointBorderWidth: 2.5, pointBorderColor: '#dc3545',
+                            showLine: false, hidden: !w.active
+                        });
+                    }
+                });
+                // Threshold legend entries
+                (thresholds || []).forEach(t => {
+                    ds.push({ label: t.label, data: [], borderColor: t.color, borderDash: [6, 3], borderWidth: 1.5, pointRadius: 0, backgroundColor: 'transparent' });
+                });
+                return ds;
+            }
+
+            const chart = new Chart(document.getElementById(canvasId), {
                 type: 'line',
-                data: { datasets: [...datasets, ...thresholdDatasets, ...restartDataset] },
+                data: { datasets: buildDatasets() },
                 options: {
                     responsive: true, maintainAspectRatio: true,
                     plugins: {
-                        legend: { display: true, position: 'top', labels: { boxWidth: 8, font: { size: 10 } } },
+                        legend: { display: false },
                         tooltip: {
-                            mode: 'index', intersect: false,
+                            mode: 'nearest', intersect: true,
                             callbacks: {
                                 title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
-                                label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1)
+                                label: ctx => {
+                                    if (ctx.dataset.label.startsWith('↻')) return ctx.dataset.label + ' (restart)';
+                                    return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + ' ' + yLabel;
+                                }
                             }
                         },
                         annotation: { annotations }
@@ -1159,6 +1216,68 @@
                     }
                 }
             });
+
+            // Build workload selector UI below the chart
+            const canvasEl = document.getElementById(canvasId);
+            const selectorDiv = document.createElement('div');
+            selectorDiv.className = 'hcp-chart-selector';
+
+            const label = document.createElement('span');
+            label.className = 'selector-label';
+            label.textContent = 'Workloads';
+            selectorDiv.appendChild(label);
+
+            const actions = document.createElement('span');
+            actions.className = 'selector-actions';
+            const mkBtn = (text, fn) => {
+                const b = document.createElement('button');
+                b.textContent = text;
+                b.onclick = () => { fn(); updateChart(); updatePills(); };
+                return b;
+            };
+            actions.appendChild(mkBtn('All', () => workloads.forEach(w => w.active = true)));
+            actions.appendChild(mkBtn('Clear', () => workloads.forEach(w => w.active = false)));
+            actions.appendChild(mkBtn('Top 3', () => workloads.forEach((w, i) => w.active = i < 3)));
+            actions.appendChild(mkBtn('Leaks', () => {
+                workloads.forEach(w => w.active = w.peak > 200);
+            }));
+            actions.appendChild(mkBtn('Restarted', () => {
+                workloads.forEach(w => w.active = w.restartCount > 0);
+            }));
+            selectorDiv.appendChild(actions);
+
+            const pills = [];
+            workloads.forEach((w, idx) => {
+                const pill = document.createElement('span');
+                pill.className = 'hcp-pill ' + (w.active ? 'active' : 'inactive');
+                pill.style.color = w.color;
+                pill.innerHTML = `<span class="pill-dot" style="background:${w.color}"></span>${w.label}` +
+                    (w.restartCount > 0 ? `<span class="pill-restart">↻${w.restartCount}</span>` : '') +
+                    `<span style="font-size:0.8em;color:#999;margin-left:3px">${Math.round(w.peak)}</span>`;
+                pill.onclick = () => {
+                    w.active = !w.active;
+                    updateChart();
+                    updatePills();
+                };
+                pills.push({ el: pill, workload: w });
+                selectorDiv.appendChild(pill);
+            });
+
+            canvasEl.parentNode.appendChild(selectorDiv);
+
+            function updatePills() {
+                pills.forEach(p => {
+                    p.el.className = 'hcp-pill ' + (p.workload.active ? 'active' : 'inactive');
+                });
+            }
+
+            function updateChart() {
+                chart.data.datasets.forEach(ds => {
+                    const wl = workloads.find(w => ds.label === w.label || ds.label === '↻ ' + w.label);
+                    if (wl) ds.hidden = !wl.active;
+                });
+                chart.update('none');
+            }
         }
 
         function generateClusterDetails(cluster, clusterIdx) {
@@ -1885,7 +2004,10 @@
                         })()}
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
-                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria') return '';
+                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health') return '';
+
+                                // Custom rendering for concerning_pods table
+                                if (key === 'concerning_pods_TABLE_RENDERED_BELOW') return '';
 
                                 // Custom rendering for OME per-metric table
                                 if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {
@@ -1997,6 +2119,78 @@
                                 `;
                             }).join('')}
                         </div>
+                        ${check.details?.concerning_pods && Array.isArray(check.details.concerning_pods) && check.details.concerning_pods.length > 0 ? `
+                            <div style="margin-top: 12px;">
+                                <strong style="display: block; margin-bottom: 8px; color: #667eea;">Concerning Pods (${check.details.concerning_pods.length}):</strong>
+                                <div style="overflow-x: auto;">
+                                <table style="width:100%;border-collapse:collapse;font-size:0.8em;font-family:var(--mono);">
+                                    <thead><tr style="border-bottom:2px solid #d0d4e0;background:#f0f2f6;">
+                                        <th style="text-align:left;padding:5px 8px;">Pod</th>
+                                        <th style="text-align:left;padding:5px 8px;">Namespace</th>
+                                        <th style="text-align:center;padding:5px 8px;">Phase</th>
+                                        <th style="text-align:right;padding:5px 8px;">Mem</th>
+                                        <th style="text-align:right;padding:5px 8px;">Req</th>
+                                        <th style="text-align:right;padding:5px 8px;">Ratio</th>
+                                        <th style="text-align:right;padding:5px 8px;">CPU</th>
+                                        <th style="text-align:right;padding:5px 8px;">Restarts</th>
+                                        <th style="text-align:center;padding:5px 8px;">Flags</th>
+                                    </tr></thead>
+                                    <tbody>
+                                    ${check.details.concerning_pods.map(p => {
+                                        const flags = [];
+                                        if (p.oomkilled) flags.push('<span style="color:#dc3545;font-weight:bold;">OOM</span>');
+                                        if (p.crashlooping) flags.push('<span style="color:#dc3545;">CrashLoop</span>');
+                                        if (p.not_ready) flags.push('<span style="color:#f5c542;">NotReady</span>');
+                                        if (p.mem_ratio) flags.push('<span style="color:#ff9f40;">' + p.mem_ratio + '</span>');
+                                        const memColor = (p.mem_mb || 0) > 1024 ? '#dc3545' : (p.mem_mb || 0) > 200 ? '#ff9f40' : '#333';
+                                        // Shorten namespace — show just the HCP name portion
+                                        const nsParts = (p.namespace || '').split('-');
+                                        const shortNS = nsParts.length > 2 ? nsParts.slice(-1).join('-') : p.namespace;
+                                        return '<tr style="border-bottom:1px solid #e8eaf0;">' +
+                                            '<td style="padding:4px 8px;max-width:250px;overflow:hidden;text-overflow:ellipsis;" title="' + p.pod + '">' + (p.pod || '') + '</td>' +
+                                            '<td style="padding:4px 8px;color:#888;max-width:120px;overflow:hidden;text-overflow:ellipsis;" title="' + p.namespace + '">' + shortNS + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:center;">' + (p.phase || '') + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:right;color:' + memColor + ';font-weight:600;">' + (p.mem_mb ? p.mem_mb + ' MB' : '-') + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:right;color:#888;">' + (p.mem_request_mb ? p.mem_request_mb + ' MB' : '-') + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:right;color:#ff9f40;font-weight:600;">' + (p.mem_ratio || '-') + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:right;">' + (p.cpu_millicores ? p.cpu_millicores + 'm' : '-') + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:right;">' + (p.restarts || 0) + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:center;">' + (flags.length > 0 ? flags.join(' ') : '-') + '</td>' +
+                                        '</tr>';
+                                    }).join('')}
+                                    </tbody>
+                                </table>
+                                </div>
+                            </div>
+                        ` : ''}
+                        ${check.details?.namespace_health && Array.isArray(check.details.namespace_health) && check.details.namespace_health.length > 0 ? `
+                            <div style="margin-top: 12px;">
+                                <strong style="display: block; margin-bottom: 8px; color: #667eea;">Degraded HCP Namespaces (${check.details.namespace_health.length}):</strong>
+                                <div style="overflow-x: auto;">
+                                <table style="width:100%;border-collapse:collapse;font-size:0.8em;font-family:var(--mono);">
+                                    <thead><tr style="border-bottom:2px solid #d0d4e0;background:#f0f2f6;">
+                                        <th style="text-align:left;padding:5px 8px;">Namespace</th>
+                                        <th style="text-align:right;padding:5px 8px;">Total</th>
+                                        <th style="text-align:right;padding:5px 8px;">Healthy</th>
+                                        <th style="text-align:right;padding:5px 8px;">Degraded</th>
+                                        <th style="text-align:center;padding:5px 8px;">All Down</th>
+                                    </tr></thead>
+                                    <tbody>
+                                    ${check.details.namespace_health.map(ns => {
+                                        const shortNS = ns.namespace.length > 40 ? '...' + ns.namespace.slice(-35) : ns.namespace;
+                                        return '<tr style="border-bottom:1px solid #e8eaf0;">' +
+                                            '<td style="padding:4px 8px;" title="' + ns.namespace + '">' + shortNS + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:right;">' + ns.total + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:right;color:#2ecc71;">' + ns.healthy + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:right;color:#dc3545;font-weight:600;">' + ns.degraded + '</td>' +
+                                            '<td style="padding:4px 8px;text-align:center;">' + (ns.all_down ? '<span style="color:#dc3545;">Yes</span>' : '-') + '</td>' +
+                                        '</tr>';
+                                    }).join('')}
+                                    </tbody>
+                                </table>
+                                </div>
+                            </div>
+                        ` : ''}
                         ${check.check === 'alertmanager_pods' && check.details && check.details.restart_details && Array.isArray(check.details.restart_details) && check.details.restart_details.length > 0 ? `
                             <div style="margin-top: 15px;">
                                 <strong style="display: block; margin-bottom: 8px; color: #667eea;">Restart Details by Pod:</strong>

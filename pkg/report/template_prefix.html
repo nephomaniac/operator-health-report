@@ -430,6 +430,41 @@
         .chart-wrapper div { color: #333; }
         .chart-wrapper strong { color: #111318; }
         .chart-canvas { max-height: 320px; background: #fafbfc; border-radius: 4px; padding: 4px; }
+        .hcp-chart-selector {
+            display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+            padding: 10px 12px; background: #f0f2f6; border-radius: 4px;
+            align-items: center;
+        }
+        .hcp-chart-selector .selector-label {
+            font-size: 0.75em; font-weight: 600; color: #666;
+            text-transform: uppercase; letter-spacing: 0.05em;
+            margin-right: 4px; user-select: none;
+        }
+        .hcp-chart-selector .selector-actions {
+            display: flex; gap: 4px; margin-right: 8px;
+        }
+        .hcp-chart-selector .selector-actions button {
+            font-size: 0.7em; padding: 2px 8px; border: 1px solid #c0c4d0;
+            border-radius: 3px; background: #fff; color: #555; cursor: pointer;
+            font-family: var(--font); transition: all 0.15s;
+        }
+        .hcp-chart-selector .selector-actions button:hover { background: #e8eaf0; }
+        .hcp-pill {
+            display: inline-flex; align-items: center; gap: 4px;
+            padding: 3px 10px 3px 6px; border-radius: 14px;
+            font-size: 0.75em; font-family: var(--mono);
+            cursor: pointer; user-select: none; transition: all 0.15s;
+            border: 1.5px solid transparent;
+        }
+        .hcp-pill.active { border-color: currentColor; }
+        .hcp-pill.inactive { opacity: 0.35; border-color: #c0c4d0; }
+        .hcp-pill .pill-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            display: inline-block; flex-shrink: 0;
+        }
+        .hcp-pill .pill-restart {
+            font-size: 0.85em; color: #dc3545; margin-left: 2px;
+        }
 
         /* Health check accordion — dark cards on light island */
         .health-checks { margin-top: 16px; }
