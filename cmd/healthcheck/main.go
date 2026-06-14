@@ -28,6 +28,7 @@ import (
 
 	// Import operator checkers for init() registration
 	_ "github.com/openshift/operator-health-report/pkg/checks/camo"
+	_ "github.com/openshift/operator-health-report/pkg/checks/hcp"
 	_ "github.com/openshift/operator-health-report/pkg/checks/mcc"
 	_ "github.com/openshift/operator-health-report/pkg/checks/ome"
 	_ "github.com/openshift/operator-health-report/pkg/checks/pdo"

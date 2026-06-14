@@ -351,6 +351,14 @@ var (
 		SkipCommonChecks: true,
 	}
 
+	HCPConfig = OperatorConfig{
+		Name:             "hcp-health",
+		ShortName:        "hcp",
+		Namespace:        "",
+		Deployment:       "",
+		SkipCommonChecks: true,
+	}
+
 	AllOperators = map[string]OperatorConfig{
 		"camo":    CAMOConfig,
 		"rmo":     RMOConfig,
@@ -361,5 +369,6 @@ var (
 		"pdo":     PDOConfig,
 		"sae":     SAEConfig,
 		"cluster": ClusterConfig,
+		"hcp":     HCPConfig,
 	}
 )

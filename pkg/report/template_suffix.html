@@ -84,6 +84,8 @@
                             }
                             if (chartType === 'sfr-memory') createRLRTimeseriesChart(el.id, chartData.forwarder_memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
                             if (chartType === 'sfr-cpu') createRLRTimeseriesChart(el.id, chartData.forwarder_cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
+                            if (chartType === 'hcp-mem') createHCPChart(el.id, chartData.memory_timeseries, chartData.restart_events, 'Memory (MB)', 1, [{y: 200, label: 'Elevated (200Mi)', color: '#ffc107'}, {y: 1024, label: 'Leak (1Gi)', color: '#dc3545'}]);
+                            if (chartType === 'hcp-cpu') createHCPChart(el.id, chartData.cpu_timeseries, chartData.restart_events, 'CPU (millicores)', 1, []);
                             if (chartType === 'mcc-cpu-master') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_master, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                             if (chartType === 'mcc-mem-master') createRLRMultiSeriesChart(el.id, chartData.memory_timeseries_master, 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                             if (chartType === 'mcc-cpu-infra') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_infra, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
@@ -461,6 +463,12 @@
                 'rhobs_platform_rules': 'Platform Rules',
                 'rhobs_clf_conditions': 'CLF Conditions',
                 'rhobs_metrics_forwarder': 'HCP Fwd',
+                'hcp_namespace_health': 'HCP Namespaces',
+                'hcp_pod_health': 'HCP Pod Health',
+                'hcp_deployment_health': 'HCP Deploys',
+                'hcp_resource_trends': 'HCP Trends',
+                'hcp_metrics_coverage': 'Metrics Coverage',
+                'hcp_pod_logs': 'HCP Logs',
                 'rlr_cluster_type': 'Cluster Type',
                 'rlr_vector_namespace': 'Vector NS',
                 'rlr_vector_daemonset_health': 'Vector DS',
@@ -1047,9 +1055,19 @@
                 annotations['threshold_' + i] = {
                     type: 'line', yMin: t.y, yMax: t.y,
                     borderColor: t.color, borderWidth: 1.5, borderDash: [6, 3],
-                    label: { display: true, content: t.label, position: 'start', backgroundColor: t.color + '40', color: t.color, font: { size: 10 } }
+                    label: { display: true, content: t.label, position: 'end', backgroundColor: t.color + '80', color: '#fff', font: { size: 10, weight: 'bold' }, padding: 3 }
                 };
             });
+            // Add threshold lines as legend entries
+            const thresholdDatasets = (thresholds || []).map(t => ({
+                label: t.label,
+                data: [],
+                borderColor: t.color,
+                borderDash: [6, 3],
+                borderWidth: 1.5,
+                pointRadius: 0,
+                backgroundColor: 'transparent',
+            }));
             const datasets = seriesData.map((s, i) => ({
                 label: s.label || `pod-${i}`,
                 data: (s.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * scaleFactor })),
@@ -1062,7 +1080,7 @@
 
             new Chart(document.getElementById(canvasId), {
                 type: 'line',
-                data: { datasets },
+                data: { datasets: [...datasets, ...thresholdDatasets] },
                 options: {
                     responsive: true, maintainAspectRatio: true,
                     plugins: {
@@ -1072,6 +1090,65 @@
                             callbacks: {
                                 title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
                                 label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2)
+                            }
+                        },
+                        annotation: { annotations }
+                    },
+                    scales: {
+                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
+                        y: { beginAtZero: true, title: { display: true, text: yLabel } }
+                    }
+                }
+            });
+        }
+
+        function createHCPChart(canvasId, seriesData, restartEvents, yLabel, scaleFactor, thresholds) {
+            if (!seriesData || seriesData.length === 0) return;
+            const colors = ['#6c8cff','#2dd4a0','#f5c542','#f25c5c','#56b8e6','#ff9f40','#a855f7','#ec4899',
+                            '#14b8a6','#f97316','#8b5cf6','#06b6d4','#84cc16','#e11d48','#0ea5e9'];
+            const annotations = {};
+            (thresholds || []).forEach((t, i) => {
+                annotations['threshold_' + i] = {
+                    type: 'line', yMin: t.y, yMax: t.y,
+                    borderColor: t.color, borderWidth: 1.5, borderDash: [6, 3],
+                    label: { display: true, content: t.label, position: 'end', backgroundColor: t.color + '80', color: '#fff', font: { size: 10, weight: 'bold' }, padding: 3 }
+                };
+            });
+            // Add restart events as vertical markers
+            (restartEvents || []).forEach((evt, i) => {
+                if (i > 20) return; // limit markers
+                annotations['restart_' + i] = {
+                    type: 'line',
+                    xMin: evt.timestamp * 1000, xMax: evt.timestamp * 1000,
+                    borderColor: '#ff9f40', borderWidth: 1.5,
+                    label: { display: i < 5, content: '↻ ' + (evt.workload || 'restart'), position: 'start', backgroundColor: '#ff9f4080', color: '#fff', font: { size: 8 }, padding: 2, rotation: -90 }
+                };
+            });
+            const thresholdDatasets = (thresholds || []).map(t => ({
+                label: t.label, data: [], borderColor: t.color, borderDash: [6, 3], borderWidth: 1.5, pointRadius: 0, backgroundColor: 'transparent',
+            }));
+            const restartDataset = (restartEvents && restartEvents.length > 0) ? [{
+                label: '↻ Restart events', data: [], borderColor: '#ff9f40', borderDash: [2, 4], borderWidth: 1.5, pointRadius: 0, backgroundColor: 'transparent',
+            }] : [];
+            const datasets = seriesData.map((s, i) => ({
+                label: s.label || `workload-${i}`,
+                data: (s.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * scaleFactor })),
+                borderColor: colors[i % colors.length],
+                backgroundColor: 'transparent',
+                tension: 0.3, pointRadius: 0, borderWidth: 1.5
+            }));
+            new Chart(document.getElementById(canvasId), {
+                type: 'line',
+                data: { datasets: [...datasets, ...thresholdDatasets, ...restartDataset] },
+                options: {
+                    responsive: true, maintainAspectRatio: true,
+                    plugins: {
+                        legend: { display: true, position: 'top', labels: { boxWidth: 8, font: { size: 10 } } },
+                        tooltip: {
+                            mode: 'index', intersect: false,
+                            callbacks: {
+                                title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
+                                label: ctx => ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1)
                             }
                         },
                         annotation: { annotations }
@@ -1610,6 +1687,39 @@
                     </div>
                 `;
                 chartsDiv.appendChild(tpDiv);
+            }
+
+            // HCP resource trend charts (concerning pods only)
+            const hcpTrendsCheck = (cluster.health_checks || []).find(c => c.check === 'hcp_resource_trends');
+            if (hcpTrendsCheck && hcpTrendsCheck.details) {
+                const hd = hcpTrendsCheck.details;
+                const hdJson = JSON.stringify(hd).replace(/'/g, "&#39;");
+
+                if (hd.memory_timeseries && hd.memory_timeseries.length > 0) {
+                    const memDiv = document.createElement('div');
+                    memDiv.className = 'chart-wrapper';
+                    memDiv.innerHTML = `
+                        <h3>HCP Pods — Memory (MB) 7d (concerning pods + top consumers)</h3>
+                        <canvas id="hcp-mem-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="hcp-mem"
+                            data-chart-data='${hdJson}'
+                        ></canvas>
+                    `;
+                    chartsDiv.appendChild(memDiv);
+                }
+
+                if (hd.cpu_timeseries && hd.cpu_timeseries.length > 0) {
+                    const cpuDiv = document.createElement('div');
+                    cpuDiv.className = 'chart-wrapper';
+                    cpuDiv.innerHTML = `
+                        <h3>HCP Pods — CPU (millicores) 7d (concerning pods + top consumers)</h3>
+                        <canvas id="hcp-cpu-${clusterIdx}" class="chart-canvas"
+                            data-pending-chart="hcp-cpu"
+                            data-chart-data='${hdJson}'
+                        ></canvas>
+                    `;
+                    chartsDiv.appendChild(cpuDiv);
+                }
             }
 
             const saeTrendsCheck = (cluster.health_checks || []).find(c => c.check === 'sae_resource_trends');
@@ -2603,6 +2713,7 @@
                 'rosa-log-router': 'HCP log forwarding pipeline — Vector DaemonSet collects HCP control plane logs and writes to S3. Lambda/processor delivers to customer CloudWatch or S3 destinations.',
                 'pagerduty-operator': 'Manages PagerDuty service integrations on hive clusters — creates PD services for each ClusterDeployment and syncs integration keys via SyncSets.',
                 'cluster-health': 'Cluster infrastructure health — node readiness and utilization, machine/MachineSet status, AMI consistency, managed boot images configuration, and machine-api log analysis.',
+                'hcp-health': 'HCP control plane health — scans pods in hosted control plane namespaces for resource leaks, OOMKills, crashloops, and deployment replica issues. Only charts concerning pods to avoid data bloat.',
             };
 
             // Add "Operators" label before tabs
@@ -2624,6 +2735,7 @@
                     'rosa-log-router': 'RLR',
                     'pagerduty-operator': 'PDO',
                     'cluster-health': 'CLUSTER',
+                    'hcp-health': 'HCP',
                 };
                 const shortName = shortNameMap[op] || op.replace(/-operator$/, '').toUpperCase();
 
