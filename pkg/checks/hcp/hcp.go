@@ -759,22 +759,40 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 	r.Details["rising_workloads"] = len(risingWorkloads)
 	r.Details["total_restart_events"] = totalRestarts
 
+	// Combine rising trend + high usage for the most informative message
+	// Rising trend = potential leak (memory growing over 7d)
+	// High usage = resource concern (exceeding request significantly, may need tuning)
+	var parts []string
+	severity := checks.SeverityInfo
+
+	if len(risingWorkloads) > 0 {
+		parts = append(parts, fmt.Sprintf("Potential memory leak — %d workload(s) with rising 7d trend: %s",
+			len(risingWorkloads), strings.Join(risingWorkloads, ", ")))
+		severity = checks.SeverityCritical
+	}
+	if len(leakWorkloads) > 0 {
+		parts = append(parts, fmt.Sprintf("High memory — %d workload(s) exceeding 1Gi (may need resource tuning): %s",
+			len(leakWorkloads), strings.Join(leakWorkloads, ", ")))
+		if severity == checks.SeverityInfo {
+			severity = checks.SeverityWarning
+		}
+	}
+	if totalRestarts > 20 {
+		parts = append(parts, fmt.Sprintf("%d restart events over 7d", totalRestarts))
+		if severity == checks.SeverityInfo {
+			severity = checks.SeverityWarning
+		}
+	}
+
 	switch {
-	case len(leakWorkloads) > 0:
+	case len(risingWorkloads) > 0:
 		r.Status = checks.StatusFail
 		r.Severity = checks.SeverityCritical
-		r.Message = fmt.Sprintf("Memory concerns — %d workload(s) exceeding 1Gi: %s", len(leakWorkloads), strings.Join(leakWorkloads, ", "))
-	case len(risingWorkloads) > 0 && totalRestarts > 10:
+		r.Message = strings.Join(parts, " | ")
+	case len(leakWorkloads) > 0 || totalRestarts > 20:
 		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("Rising memory trend in %d workload(s) with %d restarts: %s",
-			len(risingWorkloads), totalRestarts, strings.Join(risingWorkloads, ", "))
-	case len(risingWorkloads) > 0:
-		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("Rising memory trend in %d workload(s): %s",
-			len(risingWorkloads), strings.Join(risingWorkloads, ", "))
-	case totalRestarts > 20:
-		r.Status = checks.StatusWarning
-		r.Message = fmt.Sprintf("%d restart events across HCP workloads over 7d", totalRestarts)
+		r.Severity = severity
+		r.Message = strings.Join(parts, " | ")
 	default:
 		r.Status = checks.StatusPass
 		r.Message = fmt.Sprintf("Resource trends stable across %d workloads (%d restarts over 7d)", len(memSeries), totalRestarts)
