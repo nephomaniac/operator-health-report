@@ -763,7 +763,7 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 	case len(leakWorkloads) > 0:
 		r.Status = checks.StatusFail
 		r.Severity = checks.SeverityCritical
-		r.Message = fmt.Sprintf("Memory leak detected: %s", strings.Join(leakWorkloads, ", "))
+		r.Message = fmt.Sprintf("Memory concerns — %d workload(s) exceeding 1Gi: %s", len(leakWorkloads), strings.Join(leakWorkloads, ", "))
 	case len(risingWorkloads) > 0 && totalRestarts > 10:
 		r.Status = checks.StatusWarning
 		r.Message = fmt.Sprintf("Rising memory trend in %d workload(s) with %d restarts: %s",
