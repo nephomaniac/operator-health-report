@@ -727,24 +727,107 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 	}
 	leakWorkloads = uniqueLeaks
 
-	// Check aggregated memory trends for rising patterns
+	// Check memory trends for leak patterns:
+	// 1. Rising trend (first quarter avg vs last quarter avg, >20% increase)
+	// 2. Sawtooth pattern (grows → drops on restart → grows again, never levels off)
+	// 3. No plateau (continuous growth without leveling off)
+	var sawtoothWorkloads []string
 	memSeries, _ := r.Details["memory_timeseries"].([]thanos.LabeledTimeseries)
+
+	// Get restart timestamps by workload for correlation
+	restartTSByWorkload := map[string][]float64{}
+	if events, ok := r.Details["restart_events"]; ok {
+		if slice, ok := events.([]struct {
+			Timestamp int64  `json:"timestamp"`
+			Workload  string `json:"workload"`
+		}); ok {
+			for _, e := range slice {
+				restartTSByWorkload[e.Workload] = append(restartTSByWorkload[e.Workload], float64(e.Timestamp))
+			}
+		}
+	}
+
 	for _, s := range memSeries {
-		if len(s.Values) >= 8 {
-			quarter := len(s.Values) / 4
-			earlySum, lateSum := 0.0, 0.0
-			for _, p := range s.Values[:quarter] {
-				earlySum += p[1]
+		if len(s.Values) < 8 {
+			continue
+		}
+
+		// Check rising trend (first vs last quarter)
+		quarter := len(s.Values) / 4
+		earlySum, lateSum := 0.0, 0.0
+		for _, p := range s.Values[:quarter] {
+			earlySum += p[1]
+		}
+		for _, p := range s.Values[len(s.Values)-quarter:] {
+			lateSum += p[1]
+		}
+		earlyAvg := earlySum / float64(quarter)
+		lateAvg := lateSum / float64(quarter)
+		if earlyAvg > 0 {
+			increase := (lateAvg - earlyAvg) / earlyAvg * 100
+			if increase > 20 {
+				risingWorkloads = append(risingWorkloads, fmt.Sprintf("%s (+%.0f%%)", s.Label, increase))
 			}
-			for _, p := range s.Values[len(s.Values)-quarter:] {
-				lateSum += p[1]
+		}
+
+		// Check for sawtooth pattern: memory grows then drops sharply, repeats
+		// A sharp drop (>40% decrease between consecutive points) followed by growth = sawtooth
+		sharpDrops := 0
+		growthSegments := 0
+		prevVal := s.Values[0][1]
+		growing := false
+		for i := 1; i < len(s.Values); i++ {
+			val := s.Values[i][1]
+			if prevVal > 0 && (prevVal-val)/prevVal > 0.4 {
+				// Sharp drop >40%
+				sharpDrops++
+				if growing {
+					growthSegments++
+				}
+				growing = false
+			} else if val > prevVal*1.02 {
+				growing = true
 			}
-			earlyAvg := earlySum / float64(quarter)
-			lateAvg := lateSum / float64(quarter)
-			if earlyAvg > 0 {
-				increase := (lateAvg - earlyAvg) / earlyAvg * 100
-				if increase > 20 {
-					risingWorkloads = append(risingWorkloads, fmt.Sprintf("%s (+%.0f%%)", s.Label, increase))
+			prevVal = val
+		}
+
+		// Sawtooth: repeated sharp drops with sustained growth between them
+		// Stricter: require >50% drops (not just 30%, to avoid GC noise on aggregated data)
+		if sharpDrops >= 3 && growthSegments >= 3 {
+			sawtoothWorkloads = append(sawtoothWorkloads, fmt.Sprintf("%s (%d reset cycles)", s.Label, sharpDrops))
+		}
+
+		// Check for no plateau: memory never stabilizes
+		// Split into 4 segments — if each segment's avg is higher than the previous, no plateau
+		if len(s.Values) >= 16 {
+			segSize := len(s.Values) / 4
+			segAvgs := make([]float64, 4)
+			for seg := 0; seg < 4; seg++ {
+				sum := 0.0
+				for _, p := range s.Values[seg*segSize : (seg+1)*segSize] {
+					sum += p[1]
+				}
+				segAvgs[seg] = sum / float64(segSize)
+			}
+			monotonic := segAvgs[0] < segAvgs[1] && segAvgs[1] < segAvgs[2] && segAvgs[2] < segAvgs[3]
+			if monotonic && segAvgs[0] > 0 {
+				totalIncrease := (segAvgs[3] - segAvgs[0]) / segAvgs[0] * 100
+				if totalIncrease > 30 {
+					// Only flag if not already in rising or sawtooth
+					found := false
+					for _, r := range risingWorkloads {
+						if strings.HasPrefix(r, s.Label+" ") {
+							found = true
+						}
+					}
+					for _, r := range sawtoothWorkloads {
+						if strings.HasPrefix(r, s.Label+" ") {
+							found = true
+						}
+					}
+					if !found {
+						risingWorkloads = append(risingWorkloads, fmt.Sprintf("%s (no plateau, +%.0f%%)", s.Label, totalIncrease))
+					}
 				}
 			}
 		}
@@ -757,18 +840,23 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 
 	r.Details["leak_workloads"] = len(leakWorkloads)
 	r.Details["rising_workloads"] = len(risingWorkloads)
+	r.Details["sawtooth_workloads"] = len(sawtoothWorkloads)
 	r.Details["total_restart_events"] = totalRestarts
 
-	// Combine rising trend + high usage for the most informative message
-	// Rising trend = potential leak (memory growing over 7d)
-	// High usage = resource concern (exceeding request significantly, may need tuning)
 	var parts []string
 	severity := checks.SeverityInfo
 
-	if len(risingWorkloads) > 0 {
-		parts = append(parts, fmt.Sprintf("Potential memory leak — %d workload(s) with rising 7d trend: %s",
-			len(risingWorkloads), strings.Join(risingWorkloads, ", ")))
+	if len(sawtoothWorkloads) > 0 {
+		parts = append(parts, fmt.Sprintf("Likely memory leak (sawtooth pattern) — %d workload(s): %s",
+			len(sawtoothWorkloads), strings.Join(sawtoothWorkloads, ", ")))
 		severity = checks.SeverityCritical
+	}
+	if len(risingWorkloads) > 0 {
+		parts = append(parts, fmt.Sprintf("Rising memory trend — %d workload(s): %s",
+			len(risingWorkloads), strings.Join(risingWorkloads, ", ")))
+		if severity == checks.SeverityInfo {
+			severity = checks.SeverityCritical
+		}
 	}
 	if len(leakWorkloads) > 0 {
 		parts = append(parts, fmt.Sprintf("High memory — %d workload(s) exceeding 1Gi (may need resource tuning): %s",
@@ -785,7 +873,7 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 	}
 
 	switch {
-	case len(risingWorkloads) > 0:
+	case len(sawtoothWorkloads) > 0 || len(risingWorkloads) > 0:
 		r.Status = checks.StatusFail
 		r.Severity = checks.SeverityCritical
 		r.Message = strings.Join(parts, " | ")
