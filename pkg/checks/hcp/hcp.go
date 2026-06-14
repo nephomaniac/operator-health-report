@@ -845,23 +845,55 @@ func checkPodLogs(ctx context.Context, cc *checks.ClusterContext, concerningPods
 	}
 	var findings []logFinding
 	logsUnavailable := 0
+	logFailReasons := map[string]int{}
 
 	for _, cp := range logTargets {
 		container := cp.Container
-		if container == "" {
-			container = "" // GetPodLogs uses default container
-		}
 
+		// If no specific container, try default first, then pick first container on multi-container error
 		var logOutput string
 		var logErr error
 		if container != "" {
 			logOutput, logErr = cc.Client.GetContainerLogs(ctx, cp.Namespace, cp.Pod, container, 100)
 		} else {
 			logOutput, logErr = cc.Client.GetPodLogs(ctx, cp.Namespace, cp.Pod, 100)
+			if logErr != nil && strings.Contains(logErr.Error(), "container name must be specified") {
+				// Multi-container pod — look up pod and try the first non-init container
+				pod, podErr := cc.Client.Clientset().CoreV1().Pods(cp.Namespace).Get(ctx, cp.Pod, metav1.GetOptions{})
+				if podErr == nil && len(pod.Spec.Containers) > 0 {
+					container = pod.Spec.Containers[0].Name
+					logOutput, logErr = cc.Client.GetContainerLogs(ctx, cp.Namespace, cp.Pod, container, 100)
+				}
+			}
 		}
 
 		if logErr != nil {
 			logsUnavailable++
+			errMsg := logErr.Error()
+			var reason string
+			switch {
+			case strings.Contains(errMsg, "Forbidden") || strings.Contains(errMsg, "forbidden"):
+				reason = "RBAC denied"
+			case strings.Contains(errMsg, "Unauthorized") || strings.Contains(errMsg, "401"):
+				reason = "unauthorized"
+			case strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "NotFound"):
+				reason = "pod not found"
+			case strings.Contains(errMsg, "container name must be specified"):
+				reason = "multi-container pod (no default)"
+			case strings.Contains(errMsg, "container") && strings.Contains(errMsg, "not found"):
+				reason = "container not found"
+			case strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "Timeout"):
+				reason = "timeout"
+			default:
+				reason = errMsg
+				if len(reason) > 100 {
+					reason = reason[:100] + "..."
+				}
+			}
+			if logFailReasons[reason] == 0 {
+				logFailReasons[reason] = 0
+			}
+			logFailReasons[reason]++
 			continue
 		}
 
@@ -899,12 +931,19 @@ func checkPodLogs(ctx context.Context, cc *checks.ClusterContext, concerningPods
 	if len(findings) > 0 {
 		r.Details["findings"] = findings
 	}
+	if len(logFailReasons) > 0 {
+		r.Details["log_access_failures"] = logFailReasons
+	}
 
 	switch {
 	case logsUnavailable == len(logTargets):
 		r.Status = checks.StatusInfo
 		r.Severity = checks.SeverityInfo
-		r.Message = fmt.Sprintf("Pod logs unavailable for %d pod(s) — may require elevation or RHOBS remote access", logsUnavailable)
+		reasons := make([]string, 0, len(logFailReasons))
+		for reason, count := range logFailReasons {
+			reasons = append(reasons, fmt.Sprintf("%s(%d)", reason, count))
+		}
+		r.Message = fmt.Sprintf("Pod logs unavailable for %d pod(s): %s", logsUnavailable, strings.Join(reasons, ", "))
 	case len(findings) > 0:
 		totalErrors := 0
 		for _, f := range findings {
