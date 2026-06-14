@@ -2253,7 +2253,23 @@
                                             '<div style="margin:4px 0;padding:6px 10px;background:#fff;border:1px solid #e8eaf0;border-radius:3px;font-size:0.82em;">' +
                                                 '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">' +
                                                     '<span style="font-weight:600;color:#333;">' + (e.message || '').replace(/</g,'&lt;') + '</span>' +
-                                                    '<span style="font-size:0.85em;background:#dc354520;color:#dc3545;padding:1px 8px;border-radius:10px;font-weight:600;">' + e.count + 'x</span>' +
+                                                    (() => {
+                                        let timeSpan = '';
+                                        if (e.first_seen && e.last_seen && e.first_seen !== e.last_seen) {
+                                            try {
+                                                const start = new Date(e.first_seen);
+                                                const end = new Date(e.last_seen);
+                                                const diffMs = end - start;
+                                                if (diffMs > 0) {
+                                                    const mins = Math.round(diffMs / 60000);
+                                                    if (mins < 60) timeSpan = ' over ' + mins + 'm';
+                                                    else if (mins < 1440) timeSpan = ' over ' + Math.round(mins/60) + 'h';
+                                                    else timeSpan = ' over ' + Math.round(mins/1440) + 'd';
+                                                }
+                                            } catch(ex) {}
+                                        }
+                                        return '<span style="font-size:0.85em;background:#dc354525;color:#dc3545;padding:2px 10px;border-radius:10px;font-weight:700;letter-spacing:0.02em;">⟳ ' + e.count + ' occurrences' + timeSpan + '</span>';
+                                    })() +
                                                 '</div>' +
                                                 (e.controller ? '<div style="font-size:0.85em;color:#667eea;margin-bottom:2px;">controller: ' + e.controller + '</div>' : '') +
                                                 (e.error ? '<div style="font-family:var(--mono);font-size:0.78em;color:#888;word-break:break-all;white-space:pre-wrap;max-height:60px;overflow-y:auto;margin-top:3px;">' + (e.error || '').replace(/</g,'&lt;') + '</div>' : '') +
