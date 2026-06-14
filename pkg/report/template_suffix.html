@@ -2177,44 +2177,37 @@
                         ${check.details?.concerning_pods && Array.isArray(check.details.concerning_pods) && check.details.concerning_pods.length > 0 ? `
                             <div style="margin-top: 12px;">
                                 <strong style="display: block; margin-bottom: 8px; color: #667eea;">Concerning Pods (${check.details.concerning_pods.length}):</strong>
-                                <div style="overflow-x: auto;">
-                                <table style="width:100%;border-collapse:collapse;font-size:0.8em;font-family:var(--mono);">
-                                    <thead><tr style="border-bottom:2px solid #667eea;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;">
-                                        <th style="text-align:left;padding:6px 8px;color:#444;">Pod</th>
-                                        <th style="text-align:left;padding:6px 8px;color:#444;">Namespace</th>
-                                        <th style="text-align:center;padding:6px 8px;color:#444;">Phase</th>
-                                        <th style="text-align:right;padding:6px 8px;color:#444;">Mem</th>
-                                        <th style="text-align:right;padding:6px 8px;color:#444;">Req</th>
-                                        <th style="text-align:right;padding:6px 8px;color:#444;">Ratio</th>
-                                        <th style="text-align:right;padding:6px 8px;color:#444;">CPU</th>
-                                        <th style="text-align:right;padding:6px 8px;color:#444;">Restarts</th>
-                                        <th style="text-align:center;padding:6px 8px;color:#444;">Flags</th>
-                                    </tr></thead>
-                                    <tbody>
-                                    ${check.details.concerning_pods.map(p => {
-                                        const flags = [];
-                                        if (p.oomkilled) flags.push('<span style="color:#dc3545;font-weight:bold;">OOM</span>');
-                                        if (p.crashlooping) flags.push('<span style="color:#dc3545;">CrashLoop</span>');
-                                        if (p.not_ready) flags.push('<span style="color:#f5c542;">NotReady</span>');
-                                        if (p.mem_ratio) flags.push('<span style="color:#ff9f40;">' + p.mem_ratio + '</span>');
-                                        const memColor = (p.mem_mb || 0) > 1024 ? '#dc3545' : (p.mem_mb || 0) > 200 ? '#ff9f40' : '#333';
-                                        // Shorten namespace — show just the HCP name portion
-                                        const nsParts = (p.namespace || '').split('-');
-                                        const shortNS = nsParts.length > 2 ? nsParts.slice(-1).join('-') : p.namespace;
-                                        return '<tr style="border-bottom:1px solid #e8eaf0;">' +
-                                            '<td style="padding:4px 8px;max-width:250px;overflow:hidden;text-overflow:ellipsis;" title="' + p.pod + '">' + (p.pod || '') + '</td>' +
-                                            '<td style="padding:4px 8px;color:#888;max-width:120px;overflow:hidden;text-overflow:ellipsis;" title="' + p.namespace + '">' + shortNS + '</td>' +
-                                            '<td style="padding:4px 8px;text-align:center;">' + (p.phase || '') + '</td>' +
-                                            '<td style="padding:4px 8px;text-align:right;color:' + memColor + ';font-weight:600;">' + (p.mem_mb ? p.mem_mb + ' MB' : '-') + '</td>' +
-                                            '<td style="padding:4px 8px;text-align:right;color:#888;">' + (p.mem_request_mb ? p.mem_request_mb + ' MB' : '-') + '</td>' +
-                                            '<td style="padding:4px 8px;text-align:right;color:#ff9f40;font-weight:600;">' + (p.mem_ratio || '-') + '</td>' +
-                                            '<td style="padding:4px 8px;text-align:right;">' + (p.cpu_millicores ? p.cpu_millicores + 'm' : '-') + '</td>' +
-                                            '<td style="padding:4px 8px;text-align:right;">' + (p.restarts || 0) + '</td>' +
-                                            '<td style="padding:4px 8px;text-align:center;">' + (flags.length > 0 ? flags.join(' ') : '-') + '</td>' +
-                                        '</tr>';
-                                    }).join('')}
-                                    </tbody>
-                                </table>
+                                <div style="overflow-x: auto; font-size:0.8em; font-family:var(--mono);">
+                                    <div style="display:grid; grid-template-columns: minmax(180px,2fr) minmax(80px,1fr) 60px 70px 60px 50px 50px 55px 80px; gap:0; border:1px solid #d0d4e0; border-radius:4px;">
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;">Pod</div>
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;">NS</div>
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;text-align:center;">Phase</div>
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;text-align:right;">Mem</div>
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;text-align:right;">Req</div>
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;text-align:right;">Ratio</div>
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;text-align:right;">CPU</div>
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;text-align:right;">Restarts</div>
+                                        <div style="padding:6px 8px;background:#e8ebf5;font-weight:700;text-transform:uppercase;font-size:0.85em;letter-spacing:0.03em;color:#444;border-bottom:2px solid #667eea;text-align:center;">Flags</div>
+                                        ${check.details.concerning_pods.map(p => {
+                                            const flags = [];
+                                            if (p.oomkilled) flags.push('<span style="color:#dc3545;font-weight:bold;">OOM</span>');
+                                            if (p.crashlooping) flags.push('<span style="color:#dc3545;">CrashLoop</span>');
+                                            if (p.not_ready) flags.push('<span style="color:#f5c542;">NotReady</span>');
+                                            if (p.mem_ratio) flags.push('<span style="color:#ff9f40;">' + p.mem_ratio + '</span>');
+                                            const memColor = (p.mem_mb || 0) > 1024 ? '#dc3545' : (p.mem_mb || 0) > 200 ? '#ff9f40' : '#333';
+                                            const nsParts = (p.namespace || '').split('-');
+                                            const shortNS = nsParts.length > 2 ? nsParts.slice(-1).join('-') : p.namespace;
+                                            return '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;overflow:hidden;text-overflow:ellipsis;" title="' + p.pod + '">' + (p.pod || '') + '</div>' +
+                                                '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;color:#888;overflow:hidden;text-overflow:ellipsis;" title="' + p.namespace + '">' + shortNS + '</div>' +
+                                                '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;text-align:center;">' + (p.phase || '') + '</div>' +
+                                                '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;text-align:right;color:' + memColor + ';font-weight:600;">' + (p.mem_mb ? p.mem_mb + ' MB' : '-') + '</div>' +
+                                                '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;text-align:right;color:#888;">' + (p.mem_request_mb ? p.mem_request_mb + ' MB' : '-') + '</div>' +
+                                                '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;text-align:right;color:#ff9f40;font-weight:600;">' + (p.mem_ratio || '-') + '</div>' +
+                                                '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;text-align:right;">' + (p.cpu_millicores ? p.cpu_millicores + 'm' : '-') + '</div>' +
+                                                '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;text-align:right;">' + (p.restarts || 0) + '</div>' +
+                                                '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;text-align:center;">' + (flags.length > 0 ? flags.join(' ') : '-') + '</div>';
+                                        }).join('')}
+                                    </div>
                                 </div>
                             </div>
                         ` : ''}
@@ -2251,12 +2244,22 @@
                                 <strong style="display: block; margin-bottom: 8px; color: #667eea;">Log Findings (${check.details.findings.length} pod(s)):</strong>
                                 ${check.details.findings.map(f => `
                                     <div style="margin-bottom: 12px; background: #f8f9fa; border-radius: 4px; border-left: 3px solid #dc3545; padding: 10px;">
-                                        <div style="font-family:var(--mono);font-size:0.85em;font-weight:600;margin-bottom:6px;color:#333;">
-                                            ${f.pod} <span style="color:#dc3545;font-weight:700;">(${f.errors} errors)</span>
+                                        <div style="font-family:var(--mono);font-size:0.85em;font-weight:600;margin-bottom:8px;color:#333;">
+                                            ${f.pod} <span style="color:#dc3545;font-weight:700;">(${f.errors} total errors)</span>
                                         </div>
-                                        ${(f.samples || []).map(s => `
-                                            <div style="font-family:var(--mono);font-size:0.78em;color:#555;padding:4px 8px;margin:3px 0;background:#fff;border:1px solid #e8eaf0;border-radius:3px;word-break:break-all;white-space:pre-wrap;max-height:80px;overflow-y:auto;">${s.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
-                                        `).join('')}
+                                        ${(f.entries || f.samples || []).map(e => typeof e === 'string' ?
+                                            '<div style="font-family:var(--mono);font-size:0.78em;color:#555;padding:4px 8px;margin:3px 0;background:#fff;border:1px solid #e8eaf0;border-radius:3px;word-break:break-all;white-space:pre-wrap;">' + e.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>'
+                                        :
+                                            '<div style="margin:4px 0;padding:6px 10px;background:#fff;border:1px solid #e8eaf0;border-radius:3px;font-size:0.82em;">' +
+                                                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">' +
+                                                    '<span style="font-weight:600;color:#333;">' + (e.message || '').replace(/</g,'&lt;') + '</span>' +
+                                                    '<span style="font-size:0.85em;background:#dc354520;color:#dc3545;padding:1px 8px;border-radius:10px;font-weight:600;">' + e.count + 'x</span>' +
+                                                '</div>' +
+                                                (e.controller ? '<div style="font-size:0.85em;color:#667eea;margin-bottom:2px;">controller: ' + e.controller + '</div>' : '') +
+                                                (e.error ? '<div style="font-family:var(--mono);font-size:0.78em;color:#888;word-break:break-all;white-space:pre-wrap;max-height:60px;overflow-y:auto;margin-top:3px;">' + (e.error || '').replace(/</g,'&lt;') + '</div>' : '') +
+                                                (e.first_seen && e.last_seen && e.first_seen !== e.last_seen ? '<div style="font-size:0.75em;color:#999;margin-top:3px;">' + e.first_seen + ' → ' + e.last_seen + '</div>' : '') +
+                                            '</div>'
+                                        ).join('')}
                                     </div>
                                 `).join('')}
                             </div>

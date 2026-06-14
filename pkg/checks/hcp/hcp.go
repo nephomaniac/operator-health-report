@@ -843,10 +843,18 @@ func checkPodLogs(ctx context.Context, cc *checks.ClusterContext, concerningPods
 		logTargets = logTargets[:5]
 	}
 
+	type logEntry struct {
+		Message    string `json:"message"`
+		Controller string `json:"controller,omitempty"`
+		Error      string `json:"error,omitempty"`
+		Count      int    `json:"count"`
+		FirstSeen  string `json:"first_seen,omitempty"`
+		LastSeen   string `json:"last_seen,omitempty"`
+	}
 	type logFinding struct {
-		Pod    string   `json:"pod"`
-		Errors int      `json:"errors"`
-		Sample []string `json:"samples,omitempty"`
+		Pod     string     `json:"pod"`
+		Errors  int        `json:"errors"`
+		Entries []logEntry `json:"entries,omitempty"`
 	}
 	var findings []logFinding
 	logsUnavailable := 0
@@ -902,31 +910,86 @@ func checkPodLogs(ctx context.Context, cc *checks.ClusterContext, concerningPods
 			continue
 		}
 
+		// Parse and deduplicate log errors
 		errorCount := 0
-		var samples []string
+		deduped := map[string]*logEntry{} // key by message+controller
+
 		for _, line := range strings.Split(logOutput, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
 			lower := strings.ToLower(line)
-			if strings.Contains(lower, "error") || strings.Contains(lower, "oomkilled") ||
+
+			isError := (strings.Contains(lower, "error") || strings.Contains(lower, "oomkilled") ||
 				strings.Contains(lower, "fatal") || strings.Contains(lower, "panic") ||
-				strings.Contains(lower, "connection refused") || strings.Contains(lower, "timeout") {
-				if !strings.Contains(lower, "level=info") && !strings.Contains(lower, `"level":"info"`) {
-					errorCount++
-					if len(samples) < 3 {
-						truncated := line
-						if len(truncated) > 200 {
-							truncated = truncated[:200] + "..."
-						}
-						samples = append(samples, truncated)
-					}
+				strings.Contains(lower, "connection refused") || strings.Contains(lower, "timeout")) &&
+				!strings.Contains(lower, "level=info") && !strings.Contains(lower, `"level":"info"`)
+
+			if !isError {
+				continue
+			}
+			errorCount++
+
+			// Try JSON parsing for structured logs
+			var logJSON struct {
+				Level      string `json:"level"`
+				Msg        string `json:"msg"`
+				Controller string `json:"controller"`
+				Error      string `json:"error"`
+				TS         string `json:"ts"`
+			}
+			msg := line
+			controller := ""
+			errDetail := ""
+			ts := ""
+
+			if json.Unmarshal([]byte(line), &logJSON) == nil && logJSON.Msg != "" {
+				msg = logJSON.Msg
+				controller = logJSON.Controller
+				errDetail = logJSON.Error
+				ts = logJSON.TS
+				if len(errDetail) > 200 {
+					errDetail = errDetail[:200] + "..."
 				}
+			} else if len(msg) > 300 {
+				msg = msg[:300] + "..."
+			}
+
+			// Deduplicate by message+controller
+			key := msg + "|" + controller
+			if existing, ok := deduped[key]; ok {
+				existing.Count++
+				if ts != "" {
+					existing.LastSeen = ts
+				}
+			} else {
+				entry := &logEntry{
+					Message:    msg,
+					Controller: controller,
+					Error:      errDetail,
+					Count:      1,
+					FirstSeen:  ts,
+					LastSeen:   ts,
+				}
+				deduped[key] = entry
 			}
 		}
 
 		if errorCount > 0 {
+			entries := make([]logEntry, 0, len(deduped))
+			for _, e := range deduped {
+				entries = append(entries, *e)
+			}
+			// Sort by count descending
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Count > entries[j].Count })
+			if len(entries) > 10 {
+				entries = entries[:10]
+			}
 			findings = append(findings, logFinding{
-				Pod:    cp.Namespace + "/" + cp.Pod,
-				Errors: errorCount,
-				Sample: samples,
+				Pod:     cp.Namespace + "/" + cp.Pod,
+				Errors:  errorCount,
+				Entries: entries,
 			})
 		}
 	}
