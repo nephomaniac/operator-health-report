@@ -2701,6 +2701,7 @@
             const checkTypes = getAllCheckTypes(operatorData);
 
             const isMCC = operatorData.length > 0 && operatorData[0].operator_name === 'cluster-health';
+            const isHCP = operatorData.length > 0 && operatorData[0].operator_name === 'hcp-health';
 
             let headerHTML = '<tr><th>Cluster Name</th><th class="check-name-header" title="Backplane Login"><div>Backplane Login</div></th>';
             checkTypes.forEach(checkType => {
@@ -2713,6 +2714,12 @@
                 headerHTML += '<th class="check-name-header resource-header-diagonal" title="Infra node Memory% (per node)"><div>Infra Mem%</div></th>';
                 headerHTML += '<th class="check-name-header resource-header-diagonal" title="Worker node count"><div>Workers</div></th>';
                 headerHTML += '<th class="check-name-header resource-header-diagonal" title="Managed Boot Images status"><div>Boot Img</div></th>';
+            } else if (isHCP) {
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Total HCPs"><div>HCPs</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Concerning pods"><div>Concerning</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Leak workloads (>1Gi per pod)"><div>Leaks</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Total restart events (7d)"><div>Restarts</div></th>';
+                headerHTML += '<th class="check-name-header resource-header-diagonal" title="Metrics coverage %"><div>Coverage</div></th>';
             } else {
                 headerHTML += '<th class="check-name-header resource-header-diagonal" title="Restarts"><div>Restarts</div></th>';
                 headerHTML += '<th class="check-name-header resource-header-diagonal" title="Logged Errors"><div>Logged Errors</div></th>';
@@ -2725,7 +2732,7 @@
 
             let currentShard = null;
             let shardIdx = 0;
-            const totalColumns = checkTypes.length + (isMCC ? 8 : 7);
+            const totalColumns = checkTypes.length + (isMCC ? 8 : isHCP ? 7 : 7);
             operatorData.forEach((cluster, idx) => {
                 const clusterIdx = `${idPrefix}-${idx}`;
                 const clusterShard = cluster.hive_shard || cluster.health_checks?.find(c => c.check === 'version_verification')?.details?.target_name || 'unknown';
@@ -2867,6 +2874,27 @@
                         }
                     }
                     rowHTML += `<td class="resource-cell" onclick="event.stopPropagation(); expandToCheck('${clusterIdx}', '${bootCheckId}')" style="cursor:pointer"><span class="${bootClass}" title="${(bootCheck?.message || '').replace(/"/g, '&quot;')}">${bootLabel}</span></td>`;
+                } else {
+                } else if (isHCP) {
+                    const nsCheck = (cluster.health_checks || []).find(c => c.check === 'hcp_namespace_health');
+                    const podCheck = (cluster.health_checks || []).find(c => c.check === 'hcp_pod_health');
+                    const trendsCheck = (cluster.health_checks || []).find(c => c.check === 'hcp_resource_trends');
+                    const covCheck = (cluster.health_checks || []).find(c => c.check === 'hcp_metrics_coverage');
+
+                    const hcpCount = nsCheck?.details?.total_hcps || '-';
+                    const concernCount = podCheck?.details?.concerning_count || 0;
+                    const leakCount = trendsCheck?.details?.leak_workloads || 0;
+                    const restartEvts = trendsCheck?.details?.total_restart_events || 0;
+                    const coveragePct = covCheck?.details?.coverage_pct;
+
+                    const concernClass = concernCount > 0 ? 'resource-warning' : '';
+                    const leakClass = leakCount > 0 ? 'resource-error' : '';
+
+                    rowHTML += `<td class="resource-cell">${hcpCount}</td>`;
+                    rowHTML += `<td class="resource-cell"><span class="resource-value ${concernClass}">${concernCount}</span></td>`;
+                    rowHTML += `<td class="resource-cell"><span class="resource-value ${leakClass}">${leakCount}</span></td>`;
+                    rowHTML += `<td class="resource-cell">${restartEvts}</td>`;
+                    rowHTML += `<td class="resource-cell">${coveragePct != null ? coveragePct + '%' : '-'}</td>`;
                 } else {
                     rowHTML += `<td class="resource-cell">${restarts}</td>`;
                     rowHTML += `<td class="resource-cell">${errors}</td>`;

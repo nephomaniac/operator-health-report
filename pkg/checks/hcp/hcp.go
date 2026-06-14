@@ -692,6 +692,7 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 				deduped = deduped[:50]
 			}
 			r.Details["restart_events"] = deduped
+			r.Details["restart_event_count"] = len(deduped)
 			seriesCount += len(deduped)
 		}
 	}
@@ -699,9 +700,84 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 	if seriesCount == 0 {
 		r.Status = checks.StatusSkip
 		r.Message = "No HCP resource timeseries available"
-	} else {
-		r.Status = checks.StatusInfo
-		r.Message = fmt.Sprintf("Collected %d resource timeseries for %d concerning pods", seriesCount, len(concerningPods))
+		cc.AddResult(r)
+		return
+	}
+
+	// Analyze trends using per-pod concerning data (not aggregated workload totals)
+	var leakWorkloads []string
+	var risingWorkloads []string
+
+	// Use concerning pods for leak detection (per-pod memory, not aggregated)
+	for _, cp := range concerningPods {
+		if cp.MemMB > 1024 {
+			wl := podToWorkload(cp.Namespace + "/" + cp.Pod)
+			leakWorkloads = append(leakWorkloads, fmt.Sprintf("%s (%dMi, req: %dMi)", wl, cp.MemMB, cp.MemRequestMB))
+		}
+	}
+	// Deduplicate leak workload names
+	seenLeaks := map[string]bool{}
+	var uniqueLeaks []string
+	for _, l := range leakWorkloads {
+		wl := strings.SplitN(l, " (", 2)[0]
+		if !seenLeaks[wl] {
+			seenLeaks[wl] = true
+			uniqueLeaks = append(uniqueLeaks, l)
+		}
+	}
+	leakWorkloads = uniqueLeaks
+
+	// Check aggregated memory trends for rising patterns
+	memSeries, _ := r.Details["memory_timeseries"].([]thanos.LabeledTimeseries)
+	for _, s := range memSeries {
+		if len(s.Values) >= 8 {
+			quarter := len(s.Values) / 4
+			earlySum, lateSum := 0.0, 0.0
+			for _, p := range s.Values[:quarter] {
+				earlySum += p[1]
+			}
+			for _, p := range s.Values[len(s.Values)-quarter:] {
+				lateSum += p[1]
+			}
+			earlyAvg := earlySum / float64(quarter)
+			lateAvg := lateSum / float64(quarter)
+			if earlyAvg > 0 {
+				increase := (lateAvg - earlyAvg) / earlyAvg * 100
+				if increase > 20 {
+					risingWorkloads = append(risingWorkloads, fmt.Sprintf("%s (+%.0f%%)", s.Label, increase))
+				}
+			}
+		}
+	}
+
+	totalRestarts := 0
+	if count, ok := r.Details["restart_event_count"].(int); ok {
+		totalRestarts = count
+	}
+
+	r.Details["leak_workloads"] = len(leakWorkloads)
+	r.Details["rising_workloads"] = len(risingWorkloads)
+	r.Details["total_restart_events"] = totalRestarts
+
+	switch {
+	case len(leakWorkloads) > 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("Memory leak detected: %s", strings.Join(leakWorkloads, ", "))
+	case len(risingWorkloads) > 0 && totalRestarts > 10:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Rising memory trend in %d workload(s) with %d restarts: %s",
+			len(risingWorkloads), totalRestarts, strings.Join(risingWorkloads, ", "))
+	case len(risingWorkloads) > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Rising memory trend in %d workload(s): %s",
+			len(risingWorkloads), strings.Join(risingWorkloads, ", "))
+	case totalRestarts > 20:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d restart events across HCP workloads over 7d", totalRestarts)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Resource trends stable across %d workloads (%d restarts over 7d)", len(memSeries), totalRestarts)
 	}
 
 	cc.AddResult(r)
