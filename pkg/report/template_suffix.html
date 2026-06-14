@@ -84,8 +84,24 @@
                             }
                             if (chartType === 'sfr-memory') createRLRTimeseriesChart(el.id, chartData.forwarder_memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
                             if (chartType === 'sfr-cpu') createRLRTimeseriesChart(el.id, chartData.forwarder_cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
-                            if (chartType === 'hcp-mem') createHCPChart(el.id, chartData.memory_timeseries, chartData.restart_events, 'Memory (MB)', 1, [{y: 200, label: 'Elevated (200Mi)', color: '#ffc107'}, {y: 1024, label: 'Leak (1Gi)', color: '#dc3545'}]);
-                            if (chartType === 'hcp-cpu') createHCPChart(el.id, chartData.cpu_timeseries, chartData.restart_events, 'CPU (millicores)', 1, []);
+                            if (chartType === 'hcp-mem' || chartType === 'hcp-cpu') {
+                                // Shared color map so workloads use same colors across mem/cpu charts
+                                const mapKey = el.id.replace(/hcp-(mem|cpu)-/, 'hcp-colors-');
+                                if (!window._hcpColorMaps) window._hcpColorMaps = {};
+                                if (!window._hcpColorMaps[mapKey]) {
+                                    const palette = ['#6c8cff','#2dd4a0','#f5c542','#f25c5c','#56b8e6','#ff9f40','#a855f7','#ec4899',
+                                                     '#14b8a6','#f97316','#8b5cf6','#06b6d4','#84cc16','#e11d48','#0ea5e9'];
+                                    const allLabels = new Set();
+                                    (chartData.memory_timeseries || []).forEach(s => allLabels.add(s.label));
+                                    (chartData.cpu_timeseries || []).forEach(s => allLabels.add(s.label));
+                                    window._hcpColorMaps[mapKey] = {};
+                                    let ci = 0;
+                                    allLabels.forEach(label => { window._hcpColorMaps[mapKey][label] = palette[ci % palette.length]; ci++; });
+                                }
+                                const cmap = window._hcpColorMaps[mapKey];
+                                if (chartType === 'hcp-mem') createHCPChart(el.id, chartData.memory_timeseries, chartData.restart_events, 'Memory (MB)', 1, [{y: 200, label: 'Elevated (200Mi)', color: '#ffc107'}, {y: 1024, label: 'Leak (1Gi)', color: '#dc3545'}], cmap);
+                                if (chartType === 'hcp-cpu') createHCPChart(el.id, chartData.cpu_timeseries, chartData.restart_events, 'CPU (millicores)', 1, [], cmap);
+                            }
                             if (chartType === 'mcc-cpu-master') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_master, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                             if (chartType === 'mcc-mem-master') createRLRMultiSeriesChart(el.id, chartData.memory_timeseries_master, 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                             if (chartType === 'mcc-cpu-infra') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_infra, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
@@ -1102,18 +1118,31 @@
             });
         }
 
-        function createHCPChart(canvasId, seriesData, restartEvents, yLabel, scaleFactor, thresholds) {
+        function createHCPChart(canvasId, seriesData, restartEvents, yLabel, scaleFactor, thresholds, colorMap) {
             if (!seriesData || seriesData.length === 0) return;
-            const colors = ['#6c8cff','#2dd4a0','#f5c542','#f25c5c','#56b8e6','#ff9f40','#a855f7','#ec4899',
+            const defaultColors = ['#6c8cff','#2dd4a0','#f5c542','#f25c5c','#56b8e6','#ff9f40','#a855f7','#ec4899',
                             '#14b8a6','#f97316','#8b5cf6','#06b6d4','#84cc16','#e11d48','#0ea5e9'];
+            const getColor = (label, idx) => (colorMap && colorMap[label]) || defaultColors[idx % defaultColors.length];
 
-            // Sort by peak value descending
+            // Sort by color map order (consistent across mem/cpu charts), fallback to peak value
             const sorted = seriesData.map((s, i) => ({...s, origIdx: i}));
-            sorted.sort((a, b) => {
-                const peakA = Math.max(...(a.values || []).map(p => parseFloat(p[1]) * scaleFactor));
-                const peakB = Math.max(...(b.values || []).map(p => parseFloat(p[1]) * scaleFactor));
-                return peakB - peakA;
-            });
+            if (colorMap) {
+                const colorKeys = Object.keys(colorMap);
+                sorted.sort((a, b) => {
+                    const ai = colorKeys.indexOf(a.label);
+                    const bi = colorKeys.indexOf(b.label);
+                    if (ai !== -1 && bi !== -1) return ai - bi;
+                    if (ai !== -1) return -1;
+                    if (bi !== -1) return 1;
+                    return 0;
+                });
+            } else {
+                sorted.sort((a, b) => {
+                    const peakA = Math.max(...(a.values || []).map(p => parseFloat(p[1]) * scaleFactor));
+                    const peakB = Math.max(...(b.values || []).map(p => parseFloat(p[1]) * scaleFactor));
+                    return peakB - peakA;
+                });
+            }
 
             // Group restarts by workload
             const restartsByWorkload = {};
@@ -1125,7 +1154,7 @@
 
             // Build all workload data (line + restart scatter)
             const workloads = sorted.map((s, sortIdx) => {
-                const color = colors[sortIdx % colors.length];
+                const color = getColor(s.label, sortIdx);
                 const lineData = (s.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * scaleFactor }));
                 const peak = lineData.length > 0 ? Math.max(...lineData.map(d => d.y)) : 0;
 
@@ -1145,7 +1174,7 @@
 
                 return {
                     label: s.label, color, lineData, restartPoints, peak,
-                    restartCount: wlRestarts.length, active: sortIdx < 3
+                    restartCount: wlRestarts.length, active: sortIdx < 5
                 };
             });
 
@@ -1154,12 +1183,11 @@
             (thresholds || []).forEach((t, i) => {
                 annotations['threshold_' + i] = {
                     type: 'line', yMin: t.y, yMax: t.y,
-                    borderColor: t.color, borderWidth: 1.5, borderDash: [6, 3],
-                    label: { display: true, content: t.label, position: 'end', backgroundColor: t.color + '80', color: '#fff', font: { size: 10, weight: 'bold' }, padding: 3 }
+                    borderColor: t.color + '40', borderWidth: 1, borderDash: [8, 4],
                 };
             });
 
-            // Build initial datasets (top 3 active)
+            // Build initial datasets (top 5 active)
             function buildDatasets() {
                 const ds = [];
                 workloads.forEach(w => {
@@ -1237,7 +1265,7 @@
             };
             actions.appendChild(mkBtn('All', () => workloads.forEach(w => w.active = true)));
             actions.appendChild(mkBtn('Clear', () => workloads.forEach(w => w.active = false)));
-            actions.appendChild(mkBtn('Top 3', () => workloads.forEach((w, i) => w.active = i < 3)));
+            actions.appendChild(mkBtn('Top 5', () => workloads.forEach((w, i) => w.active = i < 5)));
             actions.appendChild(mkBtn('Leaks', () => {
                 workloads.forEach(w => w.active = w.peak > 200);
             }));
@@ -1251,7 +1279,22 @@
                 const pill = document.createElement('span');
                 pill.className = 'hcp-pill ' + (w.active ? 'active' : 'inactive');
                 pill.style.color = w.color;
+                // Determine concern level based on thresholds
+                let concernIcon = '';
+                let concernTitle = '';
+                const sortedThresholds = (thresholds || []).slice().sort((a, b) => b.y - a.y);
+                for (const t of sortedThresholds) {
+                    if (w.peak > t.y) {
+                        concernIcon = `<span style="color:${t.color};font-weight:bold;margin-left:3px;" title="${t.label}: peak ${Math.round(w.peak)}">⚠</span>`;
+                        concernTitle = `${t.label}: peak ${Math.round(w.peak)}`;
+                        break;
+                    }
+                }
+                pill.title = `Peak: ${Math.round(w.peak)} ${yLabel}` +
+                    (w.restartCount > 0 ? ` | ${w.restartCount} restarts` : '') +
+                    (concernTitle ? ` | ${concernTitle}` : '');
                 pill.innerHTML = `<span class="pill-dot" style="background:${w.color}"></span>${w.label}` +
+                    concernIcon +
                     (w.restartCount > 0 ? `<span class="pill-restart">↻${w.restartCount}</span>` : '') +
                     `<span style="font-size:0.8em;color:#999;margin-left:3px">${Math.round(w.peak)}</span>`;
                 pill.onclick = () => {
@@ -2004,10 +2047,7 @@
                         })()}
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
-                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health') return '';
-
-                                // Custom rendering for concerning_pods table
-                                if (key === 'concerning_pods_TABLE_RENDERED_BELOW') return '';
+                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health' || key === 'hcp_status' || key === 'hcp_namespaces' || key === 'node_resources' || key === 'role_utilization' || key === 'nodes' || key === 'degraded_names') return '';
 
                                 // Custom rendering for OME per-metric table
                                 if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {
