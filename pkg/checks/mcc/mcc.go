@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -132,10 +133,10 @@ func nodeRole(node *corev1.Node) string {
 }
 
 func checkNodeHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_node_health")
+	cc.SetCheck("cluster_node_health")
 
 	r := checks.Result{
-		Check:    "mcc_node_health",
+		Check:    "cluster_node_health",
 		Severity: checks.SeverityCritical,
 		Details: map[string]any{
 			"description":   "Checks all cluster nodes for Ready condition, pressure conditions (MemoryPressure, DiskPressure, PIDPressure, NetworkUnavailable), and unschedulable (cordoned) state.",
@@ -243,10 +244,10 @@ func checkNodeHealth(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkNodeResources(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_node_resources")
+	cc.SetCheck("cluster_node_resources")
 
 	r := checks.Result{
-		Check:    "mcc_node_resources",
+		Check:    "cluster_node_resources",
 		Severity: checks.SeverityInfo,
 		Details: map[string]any{
 			"description":   "Reports node capacity, allocatable resources, kubelet version distribution, and node age. Flags mixed kubelet versions (upgrade in progress) and old nodes.",
@@ -423,10 +424,10 @@ func checkNodeResources(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkNodeCounts(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_node_counts")
+	cc.SetCheck("cluster_node_counts")
 
 	r := checks.Result{
-		Check:    "mcc_node_counts",
+		Check:    "cluster_node_counts",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
 			"description":   "Validates that the cluster has the expected number of master, infra, and worker nodes based on cluster type and availability zone configuration. Masters should always be 3 for HA. Infra minimum is 2 (single-AZ) or 3 (multi-AZ). Worker minimum is 2 (single-AZ) or 3 (multi-AZ).",
@@ -512,10 +513,10 @@ func checkNodeCounts(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkNodePodFailures(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_node_pod_failures")
+	cc.SetCheck("cluster_node_pod_failures")
 
 	r := checks.Result{
-		Check:    "mcc_node_pod_failures",
+		Check:    "cluster_node_pod_failures",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
 			"description":   "Counts failed and pending pods per node to detect nodes with systemic issues (disk full, network problems, kubelet issues).",
@@ -588,10 +589,10 @@ func checkNodePodFailures(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkMachineHealth(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_machine_health")
+	cc.SetCheck("cluster_machine_health")
 
 	r := checks.Result{
-		Check:    "mcc_machine_health",
+		Check:    "cluster_machine_health",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
 			"namespace":     machineAPINamespace,
@@ -680,10 +681,10 @@ func checkMachineHealth(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkManagedBootImages(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_managed_boot_images")
+	cc.SetCheck("cluster_managed_boot_images")
 
 	r := checks.Result{
-		Check:    "mcc_managed_boot_images",
+		Check:    "cluster_managed_boot_images",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
 			"description":   "Validates MachineConfiguration managed boot images state against expected configuration based on cluster product, provider, and version. OSD AWS 4.19+ should have managed boot images enabled; ROSA and OSD AWS 4.18 should have them disabled.",
@@ -903,10 +904,10 @@ func resolveExpectedAMI(ctx context.Context, cc *checks.ClusterContext) string {
 }
 
 func checkAMIConsistency(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_ami_consistency")
+	cc.SetCheck("cluster_ami_consistency")
 
 	r := checks.Result{
-		Check:    "mcc_ami_consistency",
+		Check:    "cluster_ami_consistency",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
 			"description":   "Compares AMI IDs across MachineSets and Machines against the expected boot image from the coreos-bootimages ConfigMap. Flags MachineSets on old AMIs and Machines that don't match their MachineSet.",
@@ -941,8 +942,6 @@ func checkAMIConsistency(ctx context.Context, cc *checks.ClusterContext) {
 	}
 
 	r.Details["unique_amis"] = len(amiCounts)
-	r.Details["ami_distribution"] = amiCounts
-	r.Details["machineset_amis"] = msAMIs
 
 	// Check Machines for AMI mismatch against their MachineSet
 	machineList, mErr := cc.Client.ListResources(ctx, machineGVR, machineAPINamespace, false)
@@ -972,27 +971,58 @@ func checkAMIConsistency(ctx context.Context, cc *checks.ClusterContext) {
 	// Determine product type for AMI context
 	isROSA := cc.Metadata != nil && strings.EqualFold(cc.Metadata.Product, "rosa")
 
-	// Count MachineSets on expected vs old vs custom AMI
+	// Classify each MachineSet's AMI and build structured detail
+	type msAMIDetail struct {
+		MachineSet string `json:"machineset"`
+		AMI        string `json:"ami"`
+		Status     string `json:"status"`
+	}
 	onExpected := 0
 	onOld := 0
 	customAMIs := 0
-	rosaAMIs := 0 // AMIs not in AllowedAMIs but on a ROSA cluster (expected)
-	if expectedAMI != "" {
-		for _, ami := range msAMIs {
+	rosaAMIs := 0
+	var msDetails []msAMIDetail
+	for _, item := range msList.Items {
+		name := item.GetName()
+		ami := msAMIs[name]
+		if ami == "" {
+			continue
+		}
+		status := "unknown"
+		if expectedAMI != "" {
 			if ami == expectedAMI {
+				status = "✓ latest"
 				onExpected++
 			} else {
 				onOld++
-				// Lazy-load AllowedAMIs only when we find a mismatch
 				if allowed, listAvail := isAllowedAMI(ami); listAvail && !allowed {
 					if isROSA {
+						status = "ROSA AMI"
 						rosaAMIs++
 					} else {
+						status = "⚠ custom"
 						customAMIs++
 					}
+				} else {
+					status = "old RHCOS"
 				}
 			}
 		}
+		// Strip cluster prefix+hash from MachineSet name for readability
+		pool := name
+		parts := strings.Split(name, "-")
+		foundRole := false
+		for i, p := range parts {
+			if !foundRole && (p == "worker" || p == "infra" || p == "master" || p == "gpunode") {
+				pool = strings.Join(parts[i:], "-")
+				foundRole = true
+				break
+			}
+		}
+		msDetails = append(msDetails, msAMIDetail{MachineSet: pool, AMI: ami, Status: status})
+	}
+	r.Details["machineset_amis"] = msDetails
+	if expectedAMI != "" {
 		r.Details["machinesets_on_expected_ami"] = onExpected
 		r.Details["machinesets_on_old_ami"] = onOld
 		if customAMIs > 0 {
@@ -1050,10 +1080,10 @@ func checkAMIConsistency(ctx context.Context, cc *checks.ClusterContext) {
 var timeNow = func() int64 { return time.Now().Unix() }
 
 func checkMachineAPILogs(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_machine_api_logs")
+	cc.SetCheck("cluster_machine_api_logs")
 
 	r := checks.Result{
-		Check:    "mcc_machine_api_logs",
+		Check:    "cluster_machine_api_logs",
 		Severity: checks.SeverityWarning,
 		Details: map[string]any{
 			"namespace":     machineAPINamespace,
@@ -1215,10 +1245,10 @@ func checkMachineAPILogs(ctx context.Context, cc *checks.ClusterContext) {
 }
 
 func checkNodeMetricsTrends(ctx context.Context, cc *checks.ClusterContext) {
-	cc.SetCheck("mcc_node_metrics")
+	cc.SetCheck("cluster_node_metrics")
 
 	r := checks.Result{
-		Check:    "mcc_node_metrics",
+		Check:    "cluster_node_metrics",
 		Severity: checks.SeverityInfo,
 		Details: map[string]any{
 			"description":   "Queries 7-day average CPU utilization and memory usage per node role (master, infra, worker). Shows aggregated trends for capacity planning and correlating with infrastructure changes like AMI updates.",
@@ -1241,11 +1271,14 @@ func checkNodeMetricsTrends(ctx context.Context, cc *checks.ClusterContext) {
 		if node == "" {
 			node = m["instance"]
 		}
+		if idx := strings.LastIndex(node, ":"); idx > 0 {
+			node = node[:idx]
+		}
 		return node
 	}
 
 	// Query all nodes, then split by role in Go using the node list
-	cpuQuery := `100 - (avg by (node) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)`
+	cpuQuery := `sum by (node) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate) / on (node) kube_node_status_capacity{resource="cpu"} * 100`
 	cpuData, cpuErr := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step)
 	cc.RecordError("Node CPU metrics", cpuErr)
 
@@ -1262,6 +1295,54 @@ func checkNodeMetricsTrends(ctx context.Context, cc *checks.ClusterContext) {
 		}
 	}
 
+	// Build node-to-pool map from Machines for worker grouping (non-MC only)
+	nodePoolMap := map[string]string{}
+	isMC := cc.ClusterType == "management_cluster"
+	if !isMC {
+		machineList, mErr := cc.Client.ListResources(ctx, machineGVR, machineAPINamespace, false)
+		if mErr != nil && checks.IsAccessError(mErr) && cc.Client.CanElevate() {
+			machineList, mErr = cc.Client.ListResources(ctx, machineGVR, machineAPINamespace, true)
+		}
+		if mErr == nil {
+			for _, item := range machineList.Items {
+				nodeName, _, _ := unstructured.NestedString(item.Object, "status", "nodeRef", "name")
+				if nodeName == "" {
+					continue
+				}
+				// Get owning MachineSet from metadata.ownerReferences or metadata.labels
+				msName := ""
+				if refs, found, _ := unstructured.NestedSlice(item.Object, "metadata", "ownerReferences"); found {
+					for _, ref := range refs {
+						if refMap, ok := ref.(map[string]any); ok {
+							if kind, _ := refMap["kind"].(string); kind == "MachineSet" {
+								msName, _ = refMap["name"].(string)
+								break
+							}
+						}
+					}
+				}
+				if msName != "" {
+					// Extract pool name: strip "<cluster>-<hash>-" prefix
+					// MachineSet names look like: "clustername-hash-worker-us-east-1a"
+					parts := strings.Split(msName, "-")
+					poolParts := []string{}
+					foundRole := false
+					for _, p := range parts {
+						if !foundRole && (p == "worker" || p == "infra" || p == "master" || p == "gpunode") {
+							foundRole = true
+						}
+						if foundRole {
+							poolParts = append(poolParts, p)
+						}
+					}
+					if len(poolParts) > 0 {
+						nodePoolMap[nodeName] = strings.Join(poolParts, "-")
+					}
+				}
+			}
+		}
+	}
+
 	seriesCount := 0
 
 	// Split timeseries by role
@@ -1269,8 +1350,10 @@ func checkNodeMetricsTrends(ctx context.Context, cc *checks.ClusterContext) {
 		byRole := map[string][]thanos.LabeledTimeseries{}
 		for _, s := range allSeries {
 			role := nodeRoleMap[s.Label]
-			if role == "" || role == "control-plane" {
+			if role == "control-plane" {
 				role = "master"
+			} else if role == "" {
+				role = "worker"
 			}
 			byRole[role] = append(byRole[role], s)
 		}
@@ -1282,7 +1365,6 @@ func checkNodeMetricsTrends(ctx context.Context, cc *checks.ClusterContext) {
 		if len(series) == 1 {
 			return series[0]
 		}
-		// Collect all timestamps, average values at each
 		byTS := map[float64][]float64{}
 		for _, s := range series {
 			for _, v := range s.Values {
@@ -1300,32 +1382,57 @@ func checkNodeMetricsTrends(ctx context.Context, cc *checks.ClusterContext) {
 		return thanos.LabeledTimeseries{Label: label, Values: points}
 	}
 
+	// Group workers by pool (non-MC) or single avg (MC)
+	groupWorkers := func(series []thanos.LabeledTimeseries) []thanos.LabeledTimeseries {
+		if isMC {
+			return []thanos.LabeledTimeseries{avgSeries(series, fmt.Sprintf("worker avg (%d nodes)", len(series)))}
+		}
+		if len(nodePoolMap) == 0 {
+			return series
+		}
+		byPool := map[string][]thanos.LabeledTimeseries{}
+		for _, s := range series {
+			pool := nodePoolMap[s.Label]
+			if pool == "" {
+				pool = "worker"
+			}
+			byPool[pool] = append(byPool[pool], s)
+		}
+		var result []thanos.LabeledTimeseries
+		for pool, poolSeries := range byPool {
+			label := fmt.Sprintf("%s (%d nodes)", pool, len(poolSeries))
+			result = append(result, avgSeries(poolSeries, label))
+		}
+		sort.Slice(result, func(i, j int) bool {
+			return result[i].Label < result[j].Label
+		})
+		return result
+	}
+
+	storeSeries := func(allSeries []thanos.LabeledTimeseries, prefix string) {
+		byRole := splitByRole(allSeries)
+		for role, series := range byRole {
+			if role == "worker" && isMC {
+				continue
+			}
+			if role == "worker" && len(series) > 5 {
+				r.Details[prefix+"_"+role] = groupWorkers(series)
+			} else {
+				r.Details[prefix+"_"+role] = series
+			}
+			seriesCount += len(series)
+		}
+	}
+
 	if cpuErr == nil && cpuData != "" {
 		if allSeries, _ := thanos.PerSeriesTimeseries(cpuData, nodeLabel); len(allSeries) > 0 {
-			byRole := splitByRole(allSeries)
-			for role, series := range byRole {
-				if role == "worker" && len(series) > 5 {
-					// Aggregate workers into single avg line
-					r.Details["cpu_timeseries_"+role] = []thanos.LabeledTimeseries{avgSeries(series, "worker (avg)")}
-				} else {
-					r.Details["cpu_timeseries_"+role] = series
-				}
-				seriesCount += len(series)
-			}
+			storeSeries(allSeries, "cpu_timeseries")
 		}
 	}
 
 	if memErr == nil && memData != "" {
 		if allSeries, _ := thanos.PerSeriesTimeseries(memData, nodeLabel); len(allSeries) > 0 {
-			byRole := splitByRole(allSeries)
-			for role, series := range byRole {
-				if role == "worker" && len(series) > 5 {
-					r.Details["memory_timeseries_"+role] = []thanos.LabeledTimeseries{avgSeries(series, "worker (avg)")}
-				} else {
-					r.Details["memory_timeseries_"+role] = series
-				}
-				seriesCount += len(series)
-			}
+			storeSeries(allSeries, "memory_timeseries")
 		}
 	}
 

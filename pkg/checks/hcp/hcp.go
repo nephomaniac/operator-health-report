@@ -49,12 +49,6 @@ type concerningPod struct {
 
 func (c *HCPChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	if cc.ClusterType != "management_cluster" {
-		cc.AddResult(checks.Result{
-			Check:    "hcp_cluster_type",
-			Status:   checks.StatusInfo,
-			Severity: checks.SeverityInfo,
-			Message:  fmt.Sprintf("HCP checks not applicable on %s clusters — only management clusters", cc.ClusterType),
-		})
 		return
 	}
 
@@ -655,46 +649,99 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 		}
 	}
 
-	// Query restart events for overlay on charts
-	restartQuery := `changes(kube_pod_container_status_restarts_total{namespace=~"clusters-.*|ocm-.*"}[1h])`
-	restartData, restartErr := cc.Client.QueryMetricsRange(ctx, restartQuery, start, now, step)
-	if restartErr == nil && restartData != "" {
-		type restartEvent struct {
-			Timestamp int64  `json:"timestamp"`
-			Workload  string `json:"workload"`
-		}
-		restartPodLabel := func(m map[string]string) string {
-			return m["namespace"] + "/" + m["pod"]
-		}
-		var events []restartEvent
-		if allSeries, _ := thanos.PerSeriesTimeseries(restartData, restartPodLabel); len(allSeries) > 0 {
-			for _, s := range allSeries {
+	// Query lifecycle events for chart overlay — 3 types:
+	// 1. OOMKilled (red ☠) — container terminated by OOM
+	// 2. Restart (yellow ⟲) — non-OOM container restart
+	// 3. New Pod (green ★) — new pod created (replacement)
+	type podEvent struct {
+		Timestamp int64  `json:"timestamp"`
+		Workload  string `json:"workload"`
+		Type      string `json:"type"` // "oom", "restart", "new_pod"
+	}
+	var allEvents []podEvent
+
+	podLabel := func(m map[string]string) string {
+		return m["namespace"] + "/" + m["pod"]
+	}
+
+	// OOMKilled events
+	oomQuery := `changes(kube_pod_container_status_last_terminated_reason{namespace=~"clusters-.*|ocm-.*",reason="OOMKilled"}[1h])`
+	if oomData, oomErr := cc.Client.QueryMetricsRange(ctx, oomQuery, start, now, step); oomErr == nil && oomData != "" {
+		if series, _ := thanos.PerSeriesTimeseries(oomData, podLabel); len(series) > 0 {
+			for _, s := range series {
 				wl := podToWorkload(s.Label)
 				for _, pt := range s.Values {
 					if pt[1] > 0 {
-						events = append(events, restartEvent{Timestamp: int64(pt[0]), Workload: wl})
+						allEvents = append(allEvents, podEvent{Timestamp: int64(pt[0]), Workload: wl, Type: "oom"})
 					}
 				}
 			}
 		}
-		if len(events) > 0 {
-			// Deduplicate by workload+hour
-			seen := map[string]bool{}
-			var deduped []restartEvent
-			for _, e := range events {
-				key := fmt.Sprintf("%s-%d", e.Workload, e.Timestamp/3600)
-				if !seen[key] {
-					seen[key] = true
-					deduped = append(deduped, e)
+	}
+
+	// Generic restarts (non-OOM)
+	restartQuery := `changes(kube_pod_container_status_restarts_total{namespace=~"clusters-.*|ocm-.*"}[1h])`
+	if restartData, restartErr := cc.Client.QueryMetricsRange(ctx, restartQuery, start, now, step); restartErr == nil && restartData != "" {
+		if series, _ := thanos.PerSeriesTimeseries(restartData, podLabel); len(series) > 0 {
+			for _, s := range series {
+				wl := podToWorkload(s.Label)
+				for _, pt := range s.Values {
+					if pt[1] > 0 {
+						allEvents = append(allEvents, podEvent{Timestamp: int64(pt[0]), Workload: wl, Type: "restart"})
+					}
 				}
 			}
-			if len(deduped) > 50 {
-				deduped = deduped[:50]
-			}
-			r.Details["restart_events"] = deduped
-			r.Details["restart_event_count"] = len(deduped)
-			seriesCount += len(deduped)
 		}
+	}
+
+	// New pod creation events
+	newPodQuery := `kube_pod_start_time{namespace=~"clusters-.*|ocm-.*"}`
+	if newPodData, newPodErr := cc.Client.QueryMetrics(ctx, newPodQuery); newPodErr == nil && newPodData != "" {
+		if resp, parseErr := thanos.Parse(newPodData); parseErr == nil {
+			for _, result := range resp.Data.Result {
+				if len(result.Value) >= 2 {
+					if startTime, ok := thanos.ToFloat(result); ok {
+						ts := int64(startTime)
+						if ts >= start && ts <= now {
+							wl := podToWorkload(result.Metric["namespace"] + "/" + result.Metric["pod"])
+							allEvents = append(allEvents, podEvent{Timestamp: ts, Workload: wl, Type: "new_pod"})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Deduplicate: remove restart events that overlap with OOM events (same workload+hour)
+	oomKeys := map[string]bool{}
+	for _, e := range allEvents {
+		if e.Type == "oom" {
+			oomKeys[fmt.Sprintf("%s-%d", e.Workload, e.Timestamp/3600)] = true
+		}
+	}
+
+	seen := map[string]bool{}
+	var deduped []podEvent
+	for _, e := range allEvents {
+		key := fmt.Sprintf("%s-%s-%d", e.Type, e.Workload, e.Timestamp/3600)
+		if seen[key] {
+			continue
+		}
+		// Skip generic restart if there's an OOM at the same time (OOM is more specific)
+		if e.Type == "restart" && oomKeys[fmt.Sprintf("%s-%d", e.Workload, e.Timestamp/3600)] {
+			continue
+		}
+		seen[key] = true
+		deduped = append(deduped, e)
+	}
+	if len(deduped) > 80 {
+		deduped = deduped[:80]
+	}
+
+	if len(deduped) > 0 {
+		r.Details["pod_events"] = deduped
+		r.Details["restart_event_count"] = len(deduped)
+		seriesCount += len(deduped)
 	}
 
 	if seriesCount == 0 {
@@ -733,19 +780,6 @@ func checkResourceTrends(ctx context.Context, cc *checks.ClusterContext, concern
 	// 3. No plateau (continuous growth without leveling off)
 	var sawtoothWorkloads []string
 	memSeries, _ := r.Details["memory_timeseries"].([]thanos.LabeledTimeseries)
-
-	// Get restart timestamps by workload for correlation
-	restartTSByWorkload := map[string][]float64{}
-	if events, ok := r.Details["restart_events"]; ok {
-		if slice, ok := events.([]struct {
-			Timestamp int64  `json:"timestamp"`
-			Workload  string `json:"workload"`
-		}); ok {
-			for _, e := range slice {
-				restartTSByWorkload[e.Workload] = append(restartTSByWorkload[e.Workload], float64(e.Timestamp))
-			}
-		}
-	}
 
 	for _, s := range memSeries {
 		if len(s.Values) < 8 {

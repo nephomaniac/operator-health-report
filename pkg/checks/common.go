@@ -1004,32 +1004,58 @@ func CheckPKOJobHealth(ctx context.Context, cc *ClusterContext) {
 			}
 		}
 
-		// Try to get logs from the most recent failed pod
-		if isFailed {
-			pods, podErr := cc.Client.GetPods(ctx, cc.Operator.Namespace, fmt.Sprintf("job-name=%s", job.Name))
-			if podErr == nil && len(pods.Items) > 0 {
-				for _, pod := range pods.Items {
-					if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
-						logs, logErr := cc.Client.GetPodLogs(ctx, cc.Operator.Namespace, pod.Name, 20)
-						if logErr == nil && logs != "" {
-							detail["pod_name"] = pod.Name
-							detail["pod_phase"] = string(pod.Status.Phase)
-							// Truncate to last 500 chars
-							if len(logs) > 500 {
-								logs = "..." + logs[len(logs)-500:]
-							}
-							detail["pod_logs"] = logs
+		// Collect diagnostic info from job pods (failed or hung)
+		pods, podErr := cc.Client.GetPods(ctx, cc.Operator.Namespace, fmt.Sprintf("job-name=%s", job.Name))
+		if podErr == nil && len(pods.Items) > 0 {
+			for _, pod := range pods.Items {
+				if isFailed && pod.Status.Phase != corev1.PodFailed && pod.Status.Phase != corev1.PodSucceeded {
+					continue
+				}
+				detail["pod_name"] = pod.Name
+				detail["pod_phase"] = string(pod.Status.Phase)
+				if !pod.CreationTimestamp.IsZero() {
+					age := time.Since(pod.CreationTimestamp.Time)
+					detail["pod_age"] = fmt.Sprintf("%dd%dh", int(age.Hours())/24, int(age.Hours())%24)
+				}
+				// Container status
+				for _, cs := range pod.Status.ContainerStatuses {
+					if cs.State.Terminated != nil {
+						detail["exit_code"] = cs.State.Terminated.ExitCode
+						detail["termination_reason"] = cs.State.Terminated.Reason
+					}
+					if cs.State.Waiting != nil {
+						detail["waiting_reason"] = cs.State.Waiting.Reason
+						if cs.State.Waiting.Message != "" {
+							detail["waiting_message"] = cs.State.Waiting.Message
 						}
-						// Get termination reason from container status
-						for _, cs := range pod.Status.ContainerStatuses {
-							if cs.State.Terminated != nil {
-								detail["exit_code"] = cs.State.Terminated.ExitCode
-								detail["termination_reason"] = cs.State.Terminated.Reason
-							}
-						}
+					}
+					detail["restart_count"] = cs.RestartCount
+				}
+				// Pod logs (last 20 lines)
+				logs, logErr := cc.Client.GetPodLogs(ctx, cc.Operator.Namespace, pod.Name, 20)
+				if logErr == nil && logs != "" {
+					if len(logs) > 500 {
+						logs = "..." + logs[len(logs)-500:]
+					}
+					detail["pod_logs"] = logs
+				}
+				break
+			}
+		}
+		// Pod events
+		if isHung || isFailed {
+			events, evtErr := cc.Client.Clientset().CoreV1().Events(cc.Operator.Namespace).List(ctx, metav1.ListOptions{
+				FieldSelector: fmt.Sprintf("involvedObject.name=%s", job.Name),
+			})
+			if evtErr == nil && len(events.Items) > 0 {
+				var evtMsgs []string
+				for _, e := range events.Items {
+					if len(evtMsgs) >= 5 {
 						break
 					}
+					evtMsgs = append(evtMsgs, fmt.Sprintf("[%s] %s: %s", e.Type, e.Reason, e.Message))
 				}
+				detail["events"] = evtMsgs
 			}
 		}
 

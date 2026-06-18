@@ -47,13 +47,6 @@ var (
 
 func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	if cc.ClusterType != "management_cluster" && cc.ClusterType != "service_cluster" {
-		cc.AddResult(checks.Result{
-			Check:    "rhobs_cluster_type",
-			Status:   checks.StatusInfo,
-			Severity: checks.SeverityInfo,
-			Message:  fmt.Sprintf("RHOBS observability checks not applicable on %s clusters — only MC/SC", cc.ClusterType),
-			Details:  map[string]any{"cluster_type": cc.ClusterType},
-		})
 		return
 	}
 

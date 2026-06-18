@@ -3,6 +3,7 @@ package sfo
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -523,41 +524,75 @@ func checkForwarderResourceMetrics(ctx context.Context, cc *checks.ClusterContex
 	start := now - 604800
 	step := 1800
 
-	memQuery := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s",pod=~"splunkforwarder-.*",container!=""})`, securityNamespace)
+	podLabel := func(m map[string]string) string {
+		return m["pod"]
+	}
+
+	// Per-pod timeseries for interactive charts
+	memQuery := fmt.Sprintf(`sum by (pod) (container_memory_working_set_bytes{namespace="%s",pod=~"splunkforwarder-.*",container!=""})`, securityNamespace)
 	memData, _ := cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step)
 
-	cpuQuery := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"splunkforwarder-.*",container!=""}[5m]))`, securityNamespace)
+	cpuQuery := fmt.Sprintf(`sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"splunkforwarder-.*",container!=""}[5m]))`, securityNamespace)
 	cpuData, _ := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step)
 
-	memPoints, _ := thanos.Timeseries(memData)
-	cpuPoints, _ := thanos.Timeseries(cpuData)
+	// Aggregate query for summary stats (peak, trend)
+	aggMemQuery := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s",pod=~"splunkforwarder-.*",container!=""})`, securityNamespace)
+	aggMemData, _ := cc.Client.QueryMetricsRange(ctx, aggMemQuery, start, now, step)
+	aggMemPoints, _ := thanos.Timeseries(aggMemData)
 
-	if len(memPoints) == 0 && len(cpuPoints) == 0 {
+	aggCpuQuery := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace="%s",pod=~"splunkforwarder-.*",container!=""}[5m]))`, securityNamespace)
+	aggCpuData, _ := cc.Client.QueryMetricsRange(ctx, aggCpuQuery, start, now, step)
+	aggCpuPoints, _ := thanos.Timeseries(aggCpuData)
+
+	memSeries, _ := thanos.PerSeriesTimeseries(memData, podLabel)
+	cpuSeries, _ := thanos.PerSeriesTimeseries(cpuData, podLabel)
+
+	if len(memSeries) == 0 && len(cpuSeries) == 0 {
 		r.Status = checks.StatusSkip
 		r.Message = "No splunk-forwarder resource metrics found"
 		cc.AddResult(r)
 		return
 	}
 
-	if len(memPoints) > 0 {
-		r.Details["forwarder_memory_timeseries"] = thanos.PointsToJSON(memPoints)
-		peak := thanos.Peak(memPoints)
+	// Sort by peak and cap at 15
+	sort.Slice(memSeries, func(i, j int) bool {
+		return thanos.Peak(memSeries[i].Values) > thanos.Peak(memSeries[j].Values)
+	})
+	if len(memSeries) > 15 {
+		memSeries = memSeries[:15]
+	}
+	sort.Slice(cpuSeries, func(i, j int) bool {
+		return thanos.Peak(cpuSeries[i].Values) > thanos.Peak(cpuSeries[j].Values)
+	})
+	if len(cpuSeries) > 15 {
+		cpuSeries = cpuSeries[:15]
+	}
+
+	if len(memSeries) > 0 {
+		r.Details["forwarder_memory_timeseries"] = memSeries
+	}
+	if len(cpuSeries) > 0 {
+		r.Details["forwarder_cpu_timeseries"] = cpuSeries
+	}
+
+	// Aggregate summary stats
+	if len(aggMemPoints) > 0 {
+		peak := thanos.Peak(aggMemPoints)
 		r.Details["forwarder_peak_memory_mb"] = thanos.Round(peak/(1024*1024), 1)
-		_, _, memPct := thanos.Trend(memPoints)
+		_, _, memPct := thanos.Trend(aggMemPoints)
 		r.Details["forwarder_memory_increase_percent"] = thanos.Round(memPct, 2)
 		r.Details["forwarder_memory_trend"] = "stable"
 		if memPct > 50 && peak/(1024*1024) > 50 {
 			r.Details["forwarder_memory_trend"] = "increasing"
 		}
 	}
-
-	if len(cpuPoints) > 0 {
-		r.Details["forwarder_cpu_timeseries"] = thanos.PointsToJSON(cpuPoints)
-		peak := thanos.Peak(cpuPoints)
+	if len(aggCpuPoints) > 0 {
+		peak := thanos.Peak(aggCpuPoints)
 		r.Details["forwarder_peak_cpu_millicores"] = thanos.Round(peak*1000, 0)
-		_, _, cpuPct := thanos.Trend(cpuPoints)
+		_, _, cpuPct := thanos.Trend(aggCpuPoints)
 		r.Details["forwarder_cpu_increase_percent"] = thanos.Round(cpuPct, 2)
 	}
+	r.Details["forwarder_pod_count"] = len(memSeries)
 
 	memTrend, _ := r.Details["forwarder_memory_trend"].(string)
 	peakMem, _ := r.Details["forwarder_peak_memory_mb"].(float64)

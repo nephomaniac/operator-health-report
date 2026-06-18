@@ -63,15 +63,15 @@
                             if (chartType === 'duration') createDurationChart(el.id, chartData, restarts, versions);
                             if (chartType === 'sfo-throughput') createSFOThroughputChart(el.id, chartData, restarts, versions);
                             if (chartType === 'sfo-errors') createSFOErrorChart(el.id, chartData, restarts, versions);
-                            if (chartType === 'rlr-buffer-pods') createRLRMultiSeriesChart(el.id, chartData.buffer_saturation_timeseries_by_pod, 'Buffer Saturation (%)', 100, [{y: 70, label: 'Warning (70%)', color: '#ffc107'}, {y: 95, label: 'Critical (95%)', color: '#dc3545'}]);
+                            if (chartType === 'rlr-buffer-pods') createHCPChart(el.id, chartData.buffer_saturation_timeseries_by_pod, [], 'Buffer Saturation (%)', 100, [{y: 70, label: 'Warning (70%)', color: '#ffc107'}, {y: 95, label: 'Critical (95%)', color: '#dc3545'}]);
                             if (chartType === 'rlr-ingestion') createRLRTimeseriesChart(el.id, chartData.ingestion_timeseries, 'Events/sec', '#2dd4a0', 1);
-                            if (chartType === 'rlr-ingestion-clusters') createRLRMultiSeriesChart(el.id, chartData.ingestion_timeseries_by_cluster, 'Events/sec', 1, [{y: 2000, label: 'Runaway threshold', color: '#f25c5c'}]);
+                            if (chartType === 'rlr-ingestion-clusters') createHCPChart(el.id, chartData.ingestion_timeseries_by_cluster, [], 'Events/sec', 1, [{y: 2000, label: 'Runaway threshold', color: '#f25c5c'}]);
                             if (chartType === 'rlr-loss') createRLRTimeseriesChart(el.id, chartData.event_loss_timeseries, 'Events/sec lost', '#f25c5c', 1);
-                            if (chartType === 'rlr-loss-pods') createRLRMultiSeriesChart(el.id, chartData.event_loss_timeseries_by_pod, 'Events/sec lost', 1, []);
+                            if (chartType === 'rlr-loss-pods') createHCPChart(el.id, chartData.event_loss_timeseries_by_pod, [], 'Events/sec lost', 1, []);
                             if (chartType === 'rlr-write') createRLRTimeseriesChart(el.id, chartData.write_ratio_timeseries, 'Write Ratio', '#f5c542', 1, [{y: 0.99, label: 'SLO (0.99)', color: '#dc3545'}]);
-                            if (chartType === 'rlr-write-pods') createRLRMultiSeriesChart(el.id, chartData.write_ratio_timeseries_by_pod, 'Write Ratio', 1, [{y: 0.99, label: 'SLO (0.99)', color: '#dc3545'}]);
-                            if (chartType === 'rlr-memory') createRLRTimeseriesChart(el.id, chartData.memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
-                            if (chartType === 'rlr-cpu') createRLRTimeseriesChart(el.id, chartData.cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
+                            if (chartType === 'rlr-write-pods') createHCPChart(el.id, chartData.write_ratio_timeseries_by_pod, [], 'Write Ratio', 1, [{y: 0.99, label: 'SLO (0.99)', color: '#dc3545'}]);
+                            if (chartType === 'rlr-memory') createHCPChart(el.id, chartData.memory_timeseries, [], 'Memory (MB)', 1/(1024*1024), []);
+                            if (chartType === 'rlr-cpu') createHCPChart(el.id, chartData.cpu_timeseries, [], 'CPU (millicores)', 1000, []);
                             if (chartType === 'sae-memory') createRLRTimeseriesChart(el.id, chartData.memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
                             if (chartType === 'sae-cpu') createRLRTimeseriesChart(el.id, chartData.cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
                             if (chartType === 'sae-throughput') {
@@ -82,8 +82,8 @@
                                 if (chartData.error_events_timeseries) datasets.push({label:'Errors',data:chartData.error_events_timeseries.map(p=>({x:p[0]*1000,y:parseFloat(p[1])})),borderColor:'#f25c5c',backgroundColor:'transparent',tension:0.3,pointRadius:0,borderWidth:1.5});
                                 if (datasets.length > 0) new Chart(document.getElementById(el.id),{type:'line',data:{datasets},options:{responsive:true,maintainAspectRatio:true,plugins:{legend:{display:true,position:'top'},tooltip:{mode:'index',intersect:false,callbacks:{title:ctx=>new Date(ctx[0].parsed.x).toLocaleString(),label:ctx=>ctx.dataset.label+': '+ctx.parsed.y.toFixed(1)+'/s'}}},scales:{x:{type:'time',time:{unit:'hour',displayFormats:{hour:'MMM d, HH:mm'}},title:{display:true,text:'Time'}},y:{beginAtZero:true,title:{display:true,text:'Events/sec'}}}}});
                             }
-                            if (chartType === 'sfr-memory') createRLRTimeseriesChart(el.id, chartData.forwarder_memory_timeseries, 'Memory (MB)', '#56b8e6', 1/(1024*1024));
-                            if (chartType === 'sfr-cpu') createRLRTimeseriesChart(el.id, chartData.forwarder_cpu_timeseries, 'CPU (millicores)', '#ff9f40', 1000);
+                            if (chartType === 'sfr-memory') createHCPChart(el.id, chartData.forwarder_memory_timeseries, [], 'Memory (MB)', 1/(1024*1024), []);
+                            if (chartType === 'sfr-cpu') createHCPChart(el.id, chartData.forwarder_cpu_timeseries, [], 'CPU (millicores)', 1000, []);
                             if (chartType === 'hcp-mem' || chartType === 'hcp-cpu') {
                                 // Shared color map so workloads use same colors across mem/cpu charts
                                 const mapKey = el.id.replace(/hcp-(mem|cpu)-/, 'hcp-colors-');
@@ -99,15 +99,15 @@
                                     allLabels.forEach(label => { window._hcpColorMaps[mapKey][label] = palette[ci % palette.length]; ci++; });
                                 }
                                 const cmap = window._hcpColorMaps[mapKey];
-                                if (chartType === 'hcp-mem') createHCPChart(el.id, chartData.memory_timeseries, chartData.restart_events, 'Memory (MB)', 1, [{y: 200, label: 'Elevated (200Mi)', color: '#ffc107'}, {y: 1024, label: 'Leak (1Gi)', color: '#dc3545'}], cmap);
-                                if (chartType === 'hcp-cpu') createHCPChart(el.id, chartData.cpu_timeseries, chartData.restart_events, 'CPU (millicores)', 1, [], cmap);
+                                if (chartType === 'hcp-mem') createHCPChart(el.id, chartData.memory_timeseries, chartData.pod_events, 'Memory (MB)', 1, [{y: 200, label: 'Elevated (200Mi)', color: '#ffc107'}, {y: 1024, label: 'Leak (1Gi)', color: '#dc3545'}], cmap);
+                                if (chartType === 'hcp-cpu') createHCPChart(el.id, chartData.cpu_timeseries, chartData.pod_events, 'CPU (millicores)', 1, [], cmap);
                             }
-                            if (chartType === 'mcc-cpu-master') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_master, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
-                            if (chartType === 'mcc-mem-master') createRLRMultiSeriesChart(el.id, chartData.memory_timeseries_master, 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
-                            if (chartType === 'mcc-cpu-infra') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_infra, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
-                            if (chartType === 'mcc-mem-infra') createRLRMultiSeriesChart(el.id, chartData.memory_timeseries_infra, 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
-                            if (chartType === 'mcc-cpu-worker') createRLRMultiSeriesChart(el.id, chartData.cpu_timeseries_worker, 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
-                            if (chartType === 'mcc-mem-worker') createRLRMultiSeriesChart(el.id, chartData.memory_timeseries_worker, 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'cluster-cpu-master') createHCPChart(el.id, chartData.cpu_timeseries_master, [], 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'cluster-mem-master') createHCPChart(el.id, chartData.memory_timeseries_master, [], 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'cluster-cpu-infra') createHCPChart(el.id, chartData.cpu_timeseries_infra, [], 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'cluster-mem-infra') createHCPChart(el.id, chartData.memory_timeseries_infra, [], 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'cluster-cpu-worker') createHCPChart(el.id, chartData.cpu_timeseries_worker, [], 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'cluster-mem-worker') createHCPChart(el.id, chartData.memory_timeseries_worker, [], 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                         }, 50);
                     });
                 }
@@ -454,14 +454,14 @@
                 'sfo_forwarder_metrics': 'SFO Metrics',
                 'sfo_servicemonitor': 'SFO SvcMon',
                 'sfo_prometheusrule': 'SFO PromRule',
-                'mcc_node_health': 'Node Health',
-                'mcc_node_resources': 'Node Resources',
-                'mcc_node_counts': 'Node Counts',
-                'mcc_node_pod_failures': 'Pod Failures',
-                'mcc_machine_api_logs': 'Machine API Logs',
-                'mcc_machine_health': 'Machine Health',
-                'mcc_managed_boot_images': 'Boot Images',
-                'mcc_ami_consistency': 'AMI Consistency',
+                'cluster_node_health': 'Node Health',
+                'cluster_node_resources': 'Node Resources',
+                'cluster_node_counts': 'Node Counts',
+                'cluster_node_pod_failures': 'Pod Failures',
+                'cluster_machine_api_logs': 'Machine API Logs',
+                'cluster_machine_health': 'Machine Health',
+                'cluster_managed_boot_images': 'Boot Images',
+                'cluster_ami_consistency': 'AMI Consistency',
                 'rhobs_cluster_type': 'Cluster Type',
                 'rhobs_monitoring_stack': 'MonitoringStack',
                 'rhobs_monitoring_credentials': 'RHOBS Creds',
@@ -1014,7 +1014,7 @@
             });
         }
 
-        function createRLRTimeseriesChart(canvasId, timeseries, label, color, scaleFactor, thresholds) {
+        function createRLRTimeseriesChart(canvasId, timeseries, label, color, scaleFactor, thresholds, countTimeseries) {
             if (!timeseries || timeseries.length === 0) return;
             const data = timeseries.map(p => ({ x: parseFloat(p[0]) * 1000, y: parseFloat(p[1]) * scaleFactor }));
             const annotations = {};
@@ -1026,20 +1026,48 @@
                 };
             });
 
+            const datasets = [{
+                label: label,
+                data: data,
+                borderColor: color,
+                backgroundColor: color + '20',
+                fill: true,
+                tension: 0.3,
+                pointRadius: 0,
+                borderWidth: 1.5,
+                yAxisID: 'y'
+            }];
+
+            const hasCount = countTimeseries && countTimeseries.length > 0;
+            if (hasCount) {
+                datasets.push({
+                    label: 'Pod Count',
+                    data: countTimeseries.map(p => ({ x: parseFloat(p[0]) * 1000, y: parseFloat(p[1]) })),
+                    borderColor: '#999',
+                    backgroundColor: 'transparent',
+                    borderDash: [4, 4],
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 1.5,
+                    yAxisID: 'y1'
+                });
+            }
+
+            const scales = {
+                x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
+                y: { beginAtZero: true, position: 'left', title: { display: true, text: label } }
+            };
+            if (hasCount) {
+                scales.y1 = {
+                    beginAtZero: true, position: 'right', title: { display: true, text: 'Pod Count' },
+                    grid: { drawOnChartArea: false },
+                    ticks: { stepSize: 1, precision: 0 }
+                };
+            }
+
             new Chart(document.getElementById(canvasId), {
                 type: 'line',
-                data: {
-                    datasets: [{
-                        label: label,
-                        data: data,
-                        borderColor: color,
-                        backgroundColor: color + '20',
-                        fill: true,
-                        tension: 0.3,
-                        pointRadius: 0,
-                        borderWidth: 1.5
-                    }]
-                },
+                data: { datasets },
                 options: {
                     responsive: true,
                     maintainAspectRatio: true,
@@ -1049,15 +1077,15 @@
                             mode: 'nearest', intersect: true,
                             callbacks: {
                                 title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
-                                label: ctx => label + ': ' + ctx.parsed.y.toFixed(2)
+                                label: ctx => {
+                                    if (ctx.dataset.yAxisID === 'y1') return 'Pod Count: ' + Math.round(ctx.parsed.y);
+                                    return label + ': ' + ctx.parsed.y.toFixed(2);
+                                }
                             }
                         },
                         annotation: { annotations }
                     },
-                    scales: {
-                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d, HH:mm' } }, title: { display: true, text: 'Time' } },
-                        y: { beginAtZero: true, title: { display: true, text: label } }
-                    }
+                    scales
                 }
             });
         }
@@ -1146,7 +1174,7 @@
             });
         }
 
-        function createHCPChart(canvasId, seriesData, restartEvents, yLabel, scaleFactor, thresholds, colorMap) {
+        function createHCPChart(canvasId, seriesData, podEvents, yLabel, scaleFactor, thresholds, colorMap) {
             if (!seriesData || seriesData.length === 0) return;
             const defaultColors = ['#6c8cff','#2dd4a0','#f5c542','#f25c5c','#56b8e6','#ff9f40','#a855f7','#ec4899',
                             '#14b8a6','#f97316','#8b5cf6','#06b6d4','#84cc16','#e11d48','#0ea5e9'];
@@ -1172,17 +1200,16 @@
                 });
             }
 
-            // Group restarts by workload
-            const restartsByWorkload = {};
-            (restartEvents || []).forEach(evt => {
+            // Group pod events by workload and type
+            const eventsByWorkload = {};  // workload -> [{ts, type}]
+            (podEvents || []).forEach(evt => {
                 const wl = evt.workload || 'unknown';
-                if (!restartsByWorkload[wl]) restartsByWorkload[wl] = [];
-                restartsByWorkload[wl].push(evt.timestamp * 1000);
+                if (!eventsByWorkload[wl]) eventsByWorkload[wl] = [];
+                eventsByWorkload[wl].push({ ts: evt.timestamp * 1000, type: evt.type || 'restart' });
             });
-
-            // Add workloads that have restarts but no data in this chart (e.g., audit-webhook in memory chart)
+            // Add workloads that have events but no data in this chart
             const chartedLabels = new Set(sorted.map(s => s.label));
-            Object.keys(restartsByWorkload).forEach(wl => {
+            Object.keys(eventsByWorkload).forEach(wl => {
                 if (!chartedLabels.has(wl)) {
                     sorted.push({ label: wl, values: [], origIdx: sorted.length });
                 }
@@ -1194,29 +1221,33 @@
                 const lineData = (s.values || []).map(p => ({ x: p[0] * 1000, y: parseFloat(p[1]) * scaleFactor }));
                 const peak = lineData.length > 0 ? Math.max(...lineData.map(d => d.y)) : 0;
 
-                // Find restart points on this workload's line
-                const wlRestarts = restartsByWorkload[s.label] || [];
-                const restartPoints = [];
-                wlRestarts.forEach(ts => {
+                // Find event points on this workload's line, grouped by type
+                const wlEvents = eventsByWorkload[s.label] || [];
+                const eventPoints = {}; // type -> [{x, y}]
+                wlEvents.forEach(evt => {
+                    if (!eventPoints[evt.type]) eventPoints[evt.type] = [];
                     if (lineData.length === 0) {
-                        // No resource data for this workload in this chart — show at y=0
-                        restartPoints.push({ x: ts, y: 0 });
+                        eventPoints[evt.type].push({ x: evt.ts, y: 0 });
                     } else {
                         let closestY = null, closestDist = Infinity;
                         lineData.forEach(d => {
-                            const dist = Math.abs(d.x - ts);
+                            const dist = Math.abs(d.x - evt.ts);
                             if (dist < closestDist) { closestDist = dist; closestY = d.y; }
                         });
                         if (closestY !== null && closestDist < 7200000) {
-                            restartPoints.push({ x: ts, y: closestY });
+                            eventPoints[evt.type].push({ x: evt.ts, y: closestY });
                         }
                     }
                 });
 
                 return {
-                    label: s.label, color, lineData, restartPoints, peak,
+                    label: s.label, color, lineData, eventPoints, peak,
                     hasData: lineData.length > 0,
-                    restartCount: wlRestarts.length, active: sortIdx < 5 && lineData.length > 0
+                    eventCount: wlEvents.length,
+                    oomCount: (eventPoints.oom || []).length,
+                    restartCount: (eventPoints.restart || []).length,
+                    newPodCount: (eventPoints.new_pod || []).length,
+                    active: sortIdx < 5 && lineData.length > 0
                 };
             });
 
@@ -1229,6 +1260,13 @@
                 };
             });
 
+            // Event type styling
+            const eventStyles = {
+                oom:     { color: '#dc3545', shape: 'circle',   symbol: '☠', tooltipLabel: 'OOMKilled' },
+                restart: { color: '#ffc107', shape: 'crossRot', symbol: '⟲', tooltipLabel: 'Restart' },
+                new_pod: { color: '#28a745', shape: 'star',     symbol: '★', tooltipLabel: 'New Pod' }
+            };
+
             // Build initial datasets (top 5 active)
             function buildDatasets() {
                 const ds = [];
@@ -1239,24 +1277,25 @@
                         borderColor: w.color,
                         backgroundColor: 'transparent',
                         tension: 0.3, pointRadius: 0, borderWidth: 2,
-                        hidden: !w.active
+                        hidden: !w.active,
+                        _workloadLabel: w.label, _eventType: null
                     });
-                    if (w.restartPoints.length > 0) {
-                        ds.push({
-                            label: '↻ ' + w.label,
-                            data: w.restartPoints,
-                            type: 'scatter',
-                            backgroundColor: '#dc3545',
-                            borderColor: w.color,
-                            pointRadius: 7, pointStyle: 'crossRot',
-                            pointBorderWidth: 2.5, pointBorderColor: '#dc3545',
-                            showLine: false, hidden: !w.active
-                        });
-                    }
-                });
-                // Threshold legend entries
-                (thresholds || []).forEach(t => {
-                    ds.push({ label: t.label, data: [], borderColor: t.color, borderDash: [6, 3], borderWidth: 1.5, pointRadius: 0, backgroundColor: 'transparent' });
+                    Object.entries(eventStyles).forEach(([type, style]) => {
+                        const pts = (w.eventPoints[type] || []);
+                        if (pts.length > 0) {
+                            ds.push({
+                                label: style.symbol + ' ' + w.label,
+                                data: pts,
+                                type: 'scatter',
+                                backgroundColor: style.color,
+                                borderColor: style.color,
+                                pointRadius: 7, pointStyle: style.shape,
+                                pointBorderWidth: 2.5, pointBorderColor: style.color,
+                                showLine: false, hidden: !w.active,
+                                _workloadLabel: w.label, _eventType: type
+                            });
+                        }
+                    });
                 });
                 return ds;
             }
@@ -1273,7 +1312,10 @@
                             callbacks: {
                                 title: ctx => new Date(ctx[0].parsed.x).toLocaleString(),
                                 label: ctx => {
-                                    if (ctx.dataset.label.startsWith('↻')) return ctx.dataset.label + ' (restart)';
+                                    const et = ctx.dataset._eventType;
+                                    if (et && eventStyles[et]) {
+                                        return eventStyles[et].symbol + ' ' + ctx.dataset._workloadLabel + ' (' + eventStyles[et].tooltipLabel + ')';
+                                    }
                                     return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + ' ' + yLabel;
                                 }
                             }
@@ -1297,6 +1339,28 @@
             label.textContent = 'Workloads';
             selectorDiv.appendChild(label);
 
+            // Chart legend (event types + thresholds)
+            const hasAnyEvents = workloads.some(w => w.eventCount > 0);
+            if (hasAnyEvents || (thresholds && thresholds.length > 0)) {
+                const legendDiv = document.createElement('span');
+                legendDiv.style.cssText = 'margin-left:auto;display:flex;gap:10px;font-size:0.8em;align-items:center;color:#999;';
+                if (hasAnyEvents) {
+                    Object.values(eventStyles).forEach(s => {
+                        const item = document.createElement('span');
+                        item.style.cssText = `color:${s.color};`;
+                        item.textContent = `${s.symbol} ${s.tooltipLabel}`;
+                        legendDiv.appendChild(item);
+                    });
+                }
+                (thresholds || []).forEach(t => {
+                    const item = document.createElement('span');
+                    item.style.cssText = `color:${t.color};border-bottom:1px dashed ${t.color};padding-bottom:1px;`;
+                    item.textContent = t.label;
+                    legendDiv.appendChild(item);
+                });
+                selectorDiv.appendChild(legendDiv);
+            }
+
             const actions = document.createElement('span');
             actions.className = 'selector-actions';
             const mkBtn = (text, fn) => {
@@ -1311,8 +1375,8 @@
             actions.appendChild(mkBtn('Leaks', () => {
                 workloads.forEach(w => w.active = w.peak > 200);
             }));
-            actions.appendChild(mkBtn('Restarted', () => {
-                workloads.forEach(w => w.active = w.restartCount > 0);
+            actions.appendChild(mkBtn('Events', () => {
+                workloads.forEach(w => w.active = w.eventCount > 0);
             }));
             selectorDiv.appendChild(actions);
 
@@ -1332,14 +1396,21 @@
                         break;
                     }
                 }
+                const eventParts = [];
+                if (w.oomCount > 0) eventParts.push(`${w.oomCount} OOMKilled`);
+                if (w.restartCount > 0) eventParts.push(`${w.restartCount} restarts`);
+                if (w.newPodCount > 0) eventParts.push(`${w.newPodCount} new pods`);
                 pill.title = `Peak: ${Math.round(w.peak)} ${yLabel}` +
-                    (w.restartCount > 0 ? ` | ${w.restartCount} restarts` : '') +
+                    (eventParts.length > 0 ? ` | ${eventParts.join(', ')}` : '') +
                     (concernTitle ? ` | ${concernTitle}` : '');
+                let eventBadges = '';
+                if (w.oomCount > 0) eventBadges += `<span style="color:#dc3545;font-weight:bold;margin-left:3px;font-size:0.85em" title="${w.oomCount} OOMKilled">☠${w.oomCount}</span>`;
+                if (w.restartCount > 0) eventBadges += `<span class="pill-restart" title="${w.restartCount} restarts">⟲${w.restartCount}</span>`;
+                if (w.newPodCount > 0) eventBadges += `<span style="color:#28a745;font-size:0.85em;margin-left:3px" title="${w.newPodCount} new pods">★${w.newPodCount}</span>`;
                 pill.innerHTML = `<span class="pill-dot" style="background:${w.color}"></span>${w.label}` +
-                    concernIcon +
-                    (w.restartCount > 0 ? `<span class="pill-restart">↻${w.restartCount}</span>` : '') +
+                    concernIcon + eventBadges +
                     (w.hasData ? `<span style="font-size:0.8em;color:#999;margin-left:3px">${Math.round(w.peak)}</span>` :
-                     `<span style="font-size:0.7em;color:#999;margin-left:3px;font-style:italic">restarts only</span>`);
+                     `<span style="font-size:0.7em;color:#999;margin-left:3px;font-style:italic">events only</span>`);
                 pill.onclick = () => {
                     w.active = !w.active;
                     updateChart();
@@ -1359,7 +1430,8 @@
 
             function updateChart() {
                 chart.data.datasets.forEach(ds => {
-                    const wl = workloads.find(w => ds.label === w.label || ds.label === '↻ ' + w.label);
+                    if (!ds._workloadLabel) return;
+                    const wl = workloads.find(w => w.label === ds._workloadLabel);
                     if (wl) ds.hidden = !wl.active;
                 });
                 chart.update('none');
@@ -1839,7 +1911,7 @@
                     const memDiv = document.createElement('div');
                     memDiv.className = 'chart-wrapper';
                     memDiv.innerHTML = `
-                        <h3>HCP Log Forwarding — Vector Aggregate Memory (7d)</h3>
+                        <h3>HCP Log Forwarding — Vector Memory by Node (7d)</h3>
                         <canvas id="rlr-mem-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="rlr-memory"
                             data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
@@ -1857,7 +1929,7 @@
                     const cpuDiv = document.createElement('div');
                     cpuDiv.className = 'chart-wrapper';
                     cpuDiv.innerHTML = `
-                        <h3>HCP Log Forwarding — Vector Aggregate CPU (7d)</h3>
+                        <h3>HCP Log Forwarding — Vector CPU by Node (7d)</h3>
                         <canvas id="rlr-cpu-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="rlr-cpu"
                             data-chart-data='${JSON.stringify(rlr).replace(/'/g, "&#39;")}'
@@ -1978,13 +2050,13 @@
                     const memDiv = document.createElement('div');
                     memDiv.className = 'chart-wrapper';
                     memDiv.innerHTML = `
-                        <h3>Splunk Forwarder — Memory Usage (7d)</h3>
+                        <h3>Splunk Forwarder — Pod Memory (7d)</h3>
                         <canvas id="sfr-mem-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="sfr-memory"
                             data-chart-data='${sfrJson}'
                         ></canvas>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
-                            <strong>Peak:</strong> ${sfr.forwarder_peak_memory_mb || 0} MB &nbsp;|&nbsp;
+                            <strong>Aggregate peak:</strong> ${sfr.forwarder_peak_memory_mb || 0} MB across ${sfr.forwarder_pod_count || '?'} pods &nbsp;|&nbsp;
                             <strong>Trend:</strong> ${sfr.forwarder_memory_trend || 'unknown'} (${sfr.forwarder_memory_increase_percent || 0}%)
                         </div>
                     `;
@@ -1995,13 +2067,13 @@
                     const cpuDiv = document.createElement('div');
                     cpuDiv.className = 'chart-wrapper';
                     cpuDiv.innerHTML = `
-                        <h3>Splunk Forwarder — CPU Usage (7d)</h3>
+                        <h3>Splunk Forwarder — Pod CPU (7d)</h3>
                         <canvas id="sfr-cpu-chart-${clusterIdx}" class="chart-canvas"
                             data-pending-chart="sfr-cpu"
                             data-chart-data='${sfrJson}'
                         ></canvas>
                         <div style="margin-top: 8px; padding: 8px 12px; background: #eef0f4; border-radius: 4px; font-size: 0.8em; color: #333;">
-                            <strong>Peak:</strong> ${sfr.forwarder_peak_cpu_millicores || 0}m &nbsp;|&nbsp;
+                            <strong>Aggregate peak:</strong> ${sfr.forwarder_peak_cpu_millicores || 0}m across ${sfr.forwarder_pod_count || '?'} pods &nbsp;|&nbsp;
                             <strong>Trend:</strong> ${sfr.forwarder_cpu_increase_percent || 0}% change over 7d
                         </div>
                     `;
@@ -2010,29 +2082,43 @@
             }
 
             // MCC node CPU/memory charts — per role
-            const mccMetricsCheck = (cluster.health_checks || []).find(c => c.check === 'mcc_node_metrics');
+            const mccMetricsCheck = (cluster.health_checks || []).find(c => c.check === 'cluster_node_metrics');
             if (mccMetricsCheck && mccMetricsCheck.details) {
                 const mccData = mccMetricsCheck.details;
                 const mccJson = JSON.stringify(mccData).replace(/'/g, "&#39;");
 
                 const roles = [
-                    {key: 'master', label: 'Master Nodes', note: 'per-node'},
-                    {key: 'infra', label: 'Infra Nodes', note: 'per-node'},
-                    {key: 'worker', label: 'Worker Nodes', note: 'avg across pool'},
+                    {key: 'master', label: 'Master Nodes'},
+                    {key: 'infra', label: 'Infra Nodes'},
+                    {key: 'worker', label: 'Worker Nodes'},
                 ];
 
+                const isMCCluster = cluster.cluster_type === 'management_cluster';
                 for (const role of roles) {
-                    const hasCPU = mccData['cpu_timeseries_' + role.key] && mccData['cpu_timeseries_' + role.key].length > 0;
-                    const hasMem = mccData['memory_timeseries_' + role.key] && mccData['memory_timeseries_' + role.key].length > 0;
-                    if (!hasCPU && !hasMem) continue;
+                    const cpuSeries = mccData['cpu_timeseries_' + role.key] || [];
+                    const memSeries = mccData['memory_timeseries_' + role.key] || [];
+                    const hasCPU = cpuSeries.length > 0;
+                    const hasMem = memSeries.length > 0;
+                    if (!hasCPU && !hasMem) {
+                        if (role.key === 'worker' && isMCCluster) {
+                            const noteDiv = document.createElement('div');
+                            noteDiv.style.cssText = 'padding:12px 16px;background:#1a1a2e;border:1px solid #333;border-radius:6px;color:#999;font-size:0.85em;margin-bottom:12px;';
+                            noteDiv.innerHTML = '<strong style="color:#667eea;">Worker Nodes</strong> — MC worker node resource charts are omitted. Worker nodes host HCP control plane pods — see the <strong>HCP</strong> tab for per-workload CPU/memory trends and pod health.';
+                            chartsDiv.appendChild(noteDiv);
+                        }
+                        continue;
+                    }
+                    const isAggregated = hasCPU ? (cpuSeries.length === 1 && cpuSeries[0].label && cpuSeries[0].label.includes('avg')) : (memSeries.length === 1 && memSeries[0].label && memSeries[0].label.includes('avg'));
+                    const nodeCount = Math.max(cpuSeries.length, memSeries.length);
+                    const note = isAggregated ? 'avg across pool' : nodeCount + ' nodes';
 
                     if (hasCPU) {
                         const div = document.createElement('div');
                         div.className = 'chart-wrapper';
                         div.innerHTML = `
-                            <h3>${role.label} — CPU Usage % (7d) <span style="font-size:0.7em;color:#999;">(${role.note})</span></h3>
-                            <canvas id="mcc-cpu-${role.key}-${clusterIdx}" class="chart-canvas"
-                                data-pending-chart="mcc-cpu-${role.key}"
+                            <h3>${role.label} — CPU Usage % (7d) <span style="font-size:0.7em;color:#999;">(${note})</span></h3>
+                            <canvas id="cluster-cpu-${role.key}-${clusterIdx}" class="chart-canvas"
+                                data-pending-chart="cluster-cpu-${role.key}"
                                 data-chart-data='${mccJson}'
                             ></canvas>
                         `;
@@ -2042,9 +2128,9 @@
                         const div = document.createElement('div');
                         div.className = 'chart-wrapper';
                         div.innerHTML = `
-                            <h3>${role.label} — Memory Usage % (7d) <span style="font-size:0.7em;color:#999;">(${role.note})</span></h3>
-                            <canvas id="mcc-mem-${role.key}-${clusterIdx}" class="chart-canvas"
-                                data-pending-chart="mcc-mem-${role.key}"
+                            <h3>${role.label} — Memory Usage % (7d) <span style="font-size:0.7em;color:#999;">(${note})</span></h3>
+                            <canvas id="cluster-mem-${role.key}-${clusterIdx}" class="chart-canvas"
+                                data-pending-chart="cluster-mem-${role.key}"
                                 data-chart-data='${mccJson}'
                             ></canvas>
                         `;
@@ -2135,6 +2221,48 @@
                                             return '<span style="margin-right:12px;color:' + color + ';">' + icon + ' ' + k.replace(/_/g, ' ') + '</span>';
                                         }).join('') +
                                     '</div></div>';
+                                }
+
+                                // Map objects as subtables (e.g. pending_by_node, failed_by_node, machine_phases, machineset_amis, role_counts)
+                                if (typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length > 2) {
+                                    const entries = Object.entries(value);
+                                    const allNumbers = entries.every(([,v]) => typeof v === 'number');
+                                    if (allNumbers) {
+                                        const sorted = entries.sort((a, b) => b[1] - a[1]);
+                                        const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                                        const col1 = key.includes('node') ? 'Node' : key.includes('ami') ? 'MachineSet' : 'Name';
+                                        const col2 = key.includes('ami') ? 'AMI' : 'Count';
+                                        return '<div class="detail-item" style="grid-column:1/-1;"><span class="detail-label">' + label + '</span><div>' +
+                                            '<table style="width:100%;border-collapse:collapse;font-size:0.85em;margin-top:4px;">' +
+                                            '<thead><tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:3px 6px;">' + col1 + '</th><th style="text-align:right;padding:3px 6px;">' + col2 + '</th></tr></thead><tbody>' +
+                                            sorted.map(([k,v]) => '<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:3px 6px;font-family:var(--font-mono);">' + k + '</td><td style="text-align:right;padding:3px 6px;font-weight:600;">' + v + '</td></tr>').join('') +
+                                            '</tbody></table></div></div>';
+                                    }
+                                    const allStrings = entries.every(([,v]) => typeof v === 'string');
+                                    if (allStrings) {
+                                        const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                                        return '<div class="detail-item" style="grid-column:1/-1;"><span class="detail-label">' + label + '</span><div>' +
+                                            '<table style="width:100%;border-collapse:collapse;font-size:0.85em;margin-top:4px;">' +
+                                            '<thead><tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:3px 6px;">Name</th><th style="text-align:left;padding:3px 6px;">Value</th></tr></thead><tbody>' +
+                                            entries.map(([k,v]) => '<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:3px 6px;font-family:var(--font-mono);">' + k + '</td><td style="padding:3px 6px;font-family:var(--font-mono);">' + v + '</td></tr>').join('') +
+                                            '</tbody></table></div></div>';
+                                    }
+                                }
+
+                                // Array of objects as subtables (e.g. machinesets, failing_pods, conditions, pdi_details)
+                                if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object' && !Array.isArray(value[0]) && key !== 'metrics') {
+                                    const cols = Object.keys(value[0]);
+                                    const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                                    return '<div class="detail-item" style="grid-column:1/-1;"><span class="detail-label">' + label + ' (' + value.length + ')</span><div>' +
+                                        '<table style="width:100%;border-collapse:collapse;font-size:0.85em;margin-top:4px;">' +
+                                        '<thead><tr style="border-bottom:1px solid #ddd;">' + cols.map(c => '<th style="text-align:left;padding:3px 6px;">' + c.replace(/_/g, ' ') + '</th>').join('') + '</tr></thead><tbody>' +
+                                        value.map(row => '<tr style="border-bottom:1px solid #f0f0f0;">' + cols.map(c => {
+                                            let v = row[c];
+                                            if (typeof v === 'boolean') v = v ? '✓' : '✗';
+                                            else if (v === null || v === undefined) v = '—';
+                                            return '<td style="padding:3px 6px;font-family:var(--font-mono);font-size:0.9em;">' + String(v).replace(/</g,'&lt;') + '</td>';
+                                        }).join('') + '</tr>').join('') +
+                                        '</tbody></table></div></div>';
                                 }
 
                                 let displayValue = value;
@@ -2856,7 +2984,8 @@
                 const loginIcon = loginStatus === 'SUCCESS' ? '✓' : (loginStatus === 'FAILED' ? '✗' : '?');
                 const loginClass = loginStatus === 'SUCCESS' ? 'status-pass' : (loginStatus === 'FAILED' ? 'status-critical' : 'status-unknown');
 
-                let rowHTML = `<td class="cluster-name-cell">${cluster.cluster_name || 'Unknown'}</td>`;
+                const cid = cluster.cluster_id || '';
+                let rowHTML = `<td class="cluster-name-cell">${cluster.cluster_name || 'Unknown'}${cid ? `<span class="copy-id" onclick="event.stopPropagation();navigator.clipboard.writeText('${cid}');this.textContent='✓';setTimeout(()=>this.textContent='⧉',800)" title="Copy cluster ID: ${cid}">⧉</span>` : ''}</td>`;
                 rowHTML += `<td class="check-status-cell"><span class="status-icon ${loginClass}">${loginIcon}</span></td>`;
                 checkTypes.forEach(checkType => {
                     const check = (cluster.health_checks || []).find(c => c.check === checkType);
@@ -2870,7 +2999,7 @@
                     rowHTML += `<td class="check-status-cell" onclick="event.stopPropagation(); expandToCheck('${clusterIdx}', '${checkId}')"><span class="status-icon ${statusClass}" title="${checkType}: ${rawStatus}${titleSuffix}">${icon}</span></td>`;
                 });
                 if (isMCC) {
-                    const nr = (cluster.health_checks || []).find(c => c.check === 'mcc_node_resources');
+                    const nr = (cluster.health_checks || []).find(c => c.check === 'cluster_node_resources');
                     const nodes = nr?.details?.node_resources || [];
                     const byRole = {master: {count: 0, cpu: 0, mem: 0}, infra: {count: 0, cpu: 0, mem: 0}, worker: {count: 0, cpu: 0, mem: 0}};
                     nodes.forEach(n => {
@@ -2901,8 +3030,8 @@
                     rowHTML += `<td class="resource-cell" style="white-space:nowrap;font-size:0.75em">${fmtPcts(infraMems)}</td>`;
                     rowHTML += `<td class="resource-cell">${byRole.worker.count || '-'}</td>`;
 
-                    const bootCheck = (cluster.health_checks || []).find(c => c.check === 'mcc_managed_boot_images');
-                    const bootIdx = (cluster.health_checks || []).findIndex(c => c.check === 'mcc_managed_boot_images');
+                    const bootCheck = (cluster.health_checks || []).find(c => c.check === 'cluster_managed_boot_images');
+                    const bootIdx = (cluster.health_checks || []).findIndex(c => c.check === 'cluster_managed_boot_images');
                     const bootCheckId = `${clusterIdx}-${bootIdx}`;
                     let bootLabel = '-';
                     let bootClass = '';
@@ -3040,6 +3169,7 @@
                 healthData.forEach(cluster => {
                     const op = cluster.operator_name || 'unknown';
                     if (op === 'unknown') return;
+                    if (!cluster.health_checks || cluster.health_checks.length === 0) return;
                     if (!operatorGroups[op]) operatorGroups[op] = [];
                     operatorGroups[op].push(cluster);
                 });

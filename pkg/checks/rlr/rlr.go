@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -51,13 +52,6 @@ var (
 
 func (c *RLRChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	if cc.ClusterType != "management_cluster" {
-		cc.AddResult(checks.Result{
-			Check:    "rlr_cluster_type",
-			Status:   checks.StatusInfo,
-			Severity: checks.SeverityInfo,
-			Message:  fmt.Sprintf("RLR checks not applicable on %s clusters — only management clusters", cc.ClusterType),
-			Details:  map[string]any{"cluster_type": cc.ClusterType},
-		})
 		return
 	}
 
@@ -1466,12 +1460,43 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 		}
 	}
 
-	// Vector pod memory (aggregate across all pods)
-	memQuery := (fmt.Sprintf(
-		`sum(container_memory_working_set_bytes{namespace="%s",container!=""})`, vectorNS))
+	// Per-node timeseries for interactive charts (one vector pod per node)
+	nodeLabel := func(m map[string]string) string {
+		return m["node"]
+	}
+	memQuery := fmt.Sprintf(`sum by (node) (container_memory_working_set_bytes{namespace="%s",container!=""})`, vectorNS)
 	if memData, err := cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step); err == nil {
-		if points, _ := thanos.Timeseries(memData); len(points) > 0 {
-			r.Details["memory_timeseries"] = thanos.PointsToJSON(points)
+		if series, _ := thanos.PerSeriesTimeseries(memData, nodeLabel); len(series) > 0 {
+			sort.Slice(series, func(i, j int) bool {
+				return thanos.Peak(series[i].Values) > thanos.Peak(series[j].Values)
+			})
+			if len(series) > 15 {
+				series = series[:15]
+			}
+			r.Details["memory_timeseries"] = series
+			r.Details["vector_node_count"] = len(series)
+			seriesCollected += len(series)
+		}
+	}
+
+	cpuQuery := fmt.Sprintf(`sum by (node) (rate(container_cpu_usage_seconds_total{namespace="%s",container!=""}[5m]))`, vectorNS)
+	if cpuData, err := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step); err == nil {
+		if series, _ := thanos.PerSeriesTimeseries(cpuData, nodeLabel); len(series) > 0 {
+			sort.Slice(series, func(i, j int) bool {
+				return thanos.Peak(series[i].Values) > thanos.Peak(series[j].Values)
+			})
+			if len(series) > 15 {
+				series = series[:15]
+			}
+			r.Details["cpu_timeseries"] = series
+			seriesCollected += len(series)
+		}
+	}
+
+	// Aggregate queries for summary stats
+	aggMemQuery := fmt.Sprintf(`sum(container_memory_working_set_bytes{namespace="%s",container!=""})`, vectorNS)
+	if aggMemData, err := cc.Client.QueryMetricsRange(ctx, aggMemQuery, start, now, step); err == nil {
+		if points, _ := thanos.Timeseries(aggMemData); len(points) > 0 {
 			peak := thanos.Peak(points)
 			r.Details["peak_memory_mb"] = thanos.Round(sanitizeFloat(peak/(1024*1024)), 0)
 			_, last, pctChange := thanos.Trend(points)
@@ -1480,21 +1505,15 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 			if pctChange > 50 && last/(1024*1024) > 100 {
 				r.Details["memory_trend"] = "increasing"
 			}
-			seriesCollected++
 		}
 	}
-
-	// Vector pod CPU (aggregate across all pods)
-	cpuQuery := (fmt.Sprintf(
-		`sum(rate(container_cpu_usage_seconds_total{namespace="%s",container!=""}[5m]))`, vectorNS))
-	if cpuData, err := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step); err == nil {
-		if points, _ := thanos.Timeseries(cpuData); len(points) > 0 {
-			r.Details["cpu_timeseries"] = thanos.PointsToJSON(points)
+	aggCpuQuery := fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{namespace="%s",container!=""}[5m]))`, vectorNS)
+	if aggCpuData, err := cc.Client.QueryMetricsRange(ctx, aggCpuQuery, start, now, step); err == nil {
+		if points, _ := thanos.Timeseries(aggCpuData); len(points) > 0 {
 			peak := thanos.Peak(points)
 			r.Details["peak_cpu_millicores"] = thanos.Round(sanitizeFloat(peak*1000), 0)
 			_, _, pctChange := thanos.Trend(points)
 			r.Details["cpu_increase_percent"] = thanos.Round(sanitizeFloat(pctChange), 2)
-			seriesCollected++
 		}
 	}
 
