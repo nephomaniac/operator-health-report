@@ -30,6 +30,7 @@ import (
 	_ "github.com/openshift/operator-health-report/pkg/checks/camo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/hcp"
 	_ "github.com/openshift/operator-health-report/pkg/checks/mcc"
+	_ "github.com/openshift/operator-health-report/pkg/checks/mnmo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/ome"
 	_ "github.com/openshift/operator-health-report/pkg/checks/pdo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rhobs"
@@ -177,13 +178,15 @@ func main() {
 
 	// Read cluster IDs (skip if saas-only mode or no managed operators)
 	var clusterIDs []string
+	var rawIDs []string
 	if !saasOnly && clusterList != "" {
 		var readErr error
-		clusterIDs, readErr = readClusterList(clusterList)
+		rawIDs, readErr = readClusterList(clusterList)
 		if readErr != nil {
 			fmt.Fprintf(os.Stderr, "Error reading cluster list: %v\n", readErr)
 			os.Exit(1)
 		}
+		clusterIDs = rawIDs
 	}
 
 	if parallel < 1 {
@@ -206,6 +209,36 @@ func main() {
 		os.Exit(1)
 	}
 	defer ocmClient.Close()
+
+	// Resolve any external IDs, names, or UUIDs to internal OCM IDs
+	if len(rawIDs) > 0 {
+		needsResolve := false
+		for _, id := range rawIDs {
+			if !ocm.IsInternalID(id) {
+				needsResolve = true
+				break
+			}
+		}
+		if needsResolve {
+			var resolved []string
+			seen := map[string]bool{}
+			for _, raw := range rawIDs {
+				id, err := ocmClient.ResolveClusterID(raw)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "⚠ Skipping '%s': %v\n", raw, err)
+					continue
+				}
+				if !seen[id] {
+					seen[id] = true
+					resolved = append(resolved, id)
+				}
+			}
+			if len(resolved) < len(rawIDs) {
+				fmt.Fprintf(os.Stderr, "Resolved %d of %d cluster identifiers (%d skipped)\n", len(resolved), len(rawIDs), len(rawIDs)-len(resolved))
+			}
+			clusterIDs = resolved
+		}
+	}
 
 	ocmEnv := ocmClient.URL()
 	isProd := ocmClient.IsProduction()

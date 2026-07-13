@@ -58,6 +58,7 @@ func (c *HCPChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	checkResourceTrends(ctx, cc, concerningPods)
 	checkMetricsCoverage(ctx, cc, hcpNamespaces)
 	checkPodLogs(ctx, cc, concerningPods)
+	checkServingNodes(ctx, cc, hcpNamespaces)
 }
 
 func discoverHCPNamespaces(ctx context.Context, cc *checks.ClusterContext) []string {
@@ -1328,4 +1329,197 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func checkServingNodes(ctx context.Context, cc *checks.ClusterContext, hcpNamespaces []string) {
+	cc.SetCheck("hcp_serving_nodes")
+
+	r := checks.Result{
+		Check:    "hcp_serving_nodes",
+		Severity: checks.SeverityInfo,
+		Details: map[string]any{
+			"description":    "Lists request-serving nodes for each HCP namespace (labeled hypershift.openshift.io/cluster-namespace) and collects 7-day CPU/memory timeseries per node. Serving nodes host the customer-facing kube-apiserver and are critical for HCP availability.",
+			"pass_criteria":  "INFO: Serving node data collected. WARN: HCPs with no serving nodes. SKIP: Metrics unavailable.",
+			"lookback_hours": 168.0,
+		},
+	}
+
+	if len(hcpNamespaces) == 0 {
+		r.Status = checks.StatusSkip
+		r.Message = "No HCP namespaces — skipping serving node check"
+		cc.AddResult(r)
+		return
+	}
+
+	type servingNodeInfo struct {
+		Name      string `json:"name"`
+		Ready     bool   `json:"ready"`
+		CreatedAt string `json:"created_at"`
+		AgeDays   int    `json:"age_days"`
+	}
+
+	type servingNodeGroup struct {
+		HCPNamespace     string                      `json:"hcp_namespace"`
+		HCPName          string                      `json:"hcp_name"`
+		NodeCount        int                         `json:"node_count"`
+		Nodes            []servingNodeInfo            `json:"nodes"`
+		CPUTimeseries    []thanos.LabeledTimeseries  `json:"cpu_timeseries,omitempty"`
+		MemoryTimeseries []thanos.LabeledTimeseries  `json:"memory_timeseries,omitempty"`
+		NodeEvents       []map[string]any            `json:"node_events,omitempty"`
+	}
+
+	var allGroups []servingNodeGroup
+	var allNodeNames []string
+	nodeToHCP := map[string]string{}
+	totalNodes := 0
+	hcpsWithoutNodes := 0
+
+	for _, ns := range hcpNamespaces {
+		nodes, err := cc.Client.Clientset().CoreV1().Nodes().List(ctx, metav1.ListOptions{
+			LabelSelector: "hypershift.openshift.io/cluster-namespace=" + ns,
+		})
+		if err != nil {
+			continue
+		}
+
+		// Extract short HCP name from namespace (last segment)
+		parts := strings.Split(ns, "-")
+		hcpName := ns
+		if len(parts) > 1 {
+			hcpName = parts[len(parts)-1]
+		}
+
+		group := servingNodeGroup{
+			HCPNamespace: ns,
+			HCPName:      hcpName,
+			NodeCount:    len(nodes.Items),
+		}
+
+		if len(nodes.Items) == 0 {
+			hcpsWithoutNodes++
+			allGroups = append(allGroups, group)
+			continue
+		}
+
+		for _, node := range nodes.Items {
+			ready := false
+			for _, cond := range node.Status.Conditions {
+				if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+					ready = true
+				}
+			}
+			ageDays := int(time.Since(node.CreationTimestamp.Time).Hours() / 24)
+
+			group.Nodes = append(group.Nodes, servingNodeInfo{
+				Name:      node.Name,
+				Ready:     ready,
+				CreatedAt: node.CreationTimestamp.Format(time.RFC3339),
+				AgeDays:   ageDays,
+			})
+
+			allNodeNames = append(allNodeNames, node.Name)
+			nodeToHCP[node.Name] = ns
+
+			// Record node creation as event if within the 7-day window
+			if ageDays < 7 {
+				group.NodeEvents = append(group.NodeEvents, map[string]any{
+					"timestamp": node.CreationTimestamp.Unix(),
+					"node":      node.Name,
+					"type":      "new_node",
+				})
+			}
+		}
+
+		totalNodes += len(nodes.Items)
+		allGroups = append(allGroups, group)
+	}
+
+	if totalNodes == 0 {
+		r.Status = checks.StatusInfo
+		r.Message = fmt.Sprintf("No request-serving nodes found across %d HCP namespaces", len(hcpNamespaces))
+		r.Details["serving_nodes"] = allGroups
+		cc.AddResult(r)
+		return
+	}
+
+	// Query metrics for all serving nodes in one batch
+	if cc.Client.CanQueryMetrics() && len(allNodeNames) > 0 {
+		now := time.Now().Unix()
+		start := now - 604800
+		step := 1800
+
+		nodeRegex := strings.Join(allNodeNames, "|")
+
+		cpuQuery := fmt.Sprintf(
+			`sum by (node) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{node=~"%s"}) / on (node) kube_node_status_capacity{resource="cpu",node=~"%s"} * 100`,
+			nodeRegex, nodeRegex)
+		cpuData, cpuErr := cc.Client.QueryMetricsRange(ctx, cpuQuery, start, now, step)
+		cc.RecordError("Serving node CPU", cpuErr)
+
+		memQuery := fmt.Sprintf(
+			`(1 - node_memory_MemAvailable_bytes{instance=~"%s"} / node_memory_MemTotal_bytes{instance=~"%s"}) * 100`,
+			nodeRegex, nodeRegex)
+		memData, memErr := cc.Client.QueryMetricsRange(ctx, memQuery, start, now, step)
+		cc.RecordError("Serving node memory", memErr)
+
+		nodeLabel := func(m map[string]string) string {
+			node := m["node"]
+			if node == "" {
+				node = m["instance"]
+			}
+			if idx := strings.LastIndex(node, ":"); idx > 0 {
+				node = node[:idx]
+			}
+			return node
+		}
+
+		// Parse timeseries and assign to HCP groups
+		var cpuSeries, memSeries []thanos.LabeledTimeseries
+		if cpuErr == nil && cpuData != "" {
+			cpuSeries, _ = thanos.PerSeriesTimeseries(cpuData, nodeLabel)
+		}
+		if memErr == nil && memData != "" {
+			memSeries, _ = thanos.PerSeriesTimeseries(memData, nodeLabel)
+		}
+
+		// Distribute timeseries to their HCP groups
+		for i := range allGroups {
+			groupNodeSet := map[string]bool{}
+			for _, n := range allGroups[i].Nodes {
+				groupNodeSet[n.Name] = true
+			}
+			for _, s := range cpuSeries {
+				if groupNodeSet[s.Label] {
+					allGroups[i].CPUTimeseries = append(allGroups[i].CPUTimeseries, s)
+				}
+			}
+			for _, s := range memSeries {
+				if groupNodeSet[s.Label] {
+					allGroups[i].MemoryTimeseries = append(allGroups[i].MemoryTimeseries, s)
+				}
+			}
+		}
+	}
+
+	// Sort groups by node count descending, cap at 10
+	sort.Slice(allGroups, func(i, j int) bool {
+		return allGroups[i].NodeCount > allGroups[j].NodeCount
+	})
+	if len(allGroups) > 10 {
+		allGroups = allGroups[:10]
+	}
+
+	r.Details["serving_nodes"] = allGroups
+	r.Details["total_serving_nodes"] = totalNodes
+	r.Details["hcps_without_serving_nodes"] = hcpsWithoutNodes
+
+	if hcpsWithoutNodes > 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d serving nodes across %d HCPs (%d HCPs without serving nodes)", totalNodes, len(hcpNamespaces), hcpsWithoutNodes)
+	} else {
+		r.Status = checks.StatusInfo
+		r.Message = fmt.Sprintf("%d serving nodes across %d HCPs", totalNodes, len(hcpNamespaces))
+	}
+
+	cc.AddResult(r)
 }

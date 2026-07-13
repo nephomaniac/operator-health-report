@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/openshift/operator-health-report/pkg/checks"
 	"github.com/openshift/operator-health-report/pkg/logging"
@@ -56,6 +57,7 @@ func (c *RMOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 		checkHCPProbeCoverage(ctx, cc)
 		checkHCPState(ctx, cc)
 		checkRHOBSAPIHealth(ctx, cc)
+		checkProbeDisagreement(ctx, cc)
 	}
 
 	checkRHOBSIntegration(ctx, cc)
@@ -1324,4 +1326,201 @@ func classifyProbeURL(url string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// checkProbeDisagreement analyzes RHOBS synthetic probe availability over 7 days per HCP
+// and compares against internal pod health to detect external path issues (ROSAENG-60340).
+// RHOBS probes hit the API through the external path (NLB → Router → KAS via backplane/VPCE),
+// while internal health checks probe the service directly. When external probes fail but
+// internal health is fine, the NLB/Router path is broken — api-EBB alerts fire correctly
+// but the issue is in the external path, not the API itself. Restarting router pods typically fixes it.
+func checkProbeDisagreement(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rmo_probe_disagreement")
+
+	r := checks.Result{
+		Check:    "rmo_probe_disagreement",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Analyzes RHOBS synthetic probe success rate over 7 days per HCP and compares against kube-apiserver pod health. RHOBS probes hit the API through the external path (NLB → Router → KAS). When probes fail but pods are healthy, the external path (NLB/Router) is likely broken — api-EBB alerts fire correctly but the root cause is the external path, not the API itself. Common cause: OVN/Router issues on 4.21 MCs (ROSAENG-60340). Fix: restart router pods.",
+			"pass_criteria": "PASS: All HCP probes at 100% over 7d. WARN: External path failures with healthy pods — investigate NLB/Router. FAIL: Both external probes and pods failing — real API issue.",
+			"lookback_hours": 168.0,
+		},
+	}
+
+	// Query 7-day probe success rate per HCP via RHOBS Prometheus range query
+	now := time.Now().Unix()
+	start := now - 604800
+	step := 3600
+
+	probeQuery := thanos.EncodeQuery(`avg_over_time(probe_success[1h])`)
+	rangeData, rangeErr := cc.Client.QueryRHOBSPrometheusRange(ctx, probeQuery, start, now, step)
+	cc.RecordError("RHOBS probe_success 7d range", rangeErr)
+
+	if rangeErr != nil {
+		r.Status = checks.StatusSkip
+		r.Message = "Could not query RHOBS probe history"
+		cc.AddResult(r)
+		return
+	}
+
+	type hcpProbeAnalysis struct {
+		HCPNamespace string  `json:"hcp_namespace"`
+		ProbeURL     string  `json:"probe_url"`
+		AvgSuccess   float64 `json:"avg_success_rate"`
+		MinSuccess   float64 `json:"min_success_rate"`
+		FailureHours int     `json:"failure_hours"`
+		PodHealthy   string  `json:"pod_healthy"`
+		Verdict      string  `json:"verdict"`
+	}
+
+	// Parse range data per probe URL, extract HCP namespace
+	type probeHistory struct {
+		url       string
+		namespace string
+		values    [][2]float64
+	}
+
+	probesByNS := map[string]*probeHistory{}
+
+	if series, err := thanos.PerSeriesTimeseries(rangeData, func(m map[string]string) string {
+		return m["probe_url"]
+	}); err == nil {
+		for _, s := range series {
+			// Extract HCP namespace from probe URL
+			ns := ""
+			for _, part := range strings.Split(s.Label, ".") {
+				if strings.HasPrefix(part, "ocm-") || strings.HasPrefix(part, "clusters-") {
+					ns = part
+					break
+				}
+			}
+			if ns == "" {
+				continue
+			}
+			if _, exists := probesByNS[ns]; !exists {
+				probesByNS[ns] = &probeHistory{url: s.Label, namespace: ns, values: s.Values}
+			}
+		}
+	}
+
+	r.Details["hcp_probes_tracked"] = len(probesByNS)
+
+	if len(probesByNS) == 0 {
+		r.Status = checks.StatusSkip
+		r.Message = "No per-HCP probe history available"
+		cc.AddResult(r)
+		return
+	}
+
+	// Analyze each HCP's probe history
+	var analyses []hcpProbeAnalysis
+	falsePositives := 0
+	realFailures := 0
+	perfectProbes := 0
+
+	for ns, ph := range probesByNS {
+		if len(ph.values) == 0 {
+			continue
+		}
+
+		// Calculate avg and min success rate, count failure hours
+		sum := 0.0
+		minVal := 1.0
+		failureHours := 0
+		for _, v := range ph.values {
+			sum += v[1]
+			if v[1] < minVal {
+				minVal = v[1]
+			}
+			if v[1] < 0.99 {
+				failureHours++
+			}
+		}
+		avg := sum / float64(len(ph.values))
+
+		if failureHours == 0 {
+			perfectProbes++
+			continue
+		}
+
+		entry := hcpProbeAnalysis{
+			HCPNamespace: ns,
+			ProbeURL:     ph.url,
+			AvgSuccess:   thanos.Round(avg*100, 2),
+			MinSuccess:   thanos.Round(minVal*100, 2),
+			FailureHours: failureHours,
+		}
+
+		// Check current kube-apiserver pod health
+		pods, err := cc.Client.GetPods(ctx, ns, "app=kube-apiserver")
+		if err != nil {
+			entry.PodHealthy = "unknown"
+			entry.Verdict = fmt.Sprintf("%.1f%% probe success, %dh failures, pod health unknown", avg*100, failureHours)
+		} else {
+			allRunning := true
+			podCount := 0
+			for _, pod := range pods.Items {
+				podCount++
+				if pod.Status.Phase != corev1.PodRunning {
+					allRunning = false
+				}
+				for _, cs := range pod.Status.ContainerStatuses {
+					if !cs.Ready {
+						allRunning = false
+					}
+				}
+			}
+
+			if podCount == 0 {
+				entry.PodHealthy = "no pods"
+				entry.Verdict = fmt.Sprintf("%.1f%% probe success, %dh failures — HCP may be hibernated/deleted", avg*100, failureHours)
+			} else if allRunning {
+				entry.PodHealthy = fmt.Sprintf("healthy (%d pods)", podCount)
+				entry.Verdict = fmt.Sprintf("EXTERNAL PATH ISSUE — %.1f%% probe success over 7d but kube-apiserver healthy (check NLB/Router)", avg*100)
+				falsePositives++
+			} else {
+				entry.PodHealthy = fmt.Sprintf("unhealthy (%d pods)", podCount)
+				entry.Verdict = fmt.Sprintf("API ISSUE — %.1f%% probe success and pods unhealthy", avg*100)
+				realFailures++
+			}
+		}
+
+		analyses = append(analyses, entry)
+	}
+
+	r.Details["perfect_probes"] = perfectProbes
+	r.Details["external_path_issues"] = falsePositives
+	r.Details["api_failures"] = realFailures
+	if len(analyses) > 0 {
+		r.Details["failing_hcp_analysis"] = analyses
+	}
+
+	// Also check if api-ErrorBudgetBurn is currently firing
+	alertBody, alertErr := cc.Client.QueryActiveAlerts(ctx)
+	ebbFiring := false
+	if alertErr == nil {
+		ebbFiring = strings.Contains(alertBody, "ErrorBudgetBurn")
+	}
+	r.Details["ebb_currently_firing"] = ebbFiring
+
+	switch {
+	case falsePositives > 0 && ebbFiring:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("api-EBB firing + %d HCP(s) with external path failures but healthy pods — investigate NLB/Router (ROSAENG-60340, try restarting router pods)", falsePositives)
+	case falsePositives > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d HCP(s) had external path availability dips over 7d but pods are healthy — NLB/Router path was likely disrupted", falsePositives)
+	case realFailures > 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("%d HCP(s) with both external probe failures and unhealthy pods — real API issue", realFailures)
+	case perfectProbes == len(probesByNS):
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d HCP probes at 100%% over 7 days", perfectProbes)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d/%d HCP probes at 100%%, no current issues", perfectProbes, len(probesByNS))
+	}
+
+	cc.AddResult(r)
 }

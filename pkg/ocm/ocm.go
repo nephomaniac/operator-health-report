@@ -307,6 +307,66 @@ func (c *Client) ResolveClusterByName(name string) (string, error) {
 	return resp.Items().Get(0).ID(), nil
 }
 
+// isUUID checks if a string looks like a UUID (external_id format)
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// IsInternalID checks if a string looks like an OCM internal ID (alphanumeric, ~32 chars)
+func IsInternalID(s string) bool {
+	if len(s) < 20 || len(s) > 40 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// ResolveClusterID resolves any cluster identifier (internal ID, external UUID, or name)
+// to an OCM internal cluster ID. Returns the internal ID and any error.
+func (c *Client) ResolveClusterID(identifier string) (string, error) {
+	if IsInternalID(identifier) {
+		return identifier, nil
+	}
+
+	var searchField string
+	if isUUID(identifier) {
+		searchField = fmt.Sprintf("external_id='%s'", identifier)
+	} else {
+		searchField = fmt.Sprintf("name='%s'", identifier)
+	}
+
+	resp, err := c.conn.ClustersMgmt().V1().Clusters().List().
+		Search(searchField).
+		Size(2).
+		Send()
+	if err != nil {
+		return "", c.wrapError("resolve cluster", err)
+	}
+	if resp.Items().Len() == 0 {
+		return "", fmt.Errorf("cluster '%s' not found in %s", identifier, c.env)
+	}
+	if resp.Items().Len() > 1 {
+		return "", fmt.Errorf("cluster '%s' matched %d clusters in %s — use internal ID to disambiguate", identifier, resp.Total(), c.env)
+	}
+	return resp.Items().Get(0).ID(), nil
+}
+
 // GetClusterMetadata fetches full cluster properties from the OCM API
 func (c *Client) GetClusterMetadata(clusterID string) (*ClusterMeta, error) {
 	resp, err := c.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).Get().Send()

@@ -234,9 +234,25 @@ func CheckDeployment(ctx context.Context, cc *ClusterContext) {
 		r.Status = StatusFail
 		r.Severity = SeverityCritical
 		r.Message = fmt.Sprintf("No pods found for %s/%s", cc.Operator.Namespace, cc.Operator.Deployment)
+	case ready == 0 && desired > 0:
+		r.Status = StatusFail
+		r.Severity = SeverityCritical
+		stuckDetail := ""
+		if len(podIssues) > 0 {
+			if reason, ok := podIssues[0]["waiting_reason"].(string); ok && reason != "" {
+				stuckDetail = " — " + reason
+			}
+		}
+		if err == nil && len(pods.Items) > 0 {
+			age := time.Since(pods.Items[0].CreationTimestamp.Time)
+			if age.Hours() > 24 {
+				stuckDetail += fmt.Sprintf(" for %dd", int(age.Hours()/24))
+			}
+		}
+		r.Message = fmt.Sprintf("Deployment not ready (0/%d)%s", desired, stuckDetail)
 	case ready != desired:
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("Deployment not fully ready (%d/%d)", ready, desired)
+		r.Message = fmt.Sprintf("Deployment partially ready (%d/%d)", ready, desired)
 	case totalRestarts > 10:
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("Elevated restart count: %d", totalRestarts)
@@ -1350,6 +1366,7 @@ func RunAllCommonChecks(ctx context.Context, cc *ClusterContext) {
 		CheckPKOJobHealth,
 		CheckLogErrors,
 		CheckEvents,
+		CheckActiveAlerts,
 	}
 	for _, check := range checks {
 		if Cancelled(ctx) {
@@ -1434,3 +1451,145 @@ func conditionMessage(conditions []any, condType string) string {
 	return ""
 }
 
+// CheckActiveAlerts queries Prometheus for firing alerts relevant to SRE/platform health.
+func CheckActiveAlerts(ctx context.Context, cc *ClusterContext) {
+	cc.SetCheck("active_alerts")
+
+	r := Result{
+		Check:    "active_alerts",
+		Severity: SeverityWarning,
+		Details: map[string]any{
+			"description":   "Queries firing alerts from Prometheus (ALERTS metric) filtered to SRE-relevant platform alerts. Shows alerts in openshift-*/kube-* namespaces, cluster-scoped alerts, and alerts with SRE suffix. Excludes Watchdog and customer workload namespaces.",
+			"pass_criteria": "PASS: No SRE-relevant alerts firing. WARN: Warning-severity alerts firing. FAIL: Critical-severity or paging (SRE-suffixed) alerts firing.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	body, err := cc.Client.QueryActiveAlerts(ctx)
+	cc.RecordError("Query firing alerts", err)
+
+	if err != nil {
+		if IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = StatusSkip
+		r.Message = fmt.Sprintf("Could not query alerts: %v", err)
+		cc.AddResult(r)
+		return
+	}
+
+	resp, parseErr := thanos.Parse(body)
+	if parseErr != nil || len(resp.Data.Result) == 0 {
+		r.Status = StatusPass
+		r.Message = "No firing alerts detected"
+		cc.AddResult(r)
+		return
+	}
+
+	// Exclusion list
+	excluded := map[string]bool{
+		"Watchdog":                            true,
+		"AlertmanagerReceiversNotConfigured":  true,
+		"PrometheusRemoteWriteBehind":         true,
+	}
+
+	type firingAlert struct {
+		AlertName string `json:"alertname"`
+		Severity  string `json:"severity"`
+		Namespace string `json:"namespace,omitempty"`
+		Paging    bool   `json:"paging"`
+	}
+
+	var alerts []firingAlert
+	seen := map[string]bool{}
+
+	for _, result := range resp.Data.Result {
+		name := result.Metric["alertname"]
+		severity := result.Metric["severity"]
+		ns := result.Metric["namespace"]
+
+		if excluded[name] {
+			continue
+		}
+
+		// Filter to SRE-relevant: openshift-*/kube-* namespaces, cluster-scoped, or SRE-suffixed
+		isSRE := strings.HasSuffix(name, "SRE")
+		isPlatformNS := ns == "" || strings.HasPrefix(ns, "openshift-") || strings.HasPrefix(ns, "kube-")
+		isPlatformAlert := strings.HasPrefix(name, "Kube") || strings.HasPrefix(name, "ClusterOperator") ||
+			strings.HasPrefix(name, "etcd") || strings.HasPrefix(name, "Alertmanager") ||
+			strings.HasPrefix(name, "MCD") || strings.HasPrefix(name, "Upgrade") ||
+			strings.Contains(name, "ErrorBudgetBurn")
+
+		if !isSRE && !isPlatformNS && !isPlatformAlert {
+			continue
+		}
+
+		// Deduplicate by alertname+namespace
+		key := name + "/" + ns
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		paging := isSRE && severity == "critical"
+
+		alerts = append(alerts, firingAlert{
+			AlertName: name,
+			Severity:  severity,
+			Namespace: ns,
+			Paging:    paging,
+		})
+	}
+
+	criticalCount := 0
+	warningCount := 0
+	pagingCount := 0
+	for _, a := range alerts {
+		if a.Severity == "critical" {
+			criticalCount++
+		} else {
+			warningCount++
+		}
+		if a.Paging {
+			pagingCount++
+		}
+	}
+
+	r.Details["alert_count"] = len(alerts)
+	r.Details["critical_count"] = criticalCount
+	r.Details["warning_count"] = warningCount
+	r.Details["paging_count"] = pagingCount
+	if len(alerts) > 0 {
+		r.Details["firing_alerts"] = alerts
+	}
+
+	switch {
+	case len(alerts) == 0:
+		r.Status = StatusPass
+		r.Message = "No SRE-relevant alerts firing"
+	case pagingCount > 0:
+		r.Status = StatusFail
+		r.Severity = SeverityCritical
+		names := make([]string, 0, pagingCount)
+		for _, a := range alerts {
+			if a.Paging {
+				names = append(names, a.AlertName)
+			}
+		}
+		r.Message = fmt.Sprintf("%d paging alert(s) firing: %s (+%d other)", pagingCount, strings.Join(names, ", "), len(alerts)-pagingCount)
+	case criticalCount > 0:
+		r.Status = StatusFail
+		r.Severity = SeverityCritical
+		r.Message = fmt.Sprintf("%d critical + %d warning alert(s) firing", criticalCount, warningCount)
+	default:
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("%d warning alert(s) firing", warningCount)
+	}
+
+	cc.AddResult(r)
+}

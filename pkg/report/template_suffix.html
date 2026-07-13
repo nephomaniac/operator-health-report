@@ -102,6 +102,8 @@
                                 if (chartType === 'hcp-mem') createHCPChart(el.id, chartData.memory_timeseries, chartData.pod_events, 'Memory (MB)', 1, [{y: 200, label: 'Elevated (200Mi)', color: '#ffc107'}, {y: 1024, label: 'Leak (1Gi)', color: '#dc3545'}], cmap);
                                 if (chartType === 'hcp-cpu') createHCPChart(el.id, chartData.cpu_timeseries, chartData.pod_events, 'CPU (millicores)', 1, [], cmap);
                             }
+                            if (chartType === 'hcp-sn-cpu') createHCPChart(el.id, chartData.cpu_timeseries, chartData.node_events || [], 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
+                            if (chartType === 'hcp-sn-mem') createHCPChart(el.id, chartData.memory_timeseries, chartData.node_events || [], 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                             if (chartType === 'cluster-cpu-master') createHCPChart(el.id, chartData.cpu_timeseries_master, [], 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                             if (chartType === 'cluster-mem-master') createHCPChart(el.id, chartData.memory_timeseries_master, [], 'Memory Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
                             if (chartType === 'cluster-cpu-infra') createHCPChart(el.id, chartData.cpu_timeseries_infra, [], 'CPU Usage (%)', 1, [{y: 80, label: 'Warning (80%)', color: '#ffc107'}]);
@@ -181,10 +183,11 @@
 
         // Helper: check if a cluster entry has any real FAIL (not API/script errors)
         function hasRealFail(cluster) {
-            return (cluster.health_checks || []).some(ch => getEffectiveStatus(cluster, ch) === 'FAIL');
+            return (cluster.health_checks || []).some(ch => ch.check !== 'active_alerts' && getEffectiveStatus(cluster, ch) === 'FAIL');
         }
         function hasRealWarn(cluster) {
             return (cluster.health_checks || []).some(ch => {
+                if (ch.check === 'active_alerts') return false;
                 const eff = getEffectiveStatus(cluster, ch);
                 return eff === 'WARNING' || eff === 'WARN';
             });
@@ -224,6 +227,7 @@
             const checkTypes = new Set();
             sourceData.forEach(cluster => {
                 (cluster.health_checks || []).forEach(check => {
+                    if (check.check === 'active_alerts') return;
                     checkTypes.add(check.check);
                 });
             });
@@ -403,6 +407,7 @@
                 'resource_limits_validation': 'Limits',
                 'leader_election': 'Leader',
                 'namespace_status': 'Namespace',
+                'active_alerts': 'Alerts',
                 'pko_job_health': 'PKO Jobs',
                 'image_pull_status': 'Image Pull',
                 'orphaned_resources': 'Orphans',
@@ -421,6 +426,7 @@
                 'rmo_limited_support_disagreement': 'Limited Support',
                 'rmo_rhobs_api_health': 'RHOBS API',
                 'rmo_rhobs_integration': 'RHOBS Config',
+                'rmo_probe_disagreement': 'EBB Path Analysis',
                 'ome_metrics_health': 'OME Metrics',
                 'ome_pull_secret_health': 'Pull Secret',
                 'ome_proxy_ca_health': 'Proxy CA',
@@ -485,6 +491,8 @@
                 'hcp_resource_trends': 'HCP Trends',
                 'hcp_metrics_coverage': 'Metrics Coverage',
                 'hcp_pod_logs': 'HCP Logs',
+                'hcp_serving_nodes': 'Serving Nodes',
+                'mnmo_metadata_sync': 'Metadata Sync',
                 'rlr_cluster_type': 'Cluster Type',
                 'rlr_vector_namespace': 'Vector NS',
                 'rlr_vector_daemonset_health': 'Vector DS',
@@ -1593,6 +1601,58 @@
             `;
             detailsDiv.appendChild(header);
 
+            // Cluster-wide active alerts (shown once, not per-operator)
+            const alertsCheck = (cluster.health_checks || []).find(c => c.check === 'active_alerts');
+            if (alertsCheck) {
+                const ad = alertsCheck.details || {};
+                const alertCount = ad.alert_count || 0;
+                const critCount = ad.critical_count || 0;
+                const pagingCount = ad.paging_count || 0;
+                const statusClass = getStatusClass(alertsCheck.status);
+                const icon = getStatusIcon(alertsCheck.status);
+                const alertId = `alerts-${clusterIdx}`;
+
+                const alertDiv = document.createElement('div');
+                alertDiv.className = 'health-check';
+                alertDiv.innerHTML = `
+                    <div class="check-header" onclick="toggleCheckDetails('${alertId}')">
+                        <div>
+                            <span class="check-icon ${statusClass}">${icon}</span>
+                            <strong>Cluster Alerts</strong>
+                            <span style="font-size:0.8em;color:#999;margin-left:8px;">cluster-wide, not operator-specific</span>
+                        </div>
+                        <div>
+                            <span class="status-badge ${statusClass}">${alertsCheck.status}</span>
+                        </div>
+                    </div>
+                    <div id="check-details-${alertId}" class="check-details">
+                        <div style="padding:12px;">
+                            <div style="margin-bottom:8px;color:#555;">${alertsCheck.message}</div>
+                            ${alertCount > 0 && ad.firing_alerts ? `
+                                <table style="width:100%;border-collapse:collapse;font-size:0.85em;">
+                                    <thead><tr style="border-bottom:1px solid #ddd;">
+                                        <th style="text-align:left;padding:3px 6px;">Alert</th>
+                                        <th style="text-align:left;padding:3px 6px;">Severity</th>
+                                        <th style="text-align:left;padding:3px 6px;">Namespace</th>
+                                        <th style="text-align:left;padding:3px 6px;">Paging</th>
+                                    </tr></thead>
+                                    <tbody>${ad.firing_alerts.map(a => {
+                                        const color = a.severity === 'critical' ? '#dc3545' : '#f39c12';
+                                        return `<tr style="border-bottom:1px solid #f0f0f0;">
+                                            <td style="padding:3px 6px;font-family:var(--font-mono);">${a.alertname}</td>
+                                            <td style="padding:3px 6px;color:${color};">${a.severity}</td>
+                                            <td style="padding:3px 6px;font-family:var(--font-mono);font-size:0.9em;">${(a.namespace || '—').replace('openshift-','')}</td>
+                                            <td style="padding:3px 6px;">${a.paging ? '<span style="background:#dc3545;color:#fff;padding:1px 6px;border-radius:2px;font-size:0.8em;">PAGING</span>' : '—'}</td>
+                                        </tr>`;
+                                    }).join('')}</tbody>
+                                </table>
+                            ` : ''}
+                        </div>
+                    </div>
+                `;
+                detailsDiv.appendChild(alertDiv);
+            }
+
             // Charts
             const chartsDiv = document.createElement('div');
             chartsDiv.className = 'charts-container';
@@ -1999,6 +2059,47 @@
                 }
             }
 
+            // HCP Serving Node charts — per-HCP, per-node
+            const servingNodesCheck = (cluster.health_checks || []).find(c => c.check === 'hcp_serving_nodes');
+            if (servingNodesCheck && servingNodesCheck.details && servingNodesCheck.details.serving_nodes) {
+                const groups = servingNodesCheck.details.serving_nodes.filter(g => g.node_count > 0);
+                if (groups.length > 0) {
+                    const snHeader = document.createElement('div');
+                    snHeader.style.cssText = 'margin:16px 0 8px;padding:8px 12px;background:#1a1a2e;border-left:3px solid #667eea;border-radius:4px;';
+                    snHeader.innerHTML = '<strong style="color:#667eea;">Request-Serving Nodes</strong><span style="color:#999;font-size:0.85em;margin-left:8px;">' + servingNodesCheck.details.total_serving_nodes + ' nodes across ' + groups.length + ' HCPs</span>';
+                    chartsDiv.appendChild(snHeader);
+
+                    groups.forEach((group, gi) => {
+                        if (group.cpu_timeseries && group.cpu_timeseries.length > 0) {
+                            const snData = JSON.stringify(group).replace(/'/g, "&#39;");
+                            const div = document.createElement('div');
+                            div.className = 'chart-wrapper';
+                            div.innerHTML = `
+                                <h3>${group.hcp_name} — Serving Node CPU % (7d) <span style="font-size:0.7em;color:#999;">(${group.node_count} nodes)</span></h3>
+                                <canvas id="hcp-sn-cpu-${clusterIdx}-${gi}" class="chart-canvas"
+                                    data-pending-chart="hcp-sn-cpu"
+                                    data-chart-data='${snData}'
+                                ></canvas>
+                            `;
+                            chartsDiv.appendChild(div);
+                        }
+                        if (group.memory_timeseries && group.memory_timeseries.length > 0) {
+                            const snData = JSON.stringify(group).replace(/'/g, "&#39;");
+                            const div = document.createElement('div');
+                            div.className = 'chart-wrapper';
+                            div.innerHTML = `
+                                <h3>${group.hcp_name} — Serving Node Memory % (7d) <span style="font-size:0.7em;color:#999;">(${group.node_count} nodes)</span></h3>
+                                <canvas id="hcp-sn-mem-${clusterIdx}-${gi}" class="chart-canvas"
+                                    data-pending-chart="hcp-sn-mem"
+                                    data-chart-data='${snData}'
+                                ></canvas>
+                            `;
+                            chartsDiv.appendChild(div);
+                        }
+                    });
+                }
+            }
+
             const saeTrendsCheck = (cluster.health_checks || []).find(c => c.check === 'sae_resource_trends');
             if (saeTrendsCheck && saeTrendsCheck.details) {
                 const sae = saeTrendsCheck.details;
@@ -2147,6 +2248,7 @@
             checksDiv.innerHTML = '<h3 style="margin-bottom: 15px; color: #667eea;">Health Check Details</h3>';
 
             (cluster.health_checks || []).forEach((check, checkIdx) => {
+                if (check.check === 'active_alerts') return;
                 const checkDiv = document.createElement('div');
                 checkDiv.className = 'health-check';
                 const checkId = `${clusterIdx}-${checkIdx}`;
@@ -2157,7 +2259,7 @@
                     <div class="check-header" onclick="toggleCheckDetails('${checkId}')">
                         <div>
                             <span class="check-icon ${statusClass}">${icon}</span>
-                            <span class="check-title">${check.check.replace(/_/g, ' ').toUpperCase()}</span>
+                            <span class="check-title">${formatCheckName(check.check).toUpperCase()}</span>
                         </div>
                         <span class="status-badge ${statusClass}">${check.status}</span>
                     </div>
@@ -2176,7 +2278,7 @@
                         })()}
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
-                                if (key.includes('timeseries') || key.includes('restart_details') || key.includes('events') || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health' || key === 'hcp_status' || key === 'hcp_namespaces' || key === 'node_resources' || key === 'role_utilization' || key === 'nodes' || key === 'degraded_names' || key === 'findings' || key.endsWith('_workload_list')) return '';
+                                if (key.includes('timeseries') || key.includes('restart_details') || key === 'pod_events' || key === 'node_events' || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health' || key === 'hcp_status' || key === 'hcp_namespaces' || key === 'node_resources' || key === 'role_utilization' || key === 'nodes' || key === 'degraded_names' || key === 'findings' || key.endsWith('_workload_list')) return '';
 
                                 // Custom rendering for OME per-metric table
                                 if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {
@@ -2677,9 +2779,9 @@
                         '<div class="stat-number critical">' + criticalCount + '</div>' +
                         '<div class="stat-label">' + pct(criticalCount) + '</div>' +
                     '</div>' +
-                    '<div class="stat-card" style="border-color: var(--text-muted);cursor:help;" ' + statInfo('Skipped / Unreachable', 'Clusters that were excluded from health checking. Reasons include: Limited Support (cluster has SLA suspension), Not Ready (cluster is provisioning or hibernating), Connection Failed (backplane login failed or cluster unreachable), No Access (requires explicit access request), Access Denied (insufficient RBAC permissions).') + '>' +
-                        '<div class="stat-label">Skipped / Unreachable</div>' +
-                        '<div class="stat-number" style="color: var(--text-muted);">' + (totalSkipped + noAccessCount) + '</div>' +
+                    '<div class="stat-card" style="border-color:' + (totalSkipped + noAccessCount > 0 ? '#f39c12' : 'var(--text-muted)') + ';' + (totalSkipped + noAccessCount > 0 ? 'background:rgba(243,156,18,0.08);' : '') + 'cursor:help;" ' + statInfo('Skipped / Unreachable', 'Clusters that were excluded from health checking. Reasons include: Limited Support (cluster has SLA suspension), Not Ready (cluster is provisioning or hibernating), Connection Failed (backplane login failed or cluster unreachable), No Access (requires explicit access request), Access Denied (insufficient RBAC permissions).') + '>' +
+                        '<div class="stat-label">⚠ Skipped / Unreachable</div>' +
+                        '<div class="stat-number" style="color:' + (totalSkipped + noAccessCount > 0 ? '#f39c12' : 'var(--text-muted)') + ';">' + (totalSkipped + noAccessCount) + '</div>' +
                         '<div class="stat-label">' + pct(totalSkipped + noAccessCount) + '</div>' +
                         '<div style="font-size:0.75em;color:var(--text-muted);line-height:1.6;margin-top:4px;">' +
                             (skippedLimitedSupport > 0 ? '<div>🛡 Limited Support: ' + skippedLimitedSupport + '</div>' : '') +
@@ -2688,6 +2790,15 @@
                             (noAccessCount > 0 ? '<div>🔒 No Access: ' + noAccessCount + '</div>' : '') +
                             (skippedAccessDenied > 0 ? '<div>🚫 Access Denied: ' + skippedAccessDenied + '</div>' : '') +
                         '</div>' +
+                        (totalSkipped > 0 ? '<details style="margin-top:6px;font-size:0.75em;color:var(--text-muted);"><summary style="cursor:pointer;user-select:none;">Show skipped clusters</summary>' +
+                            '<div style="max-height:200px;overflow-y:auto;margin-top:4px;padding:4px;background:rgba(0,0,0,0.1);border-radius:3px;font-family:var(--font-mono);font-size:0.9em;">' +
+                            allEntries.filter(e => e.type === 'skipped_cluster').map(s => {
+                                const icon = s.skip_status === 'limited_support' ? '🛡' : s.skip_status === 'not_ready' ? '⏸' : '⚡';
+                                const cid = s.cluster_id || '';
+                                return '<div style="display:flex;align-items:center;gap:4px;padding:1px 0;">' + icon + ' ' + (s.cluster_name || cid) +
+                                    '<span class="copy-id" onclick="event.stopPropagation();navigator.clipboard.writeText(\'' + cid + '\');this.textContent=\'✓\';setTimeout(()=>this.textContent=\'⧉\',800)" title="' + cid + '">⧉</span></div>';
+                            }).join('') +
+                            '</div></details>' : '') +
                     '</div>' +
                     (totalApiErrors > 0 ?
                     '<div class="stat-card" style="border-color: #dc3545; background: rgba(220,53,69,0.08);cursor:help;" ' + statInfo('Script/API Errors', 'Errors encountered during health check execution — API timeouts, RBAC failures, or script errors that prevented a check from completing. These are distinct from cluster health issues; they indicate problems with the health check tooling ability to query the cluster. The affected operator and error count are shown below.') + '>' +
@@ -2985,7 +3096,17 @@
                 const loginClass = loginStatus === 'SUCCESS' ? 'status-pass' : (loginStatus === 'FAILED' ? 'status-critical' : 'status-unknown');
 
                 const cid = cluster.cluster_id || '';
-                let rowHTML = `<td class="cluster-name-cell">${cluster.cluster_name || 'Unknown'}${cid ? `<span class="copy-id" onclick="event.stopPropagation();navigator.clipboard.writeText('${cid}');this.textContent='✓';setTimeout(()=>this.textContent='⧉',800)" title="Copy cluster ID: ${cid}">⧉</span>` : ''}</td>`;
+                const rowAlerts = (cluster.health_checks || []).find(c => c.check === 'active_alerts');
+                const rowAlertCount = rowAlerts?.details?.alert_count || 0;
+                const rowAlertCrit = rowAlerts?.details?.critical_count || 0;
+                const rowAlertPaging = rowAlerts?.details?.paging_count || 0;
+                let alertBadge = '';
+                if (rowAlertCount > 0) {
+                    const alertColor = (rowAlertCrit > 0 || rowAlertPaging > 0) ? '#dc3545' : '#f39c12';
+                    const alertTitle = rowAlertCount + ' firing alert(s)' + (rowAlertCrit > 0 ? ', ' + rowAlertCrit + ' critical' : '') + (rowAlertPaging > 0 ? ', ' + rowAlertPaging + ' paging' : '');
+                    alertBadge = `<span style="margin-left:6px;color:${alertColor};font-size:0.85em;cursor:help;" title="${alertTitle}">🔔${rowAlertCount}</span>`;
+                }
+                let rowHTML = `<td class="cluster-name-cell">${cluster.cluster_name || 'Unknown'}${alertBadge}${cid ? `<span class="copy-id" onclick="event.stopPropagation();navigator.clipboard.writeText('${cid}');this.textContent='✓';setTimeout(()=>this.textContent='⧉',800)" title="Copy cluster ID: ${cid}">⧉</span>` : ''}</td>`;
                 rowHTML += `<td class="check-status-cell"><span class="status-icon ${loginClass}">${loginIcon}</span></td>`;
                 checkTypes.forEach(checkType => {
                     const check = (cluster.health_checks || []).find(c => c.check === checkType);
@@ -3228,6 +3349,7 @@
                 // Count statuses for badge — uses effective status to exclude API/script errors
                 let okCount = 0, warnCount = 0, critCount = 0, errCount = 0;
                 opData.forEach(c => {
+                    if (!c.health_checks || c.health_checks.length === 0) return;
                     const hasFail = hasRealFail(c);
                     const hasWarn = hasRealWarn(c);
                     const hasErr = hasScriptError(c) || (c.api_errors || []).length > 0;
@@ -3241,8 +3363,12 @@
                 const tab = document.createElement('button');
                 tab.className = `operator-tab${idx === 0 ? ' active' : ''}`;
                 tab.dataset.operator = op;
-                const badgeHTML = `<span style="color:#5eecc0;">${okCount}</span> / <span style="color:#fdd76b;">${warnCount}</span> / <span style="color:#ff8a8a;">${critCount}</span>` +
-                    (errCount > 0 ? ` / <span style="color:#ffa500;">${errCount}</span>` : '');
+                const badgeParts = [];
+                if (critCount > 0) badgeParts.push(`<span style="color:#ff8a8a;" title="${critCount} critical">${critCount}⚠</span>`);
+                if (warnCount > 0) badgeParts.push(`<span style="color:#fdd76b;" title="${warnCount} warning">${warnCount}!</span>`);
+                if (errCount > 0) badgeParts.push(`<span style="color:#ffa500;" title="${errCount} with API errors">${errCount}⟲</span>`);
+                badgeParts.push(`<span style="color:#5eecc0;" title="${okCount} healthy">${okCount}✓</span>`);
+                const badgeHTML = badgeParts.join(' ');
                 const desc = operatorDescriptions[op] || '';
                 const infoIcon = desc ? ` <span onclick="event.stopPropagation();showOperatorInfo('${shortName}','${desc.replace(/'/g, "\\'")}')" style="display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;background:#1a3a8a;color:#ffffff;font-size:0.7em;cursor:help;margin-left:4px;vertical-align:middle;font-weight:900;text-shadow:0 0 2px rgba(255,255,255,0.5);" title="Click for operator info">?</span>` : '';
                 tab.innerHTML = `${shortName}${infoIcon} <span class="tab-badge" style="background:rgba(255,255,255,0.08);">${badgeHTML}</span>`;

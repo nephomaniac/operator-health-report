@@ -359,6 +359,14 @@ var (
 		SkipCommonChecks: true,
 	}
 
+	MNMOConfig = OperatorConfig{
+		Name:       "managed-node-metadata-operator",
+		ShortName:  "mnmo",
+		Namespace:  "openshift-managed-node-metadata-operator",
+		Deployment: "managed-node-metadata-operator",
+		OLMSaas:    "saas-managed-node-metadata-operator.yaml",
+	}
+
 	AllOperators = map[string]OperatorConfig{
 		"camo":    CAMOConfig,
 		"rmo":     RMOConfig,
@@ -370,5 +378,6 @@ var (
 		"sae":     SAEConfig,
 		"cluster": ClusterConfig,
 		"hcp":     HCPConfig,
+		"mnmo":    MNMOConfig,
 	}
 )

@@ -62,6 +62,11 @@ type ClusterClient struct {
 	ElevatedOps       []string
 	elevMu            sync.Mutex
 	CurrentCheck      string // set by check framework for audit tagging
+
+	// Cached active alerts (shared across operators for same cluster)
+	alertsOnce   sync.Once
+	alertsResult string
+	alertsErr    error
 }
 
 // portForwardSession manages a port-forward to a Thanos/Prometheus pod.
@@ -725,6 +730,47 @@ func (cc *ClusterClient) QueryRHOBSPrometheus(ctx context.Context, query string)
 	return result, err
 }
 
+// QueryRHOBSPrometheusRange runs a PromQL range query against the RHOBS Prometheus on MCs.
+func (cc *ClusterClient) QueryRHOBSPrometheusRange(ctx context.Context, query string, start, end int64, step int) (string, error) {
+	cc.rhobsPfOnce.Do(func() {
+		cc.rhobsPfErr = cc.setupRHOBSPortForward(ctx)
+	})
+
+	if cc.rhobsPfErr == nil {
+		reqURL := fmt.Sprintf("http://127.0.0.1:%d/api/v1/query_range?query=%s&start=%d&end=%d&step=%d",
+			cc.rhobsPfSession.localPort, query, start, end, step)
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(reqURL)
+		if err == nil {
+			defer resp.Body.Close()
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr == nil && resp.StatusCode == 200 {
+				return string(body), nil
+			}
+		}
+	}
+
+	if !cc.CanElevate() {
+		return "", fmt.Errorf("RHOBS prometheus unavailable: port-forward failed (%v), elevation not available", cc.rhobsPfErr)
+	}
+
+	pods, err := withRetryResult(ctx, "list RHOBS prometheus pods", func() (*corev1.PodList, error) {
+		return cc.clientset.CoreV1().Pods("openshift-observability-operator").List(ctx, metav1.ListOptions{
+			LabelSelector: "app.kubernetes.io/name=prometheus",
+		})
+	})
+	if err != nil || len(pods.Items) == 0 {
+		return "", fmt.Errorf("no RHOBS prometheus pods found: %v", err)
+	}
+
+	result, err := cc.ExecInPod(ctx, "openshift-observability-operator", pods.Items[0].Name, "prometheus",
+		[]string{"curl", "-sf", "--max-time", "30",
+			fmt.Sprintf("http://localhost:9090/api/v1/query_range?query=%s&start=%d&end=%d&step=%d", query, start, end, step)},
+		true)
+	cc.checkElevatedError(err)
+	return result, err
+}
+
 // SetRHOBSClient configures the RHOBS remote client for out-of-band metrics access.
 func (cc *ClusterClient) SetRHOBSClient(client *rhobs.Client) {
 	cc.rhobsClient = client
@@ -739,6 +785,15 @@ func (cc *ClusterClient) HasRHOBSRemote() bool {
 // elevation (exec), RHOBS remote, or port-forward (always attempted as fallback).
 func (cc *ClusterClient) CanQueryMetrics() bool {
 	return true
+}
+
+// QueryActiveAlerts returns cached firing alerts for this cluster.
+// The query runs once and is shared across all operators on the same cluster.
+func (cc *ClusterClient) QueryActiveAlerts(ctx context.Context) (string, error) {
+	cc.alertsOnce.Do(func() {
+		cc.alertsResult, cc.alertsErr = cc.QueryMetrics(ctx, `ALERTS{alertstate="firing",severity=~"critical|warning"}`)
+	})
+	return cc.alertsResult, cc.alertsErr
 }
 
 // QueryMetrics runs a PromQL instant query using the best available method:
