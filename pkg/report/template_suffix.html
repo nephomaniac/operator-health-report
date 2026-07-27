@@ -2594,8 +2594,8 @@
                                             <td style="padding:6px 10px;">${check.details.ocp_version || '?'}</td>
                                         </tr>
                                         <tr style="border-bottom:1px solid #e8eaf0;">
-                                            <td style="padding:6px 10px;font-weight:600;color:#667eea;">Expressions Scanned</td>
-                                            <td style="padding:6px 10px;">${check.details.template_expressions_scanned || 0}</td>
+                                            <td style="padding:6px 10px;font-weight:600;color:#667eea;">Template Blocks Parsed</td>
+                                            <td style="padding:6px 10px;">${check.details.template_blocks_parsed || 0} blocks, ${(check.details.function_inventory || []).length} contained function calls (${check.details.baseline_functions_found || 0} baseline${check.details.non_baseline_functions ? ', ' + check.details.non_baseline_functions.length + ' version-gated' : ''})</td>
                                         </tr>
                                         ${check.details.non_baseline_functions ? `
                                         <tr style="border-bottom:1px solid #e8eaf0;">

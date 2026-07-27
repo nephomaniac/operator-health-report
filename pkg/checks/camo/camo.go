@@ -911,7 +911,7 @@ func checkAlertmanagerConfigCompatibility(ctx context.Context, cc *checks.Cluste
 
 	// Scan for template expressions and check function compatibility
 	expressions := templateExprRe.FindAllStringSubmatch(configStr, -1)
-	r.Details["template_expressions_scanned"] = len(expressions)
+	r.Details["template_blocks_parsed"] = len(expressions)
 
 	type incompatFunc struct {
 		Function   string `json:"function"`
@@ -1054,7 +1054,8 @@ func checkAlertmanagerConfigCompatibility(ctx context.Context, cc *checks.Cluste
 		r.Message = fmt.Sprintf("No template expressions in AM config (AM %s)", amVersion)
 	} else {
 		r.Status = checks.StatusPass
-		r.Message = fmt.Sprintf("All template functions compatible with AM %s (OCP %s, %d expressions checked)", amVersion, cc.ClusterVersion, len(expressions))
+		funcCount := len(baselineFound) + len(trackedFunctions)
+		r.Message = fmt.Sprintf("All %d template functions compatible with AM %s (OCP %s, %d template blocks parsed)", funcCount, amVersion, cc.ClusterVersion, len(expressions))
 	}
 
 	cc.AddResult(r)
