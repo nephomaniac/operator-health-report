@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/openshift/operator-health-report/pkg/checks"
+	"github.com/openshift/operator-health-report/pkg/thanos"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -83,6 +84,19 @@ func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext)
 	// Metrics forwarder — MC only (source: hypershift-dataplane-metrics-forwarder)
 	if cc.ClusterType == "management_cluster" {
 		checkMetricsForwarder(ctx, cc)
+	}
+
+	// RHOBS platform metrics — MC only
+	if cc.ClusterType == "management_cluster" && hasRHOBS {
+		checkRemoteWriteHealth(ctx, cc)
+		checkScrapeHealth(ctx, cc)
+		checkLogCollectorMetrics(ctx, cc)
+	}
+
+	// Synthetics agent — MC only (source: rhobs-synthetics-agent)
+	if cc.ClusterType == "management_cluster" {
+		checkSyntheticsAgent(ctx, cc)
+		checkSyntheticsProbeHealth(ctx, cc)
 	}
 }
 
@@ -1318,4 +1332,417 @@ func mapKeys(m map[string]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// --- RHOBS Platform Metrics ---
+
+func checkRemoteWriteHealth(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rhobs_remote_write_health")
+
+	r := checks.Result{
+		Check:    "rhobs_remote_write_health",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"description":   "Checks Prometheus remote-write success rate to the RHOBS cell. Failed remote-writes mean metrics are not reaching the central RHOBS platform, causing gaps in dashboards and alerting. Queries prometheus_remote_storage_succeeded_samples_total and failed_samples_total.",
+			"pass_criteria": "PASS: Failure rate <1%. WARN: 1-5% failure rate. FAIL: >5% failure rate. SKIP: Metrics unavailable.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	succeededQuery := `sum(rate(prometheus_remote_storage_succeeded_samples_total{namespace="openshift-observability-operator"}[5m]))`
+	failedQuery := `sum(rate(prometheus_remote_storage_failed_samples_total{namespace="openshift-observability-operator"}[5m]))`
+
+	succeededBody, succeededErr := cc.Client.QueryMetrics(ctx, succeededQuery)
+	failedBody, failedErr := cc.Client.QueryMetrics(ctx, failedQuery)
+
+	if succeededErr != nil && failedErr != nil {
+		if checks.IsAccessError(succeededErr) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusSkip
+		r.Message = "Remote-write metrics not available"
+		cc.AddResult(r)
+		return
+	}
+
+	succeeded := 0.0
+	failed := 0.0
+	if succeededErr == nil && thanos.HasResults(succeededBody) {
+		succeeded, _ = thanos.InstantFloat(succeededBody)
+	}
+	if failedErr == nil && thanos.HasResults(failedBody) {
+		failed, _ = thanos.InstantFloat(failedBody)
+	}
+
+	total := succeeded + failed
+	failRate := 0.0
+	if total > 0 {
+		failRate = failed / total
+	}
+
+	r.Details["succeeded_samples_per_sec"] = thanos.Round(succeeded, 2)
+	r.Details["failed_samples_per_sec"] = thanos.Round(failed, 2)
+	r.Details["failure_rate"] = thanos.Round(failRate*100, 2)
+
+	if total == 0 {
+		r.Status = checks.StatusWarning
+		r.Message = "No remote-write activity — Prometheus may not be sending samples to RHOBS"
+	} else if failRate > 0.05 {
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Remote-write failure rate %.1f%% — %.0f failed/sec, %.0f succeeded/sec — metrics may be lost", failRate*100, failed, succeeded)
+	} else if failRate > 0.01 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Remote-write elevated failures — %.2f%% failure rate (%.2f failed/sec)", failRate*100, failed)
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Remote-write healthy — %.0f samples/sec, %.2f%% failure rate", succeeded, failRate*100)
+	}
+	cc.AddResult(r)
+}
+
+func checkScrapeHealth(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rhobs_scrape_health")
+
+	r := checks.Result{
+		Check:    "rhobs_scrape_health",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Checks the RHOBS Prometheus scrape target health. Down targets mean metrics from specific exporters or HCP components are not being collected. Queries up{} for the RHOBS Prometheus instance.",
+			"pass_criteria": "PASS: All targets up. WARN: Some targets down. SKIP: Metrics unavailable.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	upQuery := `count by (job) (up{namespace=~"openshift-observability-operator|ocm-.*"} == 0)`
+	body, err := cc.Client.QueryMetrics(ctx, upQuery)
+	cc.RecordError("Query RHOBS scrape targets down", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusSkip
+		r.Message = "Scrape target metrics not available"
+		cc.AddResult(r)
+		return
+	}
+
+	totalUpQuery := `count(up{namespace=~"openshift-observability-operator|ocm-.*"})`
+	totalBody, _ := cc.Client.QueryMetrics(ctx, totalUpQuery)
+
+	totalTargets := 0.0
+	if thanos.HasResults(totalBody) {
+		totalTargets, _ = thanos.InstantFloat(totalBody)
+	}
+	r.Details["total_targets"] = int(totalTargets)
+
+	if !thanos.HasResults(body) {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d RHOBS scrape targets up", int(totalTargets))
+		cc.AddResult(r)
+		return
+	}
+
+	resp, _ := thanos.Parse(body)
+	downJobs := []string{}
+	totalDown := 0
+	for _, result := range resp.Data.Result {
+		job := result.Metric["job"]
+		count, ok := thanos.ToFloat(result)
+		if !ok {
+			continue
+		}
+		totalDown += int(count)
+		downJobs = append(downJobs, fmt.Sprintf("%s (%d)", job, int(count)))
+	}
+
+	r.Details["down_targets"] = totalDown
+	r.Details["down_jobs"] = downJobs
+
+	r.Status = checks.StatusWarning
+	r.Message = fmt.Sprintf("%d/%d scrape targets down: %s", totalDown, int(totalTargets), strings.Join(downJobs, ", "))
+	cc.AddResult(r)
+}
+
+func checkLogCollectorMetrics(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rhobs_log_collector_metrics")
+
+	r := checks.Result{
+		Check:    "rhobs_log_collector_metrics",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Checks RHOBS log collector (Vector in openshift-logging) throughput and error rates via metrics. Validates that logs are being collected and forwarded to Loki without excessive errors.",
+			"pass_criteria": "PASS: Logs flowing, error rate <1%. WARN: High error rate or zero throughput. SKIP: Metrics unavailable.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Check log ingestion rate
+	ingestQuery := `sum(rate(vector_component_received_events_total{namespace="openshift-logging",component_type="source"}[5m]))`
+	ingestBody, ingestErr := cc.Client.QueryMetrics(ctx, ingestQuery)
+
+	// Check log output errors
+	errorQuery := `sum(rate(vector_component_errors_total{namespace="openshift-logging"}[5m]))`
+	errorBody, errorErr := cc.Client.QueryMetrics(ctx, errorQuery)
+
+	if ingestErr != nil && errorErr != nil {
+		if checks.IsAccessError(ingestErr) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusSkip
+		r.Message = "Log collector metrics not available — vector_component_* may not be scraped"
+		cc.AddResult(r)
+		return
+	}
+
+	ingestRate := 0.0
+	errorRate := 0.0
+	if ingestErr == nil && thanos.HasResults(ingestBody) {
+		ingestRate, _ = thanos.InstantFloat(ingestBody)
+	}
+	if errorErr == nil && thanos.HasResults(errorBody) {
+		errorRate, _ = thanos.InstantFloat(errorBody)
+	}
+
+	r.Details["ingestion_rate_per_sec"] = thanos.Round(ingestRate, 2)
+	r.Details["error_rate_per_sec"] = thanos.Round(errorRate, 4)
+
+	errorPct := 0.0
+	if ingestRate > 0 {
+		errorPct = (errorRate / ingestRate) * 100
+	}
+	r.Details["error_percent"] = thanos.Round(errorPct, 2)
+
+	// Check dropped events
+	droppedQuery := `sum(rate(vector_component_discarded_events_total{namespace="openshift-logging"}[5m]))`
+	droppedBody, droppedErr := cc.Client.QueryMetrics(ctx, droppedQuery)
+	droppedRate := 0.0
+	if droppedErr == nil && thanos.HasResults(droppedBody) {
+		droppedRate, _ = thanos.InstantFloat(droppedBody)
+	}
+	r.Details["dropped_rate_per_sec"] = thanos.Round(droppedRate, 4)
+
+	switch {
+	case ingestRate == 0 && errorRate == 0:
+		r.Status = checks.StatusWarning
+		r.Message = "Zero log throughput — RHOBS log collector may not be processing events"
+	case errorPct > 5 || droppedRate > 0:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Log collector issues — %.0f events/sec ingested, %.2f%% errors, %.4f/sec dropped", ingestRate, errorPct, droppedRate)
+	case errorPct > 1:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Log collector elevated errors — %.0f events/sec, %.2f%% error rate", ingestRate, errorPct)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Log collector healthy — %.0f events/sec, %.2f%% error rate", ingestRate, errorPct)
+	}
+	cc.AddResult(r)
+}
+
+// --- Synthetics Agent (rhobs-synthetics-agent) ---
+
+func checkSyntheticsAgent(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rhobs_synthetics_agent")
+
+	r := checks.Result{
+		Check:    "rhobs_synthetics_agent",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Checks if the RHOBS synthetics agent is deployed and running. The agent polls the synthetics API for probe definitions and reconciles Probe CRs on the MC. If running the post-ROSAENG-59408 version, also checks the probe update decision ratio — near 100% skipped in steady state means the agent is efficiently reconciling without unnecessary updates.",
+			"pass_criteria": "PASS: Agent running, probe decisions healthy. WARN: Agent not found or high update ratio. SKIP: Metrics unavailable.",
+		},
+	}
+
+	// Check for synthetics agent deployment in known namespaces
+	agentNamespaces := []string{"monitoring", "openshift-monitoring", "openshift-observability-operator"}
+	var agentDeploy string
+	var agentNS string
+	var ready, desired int32
+
+	for _, ns := range agentNamespaces {
+		deps, err := cc.Client.Clientset().AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			continue
+		}
+		for _, d := range deps.Items {
+			if strings.Contains(d.Name, "synthetics") {
+				agentDeploy = d.Name
+				agentNS = ns
+				if d.Spec.Replicas != nil {
+					desired = *d.Spec.Replicas
+				}
+				ready = d.Status.ReadyReplicas
+				break
+			}
+		}
+		if agentDeploy != "" {
+			break
+		}
+	}
+
+	if agentDeploy == "" {
+		r.Status = checks.StatusInfo
+		r.Message = "Synthetics agent not deployed — probes may be managed externally or not configured on this MC"
+		cc.AddResult(r)
+		return
+	}
+
+	r.Details["deployment"] = agentDeploy
+	r.Details["namespace"] = agentNS
+	r.Details["ready_replicas"] = ready
+	r.Details["desired_replicas"] = desired
+
+	if ready == 0 {
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("Synthetics agent %s/%s has 0 ready replicas — probe reconciliation stopped", agentNS, agentDeploy)
+		cc.AddResult(r)
+		return
+	}
+
+	if ready < desired {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Synthetics agent degraded — %d/%d ready in %s", ready, desired, agentNS)
+		cc.AddResult(r)
+		return
+	}
+
+	// Check probe update decision metrics (post-ROSAENG-59408)
+	if !cc.Client.CanQueryMetrics() {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Synthetics agent running — %d/%d ready in %s (decision metrics unavailable)", ready, desired, agentNS)
+		cc.AddResult(r)
+		return
+	}
+
+	appliedQuery := `sum(rate(rhobs_synthetics_agent_probe_update_decisions_total{decision="applied"}[1h]))`
+	skippedQuery := `sum(rate(rhobs_synthetics_agent_probe_update_decisions_total{decision="skipped"}[1h]))`
+
+	appliedBody, appliedErr := cc.Client.QueryMetrics(ctx, appliedQuery)
+	skippedBody, skippedErr := cc.Client.QueryMetrics(ctx, skippedQuery)
+
+	if appliedErr != nil && skippedErr != nil {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Synthetics agent running — %d/%d ready (decision metric not yet available — pre-ROSAENG-59408 version)", ready, desired)
+		cc.AddResult(r)
+		return
+	}
+
+	appliedRate := 0.0
+	skippedRate := 0.0
+	if appliedErr == nil && thanos.HasResults(appliedBody) {
+		if v, ok := thanos.InstantFloat(appliedBody); ok {
+			appliedRate = v
+		}
+	}
+	if skippedErr == nil && thanos.HasResults(skippedBody) {
+		if v, ok := thanos.InstantFloat(skippedBody); ok {
+			skippedRate = v
+		}
+	}
+
+	totalRate := appliedRate + skippedRate
+	skipRatio := 0.0
+	if totalRate > 0 {
+		skipRatio = skippedRate / totalRate
+	}
+
+	r.Details["applied_rate_per_sec"] = thanos.Round(appliedRate, 4)
+	r.Details["skipped_rate_per_sec"] = thanos.Round(skippedRate, 4)
+	r.Details["skip_ratio"] = thanos.Round(skipRatio, 4)
+
+	if totalRate == 0 {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Synthetics agent running — %d/%d ready (no probe decisions recorded yet)", ready, desired)
+	} else if skipRatio >= 0.95 {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Synthetics agent healthy — %.1f%% decisions skipped (efficient reconciliation)", skipRatio*100)
+	} else if skipRatio >= 0.50 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Synthetics agent probe churn — only %.1f%% skipped (applied: %.4f/s, skipped: %.4f/s) — probes may be drifting", skipRatio*100, appliedRate, skippedRate)
+	} else {
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("Synthetics agent excessive updates — %.1f%% applied (%.4f/s) — possible pre-fix version or config drift causing unnecessary Probe CR writes", (1-skipRatio)*100, appliedRate)
+	}
+	cc.AddResult(r)
+}
+
+func checkSyntheticsProbeHealth(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rhobs_synthetics_probes")
+
+	r := checks.Result{
+		Check:    "rhobs_synthetics_probes",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Checks the health and count of Probe CRs managed by the synthetics agent. Verifies probes exist, are being scraped, and detects probe count changes that might indicate API sync issues.",
+			"pass_criteria": "PASS: Probes found and scraped. WARN: No probes found or scrape issues. SKIP: Metrics unavailable.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Count Probe CRs via probe_success metric (each probe generates this)
+	probeCountQuery := `count(probe_success)`
+	body, err := cc.Client.QueryMetrics(ctx, probeCountQuery)
+	cc.RecordError("Query probe count", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusUnknown
+		r.Message = fmt.Sprintf("Thanos query failed: %v", err)
+		cc.AddResult(r)
+		return
+	}
+
+	if !thanos.HasResults(body) {
+		r.Status = checks.StatusWarning
+		r.Message = "No probe_success metrics found — synthetics probes may not be configured or scraping"
+		cc.AddResult(r)
+		return
+	}
+
+	probeCount, _ := thanos.InstantFloat(body)
+	r.Details["probe_count"] = int(probeCount)
+
+	// Check probe success rate
+	failingQuery := `count(probe_success == 0)`
+	failBody, failErr := cc.Client.QueryMetrics(ctx, failingQuery)
+
+	failingCount := 0.0
+	if failErr == nil && thanos.HasResults(failBody) {
+		failingCount, _ = thanos.InstantFloat(failBody)
+	}
+	r.Details["failing_probes"] = int(failingCount)
+	r.Details["passing_probes"] = int(probeCount) - int(failingCount)
+
+	if failingCount > 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d/%d probes failing — %d endpoints unreachable", int(failingCount), int(probeCount), int(failingCount))
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d probes healthy", int(probeCount))
+	}
+	cc.AddResult(r)
 }

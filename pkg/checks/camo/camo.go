@@ -3,7 +3,10 @@ package camo
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/openshift/operator-health-report/pkg/checks"
 	"github.com/openshift/operator-health-report/pkg/logging"
@@ -29,6 +32,8 @@ func (c *CAMOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) 
 	checkReconciliationBehavior(ctx, cc, recentLogCount)
 	checkConfigurationErrors(ctx, cc)
 	checkPrometheusMetrics(ctx, cc)
+	checkAlertmanagerReloadHealth(ctx, cc)
+	checkAlertmanagerConfigCompatibility(ctx, cc)
 	checkAlertmanagerLogs(ctx, cc)
 	checkAlertmanagerEvents(ctx, cc)
 	checkCAMOEvents(ctx, cc)
@@ -595,6 +600,412 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 	cc.AddResult(r)
 }
 
+// checkAlertmanagerReloadHealth queries Alertmanager's native Prometheus metrics
+// to verify the config CAMO wrote was actually loaded successfully. This catches
+// issues where CAMO's own validation passes but Alertmanager rejects the config
+// (e.g., toJson template function not supported on older AM versions).
+func checkAlertmanagerReloadHealth(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("alertmanager_reload_health")
+	log := logging.WithCheck("alertmanager_reload_health")
+
+	r := checks.Result{
+		Check:    "alertmanager_reload_health",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"description":   "Queries Alertmanager's native Prometheus metrics to verify the configuration was loaded successfully. alertmanager_config_last_reload_successful=0 means the last reload FAILED — Alertmanager is running with stale config and alerts may not be delivered. This catches issues that CAMO's own validation misses (e.g., template functions unsupported by the cluster's Alertmanager version).",
+			"pass_criteria": "PASS: All AM instances report reload successful. FAIL: Any instance reports reload failed. WARN: Reload succeeded but config is stale (>24h since last reload). SKIP: Metrics unavailable.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Check reload success status per AM pod
+	reloadQuery := fmt.Sprintf(`alertmanager_config_last_reload_successful{namespace="%s"}`, cc.Operator.Namespace)
+	reloadBody, reloadErr := cc.Client.QueryMetrics(ctx, reloadQuery)
+	cc.RecordError("Query AM reload status", reloadErr)
+
+	if reloadErr != nil {
+		if checks.IsAccessError(reloadErr) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusSkip
+		r.Message = "Alertmanager reload metrics not available"
+		cc.AddResult(r)
+		return
+	}
+
+	if !thanos.HasResults(reloadBody) {
+		r.Status = checks.StatusSkip
+		r.Message = "No alertmanager_config_last_reload_successful metric found"
+		cc.AddResult(r)
+		return
+	}
+
+	resp, _ := thanos.Parse(reloadBody)
+	totalInstances := 0
+	failedInstances := 0
+	var failedPods []string
+
+	for _, result := range resp.Data.Result {
+		val, ok := thanos.ToFloat(result)
+		if !ok {
+			continue
+		}
+		totalInstances++
+		pod := result.Metric["pod"]
+		if pod == "" {
+			pod = result.Metric["instance"]
+		}
+		if val == 0 {
+			failedInstances++
+			failedPods = append(failedPods, pod)
+		}
+	}
+
+	r.Details["total_instances"] = totalInstances
+	r.Details["failed_instances"] = failedInstances
+	if len(failedPods) > 0 {
+		r.Details["failed_pods"] = failedPods
+	}
+
+	// Check when the last successful reload happened
+	timestampQuery := fmt.Sprintf(`alertmanager_config_last_reload_success_timestamp_seconds{namespace="%s"}`, cc.Operator.Namespace)
+	tsBody, tsErr := cc.Client.QueryMetrics(ctx, timestampQuery)
+	if tsErr == nil && thanos.HasResults(tsBody) {
+		tsResp, _ := thanos.Parse(tsBody)
+		var oldestReload float64
+		for _, result := range tsResp.Data.Result {
+			val, ok := thanos.ToFloat(result)
+			if !ok {
+				continue
+			}
+			if oldestReload == 0 || val < oldestReload {
+				oldestReload = val
+			}
+		}
+		if oldestReload > 0 {
+			reloadTime := time.Unix(int64(oldestReload), 0)
+			age := time.Since(reloadTime)
+			r.Details["oldest_reload_time"] = reloadTime.UTC().Format(time.RFC3339)
+			r.Details["oldest_reload_age_hours"] = thanos.Round(age.Hours(), 1)
+		}
+	}
+
+	// Check config hash for consistency across instances
+	hashQuery := fmt.Sprintf(`alertmanager_config_hash{namespace="%s"}`, cc.Operator.Namespace)
+	hashBody, hashErr := cc.Client.QueryMetrics(ctx, hashQuery)
+	if hashErr == nil && thanos.HasResults(hashBody) {
+		hashResp, _ := thanos.Parse(hashBody)
+		hashes := map[string][]string{}
+		for _, result := range hashResp.Data.Result {
+			val, ok := thanos.ToFloat(result)
+			if !ok {
+				continue
+			}
+			hashStr := fmt.Sprintf("%.0f", val)
+			pod := result.Metric["pod"]
+			if pod == "" {
+				pod = result.Metric["instance"]
+			}
+			hashes[hashStr] = append(hashes[hashStr], pod)
+		}
+		r.Details["config_hash_count"] = len(hashes)
+		if len(hashes) > 1 {
+			r.Details["config_hash_mismatch"] = true
+			r.Details["config_hashes"] = hashes
+		}
+	}
+
+	// Check notification failure metrics
+	notifFailQuery := fmt.Sprintf(`sum(rate(alertmanager_notifications_failed_total{namespace="%s"}[5m]))`, cc.Operator.Namespace)
+	notifBody, notifErr := cc.Client.QueryMetrics(ctx, notifFailQuery)
+	if notifErr == nil && thanos.HasResults(notifBody) {
+		if rate, ok := thanos.InstantFloat(notifBody); ok {
+			r.Details["notification_failure_rate"] = thanos.Round(rate, 4)
+		}
+	}
+
+	log.WithField("failed", failedInstances).WithField("total", totalInstances).Debug("AM reload health evaluated")
+
+	switch {
+	case failedInstances > 0:
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Alertmanager config reload FAILED on %d/%d instance(s): %s — running stale config, alerts may not be delivered",
+			failedInstances, totalInstances, strings.Join(failedPods, ", "))
+	case r.Details["config_hash_mismatch"] != nil:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Config hash mismatch across %d AM instances — possible split-brain or partial reload", totalInstances)
+	default:
+		ageHours, _ := r.Details["oldest_reload_age_hours"].(float64)
+		if ageHours > 24 {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("Reload successful on %d instances but config is %.0fh old — CAMO may not be reconciling", totalInstances, ageHours)
+		} else {
+			r.Status = checks.StatusPass
+			r.Message = fmt.Sprintf("Config reload successful on all %d AM instance(s)", totalInstances)
+		}
+	}
+
+	cc.AddResult(r)
+}
+
+// Template functions that require a minimum Alertmanager version.
+// Functions not listed here are baseline functions available in all supported AM versions.
+var templateFuncMinVersion = map[string]string{
+	// AM 0.28.0 (OCP 4.19)
+	"since":            "0.28.0",
+	"humanizeDuration": "0.28.0",
+	"date":             "0.28.0",
+	"tz":               "0.28.0",
+	// AM 0.30.0 (OCP 4.22)
+	"toJson": "0.30.0",
+	// AM 0.32.0 (future)
+	"list":       "0.32.0",
+	"dict":       "0.32.0",
+	"append":     "0.32.0",
+	"now":        "0.32.0",
+	"toDate":     "0.32.0",
+	"mustToDate": "0.32.0",
+}
+
+// Maps OCP minor version to the Alertmanager version shipped with that release.
+var ocpToAMVersion = map[int]string{
+	16: "0.26.0",
+	17: "0.27.0",
+	18: "0.27.0",
+	19: "0.28.0",
+	20: "0.28.1",
+	21: "0.29.0",
+	22: "0.31.1",
+}
+
+var templateExprRe = regexp.MustCompile(`\{\{-?\s*(.+?)\s*-?\}\}`)
+
+func semverComponents(v string) (int, int, int) {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.SplitN(v, ".", 3)
+	major, _ := strconv.Atoi(parts[0])
+	minor := 0
+	patch := 0
+	if len(parts) > 1 {
+		minor, _ = strconv.Atoi(parts[1])
+	}
+	if len(parts) > 2 {
+		p := parts[2]
+		if idx := strings.IndexAny(p, "-+"); idx >= 0 {
+			p = p[:idx]
+		}
+		patch, _ = strconv.Atoi(p)
+	}
+	return major, minor, patch
+}
+
+func semverLessThan(a, b string) bool {
+	aMaj, aMin, aPat := semverComponents(a)
+	bMaj, bMin, bPat := semverComponents(b)
+	if aMaj != bMaj {
+		return aMaj < bMaj
+	}
+	if aMin != bMin {
+		return aMin < bMin
+	}
+	return aPat < bPat
+}
+
+var amVersionRe = regexp.MustCompile(`\bv?(\d+\.\d+\.\d+)\b`)
+
+func detectAMVersion(ctx context.Context, cc *checks.ClusterContext) (string, string) {
+	// Strategy 1: Parse semver from StatefulSet image tag
+	sts, err := cc.Client.Clientset().AppsV1().StatefulSets(cc.Operator.Namespace).Get(ctx, "alertmanager-main", metav1.GetOptions{})
+	if err == nil && sts != nil {
+		for _, c := range sts.Spec.Template.Spec.Containers {
+			if c.Name == "alertmanager" || strings.Contains(c.Image, "alertmanager") {
+				if m := amVersionRe.FindString(c.Image); m != "" {
+					return strings.TrimPrefix(m, "v"), "image_tag"
+				}
+			}
+		}
+	}
+
+	// Strategy 2: Parse semver from running pod image
+	pods, podErr := cc.Client.GetPods(ctx, cc.Operator.Namespace, "app.kubernetes.io/name=alertmanager")
+	if podErr == nil {
+		for _, pod := range pods.Items {
+			for _, cs := range pod.Status.ContainerStatuses {
+				if strings.Contains(cs.Image, "alertmanager") {
+					if m := amVersionRe.FindString(cs.Image); m != "" {
+						return strings.TrimPrefix(m, "v"), "pod_image"
+					}
+				}
+			}
+		}
+	}
+
+	// Strategy 3: Map from OCP version
+	if cc.ClusterVersion != "" {
+		var minor int
+		fmt.Sscanf(cc.ClusterVersion, "4.%d", &minor)
+		if amVer, ok := ocpToAMVersion[minor]; ok {
+			return amVer, "ocp_mapping"
+		}
+	}
+
+	return "", "unknown"
+}
+
+func checkAlertmanagerConfigCompatibility(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("alertmanager_config_compatibility")
+
+	r := checks.Result{
+		Check:    "alertmanager_config_compatibility",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"description":   "Proactively checks whether the Alertmanager config CAMO wrote uses template functions that the cluster's Alertmanager version doesn't support. Catches incompatibilities like toJson (requires AM 0.30.0+) on clusters running older AM versions BEFORE they cause notification failures. Works on any cluster regardless of OCP version by comparing config content against the detected AM version.",
+			"pass_criteria": "PASS: All template functions compatible. FAIL: Config uses functions unsupported by this AM version. WARN: Can't determine AM version. SKIP: Elevation unavailable or AM not deployed.",
+		},
+	}
+
+	if !cc.Client.CanElevate() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Detect AM version
+	amVersion, amSource := detectAMVersion(ctx, cc)
+	r.Details["ocp_version"] = cc.ClusterVersion
+
+	if amVersion == "" {
+		r.Status = checks.StatusWarning
+		r.Message = "Cannot determine Alertmanager version — unable to validate config compatibility"
+		cc.AddResult(r)
+		return
+	}
+
+	r.Details["am_version"] = amVersion
+	r.Details["am_version_source"] = amSource
+
+	// Read the alertmanager-main secret
+	cc.Client.RecordElevatedOp(fmt.Sprintf("[%s] get secrets/alertmanager-main in %s", cc.CurrentCheck, cc.Operator.Namespace))
+	secret, err := cc.Client.ElevatedClientset().CoreV1().Secrets(cc.Operator.Namespace).Get(ctx, "alertmanager-main", metav1.GetOptions{})
+	if err != nil {
+		r.Status = checks.StatusSkip
+		r.Message = "Cannot read alertmanager-main secret"
+		cc.AddResult(r)
+		return
+	}
+
+	configBytes, ok := secret.Data["alertmanager.yaml"]
+	if !ok {
+		r.Status = checks.StatusSkip
+		r.Message = "alertmanager.yaml key not found in alertmanager-main secret"
+		cc.AddResult(r)
+		return
+	}
+
+	configStr := string(configBytes)
+	r.Details["config_size_bytes"] = len(configBytes)
+
+	// Scan for template expressions and check function compatibility
+	expressions := templateExprRe.FindAllStringSubmatch(configStr, -1)
+	r.Details["template_expressions_scanned"] = len(expressions)
+
+	type incompatFunc struct {
+		Function   string `json:"function"`
+		RequiresAM string `json:"requires_am"`
+		ClusterAM  string `json:"cluster_am"`
+		Expression string `json:"expression"`
+	}
+
+	var incompatible []incompatFunc
+	checkedFunctions := map[string]bool{}
+
+	for _, match := range expressions {
+		if len(match) < 2 {
+			continue
+		}
+		expr := match[1]
+
+		// Extract word tokens from the expression that could be function calls
+		words := regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9]*)\b`).FindAllString(expr, -1)
+		for _, word := range words {
+			if checkedFunctions[word] {
+				continue
+			}
+			minVer, tracked := templateFuncMinVersion[word]
+			if !tracked {
+				continue
+			}
+			checkedFunctions[word] = true
+
+			if semverLessThan(amVersion, minVer) {
+				incompatible = append(incompatible, incompatFunc{
+					Function:   word,
+					RequiresAM: minVer,
+					ClusterAM:  amVersion,
+					Expression: truncate(match[0], 80),
+				})
+			}
+		}
+	}
+
+	if len(checkedFunctions) > 0 {
+		funcList := make([]string, 0, len(checkedFunctions))
+		for f := range checkedFunctions {
+			funcList = append(funcList, f)
+		}
+		r.Details["non_baseline_functions"] = funcList
+	}
+
+	// Also check for fleet-wide risk: functions that work on THIS cluster but
+	// would break on older OCP versions still in support
+	oldestSupportedAM := "0.27.0" // OCP 4.17 — oldest currently supported
+	var fleetRisk []incompatFunc
+	for fn := range checkedFunctions {
+		minVer := templateFuncMinVersion[fn]
+		if !semverLessThan(amVersion, minVer) && semverLessThan(oldestSupportedAM, minVer) {
+			fleetRisk = append(fleetRisk, incompatFunc{
+				Function:   fn,
+				RequiresAM: minVer,
+				ClusterAM:  amVersion,
+			})
+		}
+	}
+	if len(fleetRisk) > 0 {
+		r.Details["fleet_risk_functions"] = fleetRisk
+	}
+
+	if len(incompatible) > 0 {
+		r.Details["incompatible_functions"] = incompatible
+		r.Status = checks.StatusFail
+		funcNames := make([]string, len(incompatible))
+		for i, f := range incompatible {
+			funcNames[i] = fmt.Sprintf("%s (requires AM %s+)", f.Function, f.RequiresAM)
+		}
+		r.Message = fmt.Sprintf("Config uses template functions unsupported by AM %s (OCP %s): %s — PD notifications will fail on this cluster",
+			amVersion, cc.ClusterVersion, strings.Join(funcNames, ", "))
+	} else if len(fleetRisk) > 0 {
+		r.Status = checks.StatusWarning
+		funcNames := make([]string, len(fleetRisk))
+		for i, f := range fleetRisk {
+			funcNames[i] = fmt.Sprintf("%s (requires AM %s+, oldest supported OCP has AM %s)", f.Function, f.RequiresAM, oldestSupportedAM)
+		}
+		r.Message = fmt.Sprintf("Config works on this cluster (AM %s) but uses functions incompatible with older supported OCP versions: %s",
+			amVersion, strings.Join(funcNames, ", "))
+	} else if len(expressions) == 0 {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("No template expressions in AM config (AM %s)", amVersion)
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All template functions compatible with AM %s (OCP %s, %d expressions checked)", amVersion, cc.ClusterVersion, len(expressions))
+	}
+
+	cc.AddResult(r)
+}
+
 // checkAlertmanagerLogs analyzes AM pod logs with DNS warning filtering
 func checkAlertmanagerLogs(ctx context.Context, cc *checks.ClusterContext) {
 	cc.SetCheck("alertmanager_logs")
@@ -620,6 +1031,9 @@ func checkAlertmanagerLogs(ctx context.Context, cc *checks.ClusterContext) {
 	totalErrors := 0
 	totalWarnings := 0
 	dnsFiltered := 0
+	templateErrors := 0
+	notifyFailures := 0
+	reloadFailures := 0
 	var errorSamples []string
 
 	for _, pod := range pods.Items {
@@ -630,13 +1044,25 @@ func checkAlertmanagerLogs(ctx context.Context, cc *checks.ClusterContext) {
 
 		for _, line := range strings.Split(logOutput, "\n") {
 			lower := strings.ToLower(line)
-			if strings.Contains(lower, "level=error") {
+			if strings.Contains(lower, "level=error") || strings.Contains(lower, "level=\"error\"") {
 				totalErrors++
+
+				// Detect specific critical patterns
+				if strings.Contains(lower, "failed to template") || strings.Contains(lower, "not defined") {
+					templateErrors++
+				}
+				if strings.Contains(lower, "notify for alerts failed") || strings.Contains(lower, "notify retry canceled") {
+					notifyFailures++
+				}
+				if strings.Contains(lower, "loading configuration") || strings.Contains(lower, "reload") && strings.Contains(lower, "fail") {
+					reloadFailures++
+				}
+
 				if len(errorSamples) < 5 {
 					errorSamples = append(errorSamples, fmt.Sprintf("[%s] %s", pod.Name, truncate(line, 200)))
 				}
 			}
-			if strings.Contains(lower, "level=warn") {
+			if strings.Contains(lower, "level=warn") || strings.Contains(lower, "level=\"warn\"") {
 				if strings.Contains(lower, "no such host") ||
 					strings.Contains(lower, "failed to resolve") && strings.Contains(lower, "alertmanager") {
 					dnsFiltered++
@@ -650,9 +1076,24 @@ func checkAlertmanagerLogs(ctx context.Context, cc *checks.ClusterContext) {
 	r.Details["error_count"] = totalErrors
 	r.Details["warning_count"] = totalWarnings
 	r.Details["dns_warnings_filtered"] = dnsFiltered
+	r.Details["template_errors"] = templateErrors
+	r.Details["notify_failures"] = notifyFailures
+	r.Details["reload_failures"] = reloadFailures
 	r.Details["error_samples"] = errorSamples
 
 	switch {
+	case templateErrors > 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("Template errors in AlertManager logs (%d) — CAMO config uses template functions unsupported by this AM version (e.g., toJson). PagerDuty notifications are failing.", templateErrors)
+	case notifyFailures > 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("Notification failures in AlertManager logs (%d) — alerts are not being delivered to PagerDuty", notifyFailures)
+	case reloadFailures > 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("Config reload failures in AlertManager logs (%d) — running stale configuration", reloadFailures)
 	case totalErrors > 0:
 		r.Status = checks.StatusWarning
 		msg := fmt.Sprintf("Found %d errors and %d warnings in AlertManager logs", totalErrors, totalWarnings)

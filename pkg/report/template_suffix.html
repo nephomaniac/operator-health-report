@@ -385,6 +385,13 @@
             return 'N/A';
         }
 
+        function shortNamespace(ns) {
+            if (!ns) return '—';
+            if (ns.startsWith('ocm-')) return ns.replace(/^ocm-[a-z]+-[a-z0-9]+-/, '');
+            if (ns.startsWith('openshift-')) return ns.replace('openshift-', '');
+            return ns;
+        }
+
         function formatCheckName(checkName) {
             // Custom names for specific checks
             const customNames = {
@@ -398,6 +405,8 @@
                 'reconciliation_behavior': 'Recon Behavior',
                 'configuration_errors': 'Config Errors',
                 'camo_alerting_config': 'Alerting Config',
+                'alertmanager_reload_health': 'AM Reload Health',
+                'alertmanager_config_compatibility': 'AM Config Compat',
                 'alertmanager_secret': 'AM Secret',
                 'camo_configmap': 'CAMO Config',
                 'pagerduty_secret': 'PD Secret',
@@ -494,6 +503,12 @@
                 'hcp_serving_nodes': 'Serving Nodes',
                 'mnmo_metadata_sync': 'Metadata Sync',
                 'rlr_cluster_type': 'Cluster Type',
+                'cluster_dynatrace_artifacts': 'Dynatrace Artifacts',
+                'rhobs_remote_write_health': 'Remote Write',
+                'rhobs_scrape_health': 'Scrape Health',
+                'rhobs_log_collector_metrics': 'Log Collector Metrics',
+                'rhobs_synthetics_agent': 'Synthetics Agent',
+                'rhobs_synthetics_probes': 'Synthetics Probes',
                 'rlr_vector_namespace': 'Vector NS',
                 'rlr_vector_daemonset_health': 'Vector DS',
                 'rlr_version_verification': 'Vector Version',
@@ -505,6 +520,17 @@
                 'rlr_vector_error_rate': 'Error Rate',
                 'rlr_vector_event_loss': 'Event Loss',
                 'rlr_vector_pipeline_ratio': 'Pipeline Health',
+                'rlr_vector_config_tracking': 'Config Tracking',
+                'rlr_vector_daemonset_rollout': 'DS Rollout',
+                'rlr_vector_buffer_events': 'Buffer Events',
+                'rlr_vector_component_throughput': 'Component Throughput',
+                'rlr_vector_component_utilization': 'Component Utilization',
+                'rlr_vector_ingestion_balance': 'Ingestion Balance',
+                'rlr_vector_s3_request_latency': 'S3 Latency',
+                'rlr_hcp_log_forwarding_status': 'HCP Log Forwarding',
+                'rlr_hcp_log_collector': 'HCP Log Collector',
+                'rlr_hcp_log_collector_pods': 'HCP Collector Pods',
+                'rlr_hcp_log_delivery_metrics': 'HCP Log Delivery',
                 'rlr_heartbeat_deployment': 'Heartbeat Deploy',
                 'rlr_heartbeat_pod_health': 'Heartbeat Pod',
                 'rlr_processor_deployment': 'Processor Deploy',
@@ -1641,7 +1667,7 @@
                                         return `<tr style="border-bottom:1px solid #f0f0f0;">
                                             <td style="padding:3px 6px;font-family:var(--font-mono);">${a.alertname}</td>
                                             <td style="padding:3px 6px;color:${color};">${a.severity}</td>
-                                            <td style="padding:3px 6px;font-family:var(--font-mono);font-size:0.9em;">${(a.namespace || '—').replace('openshift-','')}</td>
+                                            <td style="padding:3px 6px;font-family:var(--font-mono);font-size:0.9em;" title="${a.namespace || ''}">${shortNamespace(a.namespace)}</td>
                                             <td style="padding:3px 6px;">${a.paging ? '<span style="background:#dc3545;color:#fff;padding:1px 6px;border-radius:2px;font-size:0.8em;">PAGING</span>' : '—'}</td>
                                         </tr>`;
                                     }).join('')}</tbody>
@@ -2453,8 +2479,7 @@
                                             if (p.not_ready) flags.push('<span style="color:#f5c542;">NotReady</span>');
                                             if (p.mem_ratio) flags.push('<span style="color:#ff9f40;">' + p.mem_ratio + '</span>');
                                             const memColor = (p.mem_mb || 0) > 1024 ? '#dc3545' : (p.mem_mb || 0) > 200 ? '#ff9f40' : '#333';
-                                            const nsParts = (p.namespace || '').split('-');
-                                            const shortNS = nsParts.length > 2 ? nsParts.slice(-1).join('-') : p.namespace;
+                                            const shortNS = shortNamespace(p.namespace);
                                             return '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;overflow:hidden;text-overflow:ellipsis;" title="' + p.pod + '">' + (p.pod || '') + '</div>' +
                                                 '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;color:#888;overflow:hidden;text-overflow:ellipsis;" title="' + p.namespace + '">' + shortNS + '</div>' +
                                                 '<div style="padding:4px 8px;border-bottom:1px solid #e8eaf0;text-align:center;">' + (p.phase || '') + '</div>' +
@@ -2483,7 +2508,7 @@
                                     </tr></thead>
                                     <tbody>
                                     ${check.details.namespace_health.map(ns => {
-                                        const shortNS = ns.namespace.length > 40 ? '...' + ns.namespace.slice(-35) : ns.namespace;
+                                        const shortNS = shortNamespace(ns.namespace);
                                         return '<tr style="border-bottom:1px solid #e8eaf0;">' +
                                             '<td style="padding:4px 8px;" title="' + ns.namespace + '">' + shortNS + '</td>' +
                                             '<td style="padding:4px 8px;text-align:right;">' + ns.total + '</td>' +

@@ -104,6 +104,15 @@ type ClusterMetadata struct {
 	OwnerEmail      string            `json:"owner_email,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	Environment     string            `json:"environment,omitempty"`
+	LogForwarders   []LogForwarderInfo `json:"log_forwarders,omitempty"`
+}
+
+// LogForwarderInfo holds OCM log forwarder configuration for an HCP cluster
+type LogForwarderInfo struct {
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	Status string `json:"status"`
+	Groups []string `json:"groups,omitempty"`
 }
 
 // ClusterOutput is the JSON output for a single cluster+operator check

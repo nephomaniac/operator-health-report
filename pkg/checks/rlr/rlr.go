@@ -2,8 +2,11 @@ package rlr
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -51,9 +54,21 @@ var (
 )
 
 func (c *RLRChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
-	if cc.ClusterType != "management_cluster" {
-		return
+	if cc.ClusterType == "management_cluster" {
+		c.runMCChecks(ctx, cc)
+	} else if cc.Metadata != nil && cc.Metadata.Hypershift {
+		c.runHCPChecks(ctx, cc)
 	}
+}
+
+func (c *RLRChecker) runHCPChecks(ctx context.Context, cc *checks.ClusterContext) {
+	checkHCPLogForwardingStatus(ctx, cc)
+	checkHCPLogCollector(ctx, cc)
+	checkHCPLogCollectorPods(ctx, cc)
+	checkHCPLogDeliveryMetrics(ctx, cc)
+}
+
+func (c *RLRChecker) runMCChecks(ctx context.Context, cc *checks.ClusterContext) {
 
 	// Vector Collector
 	checkVectorNamespace(ctx, cc)
@@ -67,6 +82,15 @@ func (c *RLRChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 	checkVectorErrorRate(ctx, cc)
 	checkVectorEventLoss(ctx, cc)
 	checkVectorPipelineRatio(ctx, cc)
+
+	// Vector Config & Pipeline Analysis
+	checkVectorConfigTracking(ctx, cc)
+	checkVectorDaemonSetRollout(ctx, cc)
+	checkVectorBufferEvents(ctx, cc)
+	checkVectorComponentThroughput(ctx, cc)
+	checkVectorComponentUtilization(ctx, cc)
+	checkVectorIngestionBalance(ctx, cc)
+	checkVectorS3RequestLatency(ctx, cc)
 
 	// Heartbeat
 	checkHeartbeatDeployment(ctx, cc)
@@ -826,6 +850,643 @@ func checkVectorPipelineRatio(ctx context.Context, cc *checks.ClusterContext) {
 	cc.AddResult(r)
 }
 
+// --- Vector Config & Pipeline Analysis Checks ---
+
+func checkVectorConfigTracking(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_vector_config_tracking")
+
+	r := checks.Result{
+		Check:    "rlr_vector_config_tracking",
+		Severity: checks.SeverityInfo,
+		Details: map[string]any{
+			"namespace":     vectorNS,
+			"description":   "Tracks the deployed Vector ConfigMap content hash and key configuration parameters. Enables before/after comparison when OSDFM deploys config changes (e.g., concurrency limits, buffer settings, transform optimizations).",
+			"pass_criteria": "PASS: ConfigMap found with content hash. WARN: ConfigMap empty. SKIP: ConfigMap not found.",
+		},
+	}
+
+	configMapNames := []string{"control-plane-log-forwarding", "vector-config", "control-plane-log-forwarding-config"}
+	var cm *corev1.ConfigMap
+
+	for _, name := range configMapNames {
+		candidate, err := cc.Client.Clientset().CoreV1().ConfigMaps(vectorNS).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			cm = candidate
+			break
+		}
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+	}
+
+	if cm == nil {
+		r.Status = checks.StatusSkip
+		r.Message = "Vector ConfigMap not found — OSDFM may inject config via DaemonSet spec"
+		cc.AddResult(r)
+		return
+	}
+
+	r.Details["configmap_name"] = cm.Name
+	r.Details["resource_version"] = cm.ResourceVersion
+
+	keys := make([]string, 0, len(cm.Data))
+	totalSize := 0
+	var contentBuilder strings.Builder
+	for k, v := range cm.Data {
+		keys = append(keys, k)
+		totalSize += len(v)
+		contentBuilder.WriteString(v)
+	}
+	sort.Strings(keys)
+	r.Details["data_keys"] = keys
+	r.Details["config_size_bytes"] = totalSize
+
+	if totalSize == 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("ConfigMap %s exists but has no data", cm.Name)
+		cc.AddResult(r)
+		return
+	}
+
+	hash := sha256.Sum256([]byte(contentBuilder.String()))
+	r.Details["config_hash"] = hex.EncodeToString(hash[:])
+
+	// Extract key config parameters via simple pattern matching
+	fullConfig := contentBuilder.String()
+	concurrencyRe := regexp.MustCompile(`(?:max_)?concurrency(?:_limit)?\s*[:=]\s*(\d+)`)
+	if m := concurrencyRe.FindStringSubmatch(fullConfig); len(m) > 1 {
+		r.Details["s3_concurrency"] = m[1]
+	}
+	if strings.Contains(fullConfig, "oldest_first") {
+		oldestFirstRe := regexp.MustCompile(`oldest_first\s*[:=]\s*(true|false)`)
+		if m := oldestFirstRe.FindStringSubmatch(fullConfig); len(m) > 1 {
+			r.Details["oldest_first"] = m[1]
+		}
+	}
+	bufferMaxRe := regexp.MustCompile(`max_size\s*[:=]\s*(\d+)`)
+	if m := bufferMaxRe.FindStringSubmatch(fullConfig); len(m) > 1 {
+		r.Details["buffer_max_size"] = m[1]
+	}
+
+	r.Status = checks.StatusPass
+	r.Message = fmt.Sprintf("ConfigMap %s tracked — hash %s, %d bytes", cm.Name, hex.EncodeToString(hash[:8]), totalSize)
+	cc.AddResult(r)
+}
+
+func checkVectorDaemonSetRollout(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_vector_daemonset_rollout")
+
+	r := checks.Result{
+		Check:    "rlr_vector_daemonset_rollout",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     vectorNS,
+			"description":   "Detects whether a Vector DaemonSet rollout is in progress or stuck by comparing generation vs observedGeneration and updated vs desired pod counts. After config changes, all pods must pick up the new config.",
+			"pass_criteria": "PASS: Rollout complete (generation matches, all pods updated). WARN: Rollout in progress or possibly stuck.",
+		},
+	}
+
+	var ds *appsv1.DaemonSet
+	for _, name := range []string{vectorDS, "vector-logs"} {
+		candidate, err := cc.Client.Clientset().AppsV1().DaemonSets(vectorNS).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			ds = candidate
+			break
+		}
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+	}
+
+	if ds == nil {
+		r.Status = checks.StatusSkip
+		r.Message = "Vector DaemonSet not found"
+		cc.AddResult(r)
+		return
+	}
+
+	gen := ds.Generation
+	observedGen := ds.Status.ObservedGeneration
+	desired := ds.Status.DesiredNumberScheduled
+	updated := ds.Status.UpdatedNumberScheduled
+	ready := ds.Status.NumberReady
+
+	r.Details["daemonset"] = ds.Name
+	r.Details["generation"] = gen
+	r.Details["observed_generation"] = observedGen
+	r.Details["desired"] = desired
+	r.Details["updated"] = updated
+	r.Details["ready"] = ready
+	r.Details["pods_pending_update"] = desired - updated
+
+	genMatch := gen == observedGen
+	allUpdated := updated == desired && desired > 0
+	r.Details["generation_match"] = genMatch
+
+	if genMatch && allUpdated {
+		r.Details["rollout_status"] = "complete"
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Rollout complete — %d/%d pods updated, generation %d", updated, desired, gen)
+	} else if !genMatch {
+		r.Details["rollout_status"] = "in_progress"
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Rollout in progress — generation %d, observed %d, %d/%d updated", gen, observedGen, updated, desired)
+	} else {
+		r.Details["rollout_status"] = "in_progress"
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Rollout in progress — %d/%d pods updated (%d pending)", updated, desired, desired-updated)
+	}
+	cc.AddResult(r)
+}
+
+func checkVectorBufferEvents(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_vector_buffer_events")
+
+	r := checks.Result{
+		Check:    "rlr_vector_buffer_events",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     vectorNS,
+			"description":   "Checks the number of events buffered in Vector's disk buffer (not just byte size). High event counts indicate delivery lag — events are queuing faster than S3 can drain them. Complements the byte-based buffer check with a throughput perspective.",
+			"pass_criteria": "PASS: <100k buffered events. WARN: >=100k. FAIL: >=500k. SKIP: Metric not found.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	query := `sum by (pod) (vector_buffer_events{buffer_id="hcp_logs"})`
+	body, err := cc.Client.QueryMetrics(ctx, query)
+	cc.RecordError("Query Vector buffer events", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusUnknown
+		r.Message = fmt.Sprintf("Thanos query failed: %v", err)
+		cc.AddResult(r)
+		return
+	}
+
+	if !thanos.HasResults(body) {
+		r.Status = checks.StatusSkip
+		r.Message = "Metric vector_buffer_events not found — may not be scraped"
+		cc.AddResult(r)
+		return
+	}
+
+	resp, _ := thanos.Parse(body)
+	totalEvents := 0.0
+	maxPod := ""
+	maxEvents := 0.0
+	podCount := 0
+
+	for _, result := range resp.Data.Result {
+		val, ok := thanos.ToFloat(result)
+		if !ok {
+			continue
+		}
+		podCount++
+		totalEvents += val
+		if val > maxEvents {
+			maxEvents = val
+			maxPod = result.Metric["pod"]
+		}
+	}
+
+	r.Details["total_buffered_events"] = int64(totalEvents)
+	r.Details["pod_count"] = podCount
+	if maxPod != "" {
+		r.Details["max_buffered_pod"] = maxPod
+		r.Details["max_buffered_events"] = int64(maxEvents)
+	}
+
+	if totalEvents >= 500000 {
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("Severe event backlog — %d events buffered across %d pods", int64(totalEvents), podCount)
+	} else if totalEvents >= 100000 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Event backlog building — %d events buffered across %d pods", int64(totalEvents), podCount)
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Buffer healthy — %d events across %d pods", int64(totalEvents), podCount)
+	}
+	cc.AddResult(r)
+}
+
+func checkVectorComponentThroughput(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_vector_component_throughput")
+
+	r := checks.Result{
+		Check:    "rlr_vector_component_throughput",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     vectorNS,
+			"description":   "Measures per-component event throughput through Vector's transform pipeline. A sent/received ratio below 1.0 indicates events being dropped within a transform stage. Directly validates transform optimizations like the early-exit timestamp regex guard.",
+			"pass_criteria": "PASS: All components ratio >=0.99. WARN: Any component <0.99. SKIP: Metrics not scraped.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	sentQuery := `sum by (component_id) (rate(vector_component_sent_events_total[5m]))`
+	sentBody, sentErr := cc.Client.QueryMetrics(ctx, sentQuery)
+	cc.RecordError("Query Vector component sent events", sentErr)
+
+	if sentErr != nil {
+		if checks.IsAccessError(sentErr) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusUnknown
+		r.Message = fmt.Sprintf("Thanos query failed: %v", sentErr)
+		cc.AddResult(r)
+		return
+	}
+
+	if !thanos.HasResults(sentBody) {
+		r.Status = checks.StatusSkip
+		r.Message = "Metric vector_component_sent_events_total not found — may not be scraped by ServiceMonitor"
+		cc.AddResult(r)
+		return
+	}
+
+	receivedQuery := `sum by (component_id) (rate(vector_component_received_events_total[5m]))`
+	receivedBody, receivedErr := cc.Client.QueryMetrics(ctx, receivedQuery)
+	cc.RecordError("Query Vector component received events", receivedErr)
+
+	sentResp, _ := thanos.Parse(sentBody)
+	sentMap := make(map[string]float64)
+	for _, result := range sentResp.Data.Result {
+		val, ok := thanos.ToFloat(result)
+		if !ok {
+			continue
+		}
+		sentMap[result.Metric["component_id"]] = val
+	}
+
+	receivedMap := make(map[string]float64)
+	if receivedErr == nil && thanos.HasResults(receivedBody) {
+		receivedResp, _ := thanos.Parse(receivedBody)
+		for _, result := range receivedResp.Data.Result {
+			val, ok := thanos.ToFloat(result)
+			if !ok {
+				continue
+			}
+			receivedMap[result.Metric["component_id"]] = val
+		}
+	}
+
+	type componentStats struct {
+		Sent     float64 `json:"sent_rate"`
+		Received float64 `json:"received_rate"`
+		Ratio    float64 `json:"ratio"`
+	}
+	components := make(map[string]componentStats)
+	degraded := []string{}
+
+	allIDs := make(map[string]bool)
+	for id := range sentMap {
+		allIDs[id] = true
+	}
+	for id := range receivedMap {
+		allIDs[id] = true
+	}
+
+	// Sinks, sources, and metrics exporters naturally have different in/out ratios —
+	// only flag ratio degradation for transform (remap) components
+	isTransform := func(id string) bool {
+		skip := []string{"prometheus", "output_", "input_", "hcp_logs", "pipeline_"}
+		for _, prefix := range skip {
+			if strings.HasPrefix(id, prefix) || strings.Contains(id, prefix) {
+				return false
+			}
+		}
+		return true
+	}
+
+	for id := range allIDs {
+		sent := sentMap[id]
+		received := receivedMap[id]
+		ratio := 1.0
+		if received > 0 {
+			ratio = sent / received
+		}
+		cs := componentStats{
+			Sent:     thanos.Round(sanitizeFloat(sent), 2),
+			Received: thanos.Round(sanitizeFloat(received), 2),
+			Ratio:    thanos.Round(sanitizeFloat(ratio), 4),
+		}
+		components[id] = cs
+		if ratio < 0.99 && received > 0 && isTransform(id) {
+			degraded = append(degraded, fmt.Sprintf("%s (%.4f)", id, ratio))
+		}
+	}
+
+	r.Details["components"] = components
+	r.Details["component_count"] = len(components)
+	if len(degraded) > 0 {
+		r.Details["degraded_components"] = degraded
+	}
+
+	if len(degraded) > 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d component(s) with event loss: %s", len(degraded), strings.Join(degraded, ", "))
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d components healthy — no event loss in transforms", len(components))
+	}
+	cc.AddResult(r)
+}
+
+func checkVectorComponentUtilization(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_vector_component_utilization")
+
+	r := checks.Result{
+		Check:    "rlr_vector_component_utilization",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     vectorNS,
+			"description":   "Checks Vector component utilization (0.0=idle, 1.0=saturated). Saturated components are pipeline bottlenecks. Directly measures whether transform optimizations, round-robin reading, or S3 concurrency changes relieve bottlenecks.",
+			"pass_criteria": "PASS: All <0.80. WARN: Any >=0.80. FAIL: Any >=0.95. SKIP: Metric not found.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	query := `max by (component_id) (vector_utilization)`
+	body, err := cc.Client.QueryMetrics(ctx, query)
+	cc.RecordError("Query Vector component utilization", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusUnknown
+		r.Message = fmt.Sprintf("Thanos query failed: %v", err)
+		cc.AddResult(r)
+		return
+	}
+
+	if !thanos.HasResults(body) {
+		r.Status = checks.StatusSkip
+		r.Message = "Metric vector_utilization not found — may not be exposed by this Vector version"
+		cc.AddResult(r)
+		return
+	}
+
+	resp, _ := thanos.Parse(body)
+	utilMap := make(map[string]float64)
+	maxUtil := 0.0
+	maxComponent := ""
+	saturated := []string{}
+	critical := []string{}
+
+	for _, result := range resp.Data.Result {
+		val, ok := thanos.ToFloat(result)
+		if !ok {
+			continue
+		}
+		id := result.Metric["component_id"]
+		utilMap[id] = thanos.Round(sanitizeFloat(val), 4)
+		if val > maxUtil {
+			maxUtil = val
+			maxComponent = id
+		}
+		if val >= 0.95 {
+			critical = append(critical, fmt.Sprintf("%s (%.2f)", id, val))
+		} else if val >= 0.80 {
+			saturated = append(saturated, fmt.Sprintf("%s (%.2f)", id, val))
+		}
+	}
+
+	r.Details["utilization"] = utilMap
+	r.Details["component_count"] = len(utilMap)
+	r.Details["max_utilization"] = thanos.Round(sanitizeFloat(maxUtil), 4)
+	r.Details["max_component"] = maxComponent
+	if len(saturated) > 0 {
+		r.Details["saturated_components"] = saturated
+	}
+	if len(critical) > 0 {
+		r.Details["critical_components"] = critical
+	}
+
+	if len(critical) > 0 {
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("%d component(s) at critical utilization (>=0.95): %s", len(critical), strings.Join(critical, ", "))
+	} else if len(saturated) > 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d component(s) approaching saturation (>=0.80): %s", len(saturated), strings.Join(saturated, ", "))
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("All %d components below 0.80 utilization (max: %s at %.2f)", len(utilMap), maxComponent, maxUtil)
+	}
+	cc.AddResult(r)
+}
+
+func checkVectorIngestionBalance(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_vector_ingestion_balance")
+
+	r := checks.Result{
+		Check:    "rlr_vector_ingestion_balance",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     vectorNS,
+			"description":   "Analyzes per-HCP ingestion rate distribution to detect noisy neighbor scenarios. Uses coefficient of variation (CV) and max share to measure fairness. Round-robin file reading should produce more balanced ingestion vs oldest-first.",
+			"pass_criteria": "PASS: CV <1.5. WARN: CV >=1.5 AND top cluster >40% share. SKIP: <3 clusters.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	query := `vector:cluster:ingestion_rate`
+	body, err := cc.Client.QueryMetrics(ctx, query)
+	cc.RecordError("Query per-cluster ingestion rate", err)
+
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusUnknown
+		r.Message = fmt.Sprintf("Thanos query failed: %v", err)
+		cc.AddResult(r)
+		return
+	}
+
+	if !thanos.HasResults(body) {
+		r.Status = checks.StatusSkip
+		r.Message = "Recording rule vector:cluster:ingestion_rate not found"
+		cc.AddResult(r)
+		return
+	}
+
+	resp, _ := thanos.Parse(body)
+	var rates []float64
+	var maxRate float64
+	var maxCluster string
+	var minRate = math.MaxFloat64
+	var minCluster string
+	total := 0.0
+
+	for _, result := range resp.Data.Result {
+		val, ok := thanos.ToFloat(result)
+		if !ok || val <= 0 {
+			continue
+		}
+		rates = append(rates, val)
+		total += val
+		ns := result.Metric["pod_namespace"]
+		if ns == "" {
+			ns = result.Metric["namespace"]
+		}
+		if val > maxRate {
+			maxRate = val
+			maxCluster = ns
+		}
+		if val < minRate {
+			minRate = val
+			minCluster = ns
+		}
+	}
+
+	if len(rates) < 3 {
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Only %d clusters reporting — too few for distribution analysis", len(rates))
+		cc.AddResult(r)
+		return
+	}
+
+	mean := total / float64(len(rates))
+	var sumSquares float64
+	for _, v := range rates {
+		sumSquares += (v - mean) * (v - mean)
+	}
+	stddev := math.Sqrt(sumSquares / float64(len(rates)))
+	cv := stddev / mean
+	maxSharePct := (maxRate / total) * 100
+
+	r.Details["cluster_count"] = len(rates)
+	r.Details["mean_rate"] = thanos.Round(sanitizeFloat(mean), 2)
+	r.Details["stddev"] = thanos.Round(sanitizeFloat(stddev), 2)
+	r.Details["coefficient_of_variation"] = thanos.Round(sanitizeFloat(cv), 4)
+	r.Details["max_rate_cluster"] = maxCluster
+	r.Details["max_rate"] = thanos.Round(sanitizeFloat(maxRate), 2)
+	r.Details["max_share_percent"] = thanos.Round(sanitizeFloat(maxSharePct), 1)
+	r.Details["min_rate_cluster"] = minCluster
+	r.Details["min_rate"] = thanos.Round(sanitizeFloat(minRate), 2)
+
+	if cv >= 1.5 && maxSharePct > 40 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Ingestion skewed — %s consumes %.1f%% of total (CV: %.2f across %d clusters)", maxCluster, maxSharePct, cv, len(rates))
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Ingestion balanced — CV %.2f across %d clusters (max share: %.1f%%)", cv, len(rates), maxSharePct)
+	}
+	cc.AddResult(r)
+}
+
+func checkVectorS3RequestLatency(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_vector_s3_request_latency")
+
+	r := checks.Result{
+		Check:    "rlr_vector_s3_request_latency",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     vectorNS,
+			"description":   "Monitors S3 API request latency percentiles. High latency indicates S3 throttling (possibly from increased concurrency) or regional issues. Root cause indicator for write ratio degradation and buffer growth.",
+			"pass_criteria": "PASS: p99 <5s AND p50 <1s. WARN: p99 >=5s or p50 >=1s. FAIL: p99 >=15s. SKIP: HTTP client histogram not found.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Try multiple histogram metric names — Vector versions vary
+	histogramNames := []string{
+		"vector_http_client_response_rtt_seconds_bucket",
+		"vector_http_client_responses_duration_seconds_bucket",
+	}
+
+	var p99, p50 float64
+	var foundMetric string
+
+	for _, metricName := range histogramNames {
+		p99Query := fmt.Sprintf(`histogram_quantile(0.99, sum by (le) (rate(%s[5m])))`, metricName)
+		p99Body, err := cc.Client.QueryMetrics(ctx, p99Query)
+		if err != nil {
+			if checks.IsAccessError(err) {
+				cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+				return
+			}
+			continue
+		}
+		if !thanos.HasResults(p99Body) {
+			continue
+		}
+
+		val, ok := thanos.InstantFloat(p99Body)
+		if !ok {
+			continue
+		}
+		p99 = val
+		foundMetric = metricName
+
+		p50Query := fmt.Sprintf(`histogram_quantile(0.50, sum by (le) (rate(%s[5m])))`, metricName)
+		p50Body, p50Err := cc.Client.QueryMetrics(ctx, p50Query)
+		if p50Err == nil && thanos.HasResults(p50Body) {
+			if v, ok := thanos.InstantFloat(p50Body); ok {
+				p50 = v
+			}
+		}
+		break
+	}
+
+	if foundMetric == "" {
+		r.Status = checks.StatusSkip
+		r.Message = "HTTP client histogram metrics not found — Vector may not expose S3 request latency"
+		cc.AddResult(r)
+		return
+	}
+
+	r.Details["metric"] = foundMetric
+	r.Details["p99_seconds"] = thanos.Round(sanitizeFloat(p99), 3)
+	r.Details["p50_seconds"] = thanos.Round(sanitizeFloat(p50), 3)
+
+	if p99 >= 15 {
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("S3 latency critical — p99: %.1fs, p50: %.3fs (likely throttling)", p99, p50)
+	} else if p99 >= 5 || p50 >= 1 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("S3 latency elevated — p99: %.1fs, p50: %.3fs", p99, p50)
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("S3 latency healthy — p99: %.3fs, p50: %.3fs", p99, p50)
+	}
+	cc.AddResult(r)
+}
+
 // --- Heartbeat Checks ---
 
 func checkHeartbeatDeployment(ctx context.Context, cc *checks.ClusterContext) {
@@ -1285,6 +1946,312 @@ func checkActiveAlerts(ctx context.Context, cc *checks.ClusterContext) {
 	cc.AddResult(r)
 }
 
+// --- HCP Data Plane Log Forwarding Checks ---
+
+const hcpLoggingNS = "openshift-logging"
+
+func checkHCPLogForwardingStatus(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_hcp_log_forwarding_status")
+
+	r := checks.Result{
+		Check:    "rlr_hcp_log_forwarding_status",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Checks if ROSA HCP log forwarding is configured via the OCM API (control_plane/log_forwarders). ROSA log forwarding routes HCP control plane logs from the MC Vector pipeline through S3/Lambda to customer CloudWatch or S3 destinations. The entire pipeline runs on the MC — no components are deployed on the HCP data plane.",
+			"pass_criteria": "PASS: Log forwarder(s) configured with status 'ready'. WARN: Log forwarder(s) configured but not ready. INFO: No log forwarders configured.",
+		},
+	}
+
+	if cc.Metadata == nil || len(cc.Metadata.LogForwarders) == 0 {
+		r.Status = checks.StatusInfo
+		r.Message = "No ROSA log forwarders configured — HCP log forwarding not enabled"
+		cc.AddResult(r)
+		return
+	}
+
+	forwarders := cc.Metadata.LogForwarders
+	r.Details["forwarder_count"] = len(forwarders)
+
+	var lfDetails []map[string]any
+	readyCount := 0
+	notReady := []string{}
+
+	for _, lf := range forwarders {
+		detail := map[string]any{
+			"id":     lf.ID,
+			"type":   lf.Type,
+			"status": lf.Status,
+			"groups": lf.Groups,
+		}
+		lfDetails = append(lfDetails, detail)
+
+		if lf.Status == "ready" {
+			readyCount++
+		} else {
+			notReady = append(notReady, fmt.Sprintf("%s (%s: %s)", lf.ID, lf.Type, lf.Status))
+		}
+	}
+
+	r.Details["log_forwarders"] = lfDetails
+	r.Details["ready_count"] = readyCount
+
+	// Summarize types
+	types := map[string]int{}
+	for _, lf := range forwarders {
+		types[lf.Type]++
+	}
+	var typeSummary []string
+	for t, c := range types {
+		typeSummary = append(typeSummary, fmt.Sprintf("%d %s", c, t))
+	}
+	r.Details["type_summary"] = strings.Join(typeSummary, ", ")
+
+	if len(notReady) > 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("%d/%d log forwarder(s) not ready: %s", len(notReady), len(forwarders), strings.Join(notReady, ", "))
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("%d log forwarder(s) configured and ready (%s)", len(forwarders), strings.Join(typeSummary, ", "))
+	}
+	cc.AddResult(r)
+}
+
+func checkHCPLogCollector(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_hcp_log_collector")
+
+	r := checks.Result{
+		Check:    "rlr_hcp_log_collector",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"namespace":     hcpLoggingNS,
+			"description":   "Checks the log collector DaemonSet health on the HCP cluster. The collector (Vector or Fluentd) is deployed by the cluster-logging-operator when a ClusterLogForwarder is configured. All worker nodes should have a collector pod.",
+			"pass_criteria": "PASS: Collector DS found, all pods ready. WARN: Degraded (not all ready). SKIP: No collector DS found.",
+		},
+	}
+
+	dsList, err := cc.Client.Clientset().AppsV1().DaemonSets(hcpLoggingNS).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Cannot list DaemonSets in %s: %v", hcpLoggingNS, err)
+		cc.AddResult(r)
+		return
+	}
+
+	var collectorDS *appsv1.DaemonSet
+	collectorPatterns := []string{"collector", "vector", "fluentd"}
+	for i := range dsList.Items {
+		dsName := strings.ToLower(dsList.Items[i].Name)
+		for _, pattern := range collectorPatterns {
+			if strings.Contains(dsName, pattern) {
+				collectorDS = &dsList.Items[i]
+				break
+			}
+		}
+		if collectorDS != nil {
+			break
+		}
+	}
+
+	if collectorDS == nil {
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("No log collector DaemonSet found in %s — CLF may not be configured", hcpLoggingNS)
+		cc.AddResult(r)
+		return
+	}
+
+	desired := collectorDS.Status.DesiredNumberScheduled
+	ready := collectorDS.Status.NumberReady
+	misscheduled := collectorDS.Status.NumberMisscheduled
+
+	r.Details["daemonset"] = collectorDS.Name
+	r.Details["desired"] = desired
+	r.Details["ready"] = ready
+	r.Details["misscheduled"] = misscheduled
+
+	if ready == desired && misscheduled == 0 && desired > 0 {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Log collector %s healthy — %d/%d ready", collectorDS.Name, ready, desired)
+	} else if desired == 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Log collector %s has 0 desired pods", collectorDS.Name)
+	} else {
+		r.Status = checks.StatusWarning
+		parts := []string{fmt.Sprintf("%d/%d ready", ready, desired)}
+		if misscheduled > 0 {
+			parts = append(parts, fmt.Sprintf("%d misscheduled", misscheduled))
+		}
+		r.Message = fmt.Sprintf("Log collector %s degraded — %s", collectorDS.Name, strings.Join(parts, ", "))
+	}
+	cc.AddResult(r)
+}
+
+func checkHCPLogCollectorPods(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_hcp_log_collector_pods")
+
+	r := checks.Result{
+		Check:    "rlr_hcp_log_collector_pods",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     hcpLoggingNS,
+			"description":   "Checks individual log collector pod health — restarts, OOM kills, crashlooping containers. High restarts may indicate configuration errors, resource limits, or destination connectivity issues.",
+			"pass_criteria": "PASS: All pods running, restarts <=10. WARN: High restarts or crashlooping. SKIP: No collector pods.",
+		},
+	}
+
+	pods, err := cc.Client.GetPods(ctx, hcpLoggingNS, "")
+	if err != nil {
+		if checks.IsAccessError(err) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Cannot list pods in %s: %v", hcpLoggingNS, err)
+		cc.AddResult(r)
+		return
+	}
+
+	// Filter to collector pods
+	var collectorPods []corev1.Pod
+	for _, pod := range pods.Items {
+		name := strings.ToLower(pod.Name)
+		if strings.Contains(name, "collector") || strings.Contains(name, "vector") || strings.Contains(name, "fluentd") {
+			collectorPods = append(collectorPods, pod)
+		}
+	}
+
+	if len(collectorPods) == 0 {
+		r.Status = checks.StatusSkip
+		r.Message = "No log collector pods found"
+		cc.AddResult(r)
+		return
+	}
+
+	totalRestarts := int32(0)
+	crashlooping := 0
+	maxRestartPod := ""
+	maxRestarts := int32(0)
+
+	for _, pod := range collectorPods {
+		for _, cs := range pod.Status.ContainerStatuses {
+			totalRestarts += cs.RestartCount
+			if cs.RestartCount > maxRestarts {
+				maxRestarts = cs.RestartCount
+				maxRestartPod = pod.Name
+			}
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+				crashlooping++
+			}
+		}
+	}
+
+	r.Details["pod_count"] = len(collectorPods)
+	r.Details["total_restarts"] = totalRestarts
+	r.Details["crashlooping"] = crashlooping
+	if maxRestartPod != "" {
+		r.Details["max_restart_pod"] = maxRestartPod
+		r.Details["max_restart_count"] = maxRestarts
+	}
+	if problematic := checks.ProblematicPods(collectorPods); len(problematic) > 0 {
+		r.Details["failing_pods"] = problematic
+	}
+
+	if crashlooping > 0 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Log collector crashlooping — %d pod(s), %d total restarts", crashlooping, totalRestarts)
+	} else if totalRestarts > 10 {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Log collector high restarts — %d across %d pods (max: %s with %d)", totalRestarts, len(collectorPods), maxRestartPod, maxRestarts)
+	} else {
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Log collector pods healthy — %d pods, %d restarts", len(collectorPods), totalRestarts)
+	}
+	cc.AddResult(r)
+}
+
+func checkHCPLogDeliveryMetrics(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rlr_hcp_log_delivery_metrics")
+
+	r := checks.Result{
+		Check:    "rlr_hcp_log_delivery_metrics",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"namespace":     hcpLoggingNS,
+			"description":   "Checks log delivery health via Vector component metrics on the HCP cluster. Validates that logs are being collected and forwarded to configured destinations without excessive errors or buffer growth.",
+			"pass_criteria": "PASS: Events flowing, error rate <1%. WARN: High error rate, zero throughput, or buffer growth. SKIP: Metrics not available.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	outputQuery := fmt.Sprintf(`sum(rate(vector_component_sent_events_total{namespace="%s",component_type="sink"}[5m]))`, hcpLoggingNS)
+	outputBody, outputErr := cc.Client.QueryMetrics(ctx, outputQuery)
+
+	errorQuery := fmt.Sprintf(`sum(rate(vector_component_errors_total{namespace="%s"}[5m]))`, hcpLoggingNS)
+	errorBody, errorErr := cc.Client.QueryMetrics(ctx, errorQuery)
+
+	if outputErr != nil && errorErr != nil {
+		if checks.IsAccessError(outputErr) {
+			cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+			return
+		}
+		r.Status = checks.StatusSkip
+		r.Message = "Log delivery metrics not available"
+		cc.AddResult(r)
+		return
+	}
+
+	outputRate := 0.0
+	errorRate := 0.0
+	if outputErr == nil && thanos.HasResults(outputBody) {
+		outputRate, _ = thanos.InstantFloat(outputBody)
+	}
+	if errorErr == nil && thanos.HasResults(errorBody) {
+		errorRate, _ = thanos.InstantFloat(errorBody)
+	}
+
+	r.Details["output_rate_per_sec"] = thanos.Round(sanitizeFloat(outputRate), 2)
+	r.Details["error_rate_per_sec"] = thanos.Round(sanitizeFloat(errorRate), 4)
+
+	errorPct := 0.0
+	if outputRate > 0 {
+		errorPct = (errorRate / outputRate) * 100
+	}
+	r.Details["error_percent"] = thanos.Round(sanitizeFloat(errorPct), 2)
+
+	// Check buffer usage
+	bufferQuery := fmt.Sprintf(`max(vector_buffer_byte_size{namespace="%s"})`, hcpLoggingNS)
+	bufferBody, bufferErr := cc.Client.QueryMetrics(ctx, bufferQuery)
+	bufferBytes := 0.0
+	if bufferErr == nil && thanos.HasResults(bufferBody) {
+		bufferBytes, _ = thanos.InstantFloat(bufferBody)
+	}
+	r.Details["buffer_bytes"] = int64(sanitizeFloat(bufferBytes))
+	r.Details["buffer_mb"] = thanos.Round(sanitizeFloat(bufferBytes/(1024*1024)), 1)
+
+	switch {
+	case outputRate == 0 && errorRate == 0 && bufferBytes == 0:
+		r.Status = checks.StatusSkip
+		r.Message = "No log delivery metrics found — collector may not expose Vector metrics"
+	case outputRate == 0 && (errorRate > 0 || bufferBytes > 0):
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Zero output rate but errors present (%.4f/sec) or buffer growing (%.1f MB)", errorRate, bufferBytes/(1024*1024))
+	case errorPct > 5:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Log delivery errors elevated — %.0f events/sec output, %.2f%% error rate", outputRate, errorPct)
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Log delivery healthy — %.0f events/sec, %.2f%% error rate, %.1f MB buffered", outputRate, errorPct, bufferBytes/(1024*1024))
+	}
+	cc.AddResult(r)
+}
+
 func topNSeriesByPeak(series []thanos.LabeledTimeseries, n int) []thanos.LabeledTimeseries {
 	if len(series) <= n {
 		return series
@@ -1514,6 +2481,39 @@ func collectVectorTimeseries(ctx context.Context, cc *checks.ClusterContext) {
 			r.Details["peak_cpu_millicores"] = thanos.Round(sanitizeFloat(peak*1000), 0)
 			_, _, pctChange := thanos.Trend(points)
 			r.Details["cpu_increase_percent"] = thanos.Round(sanitizeFloat(pctChange), 2)
+		}
+	}
+
+	// Component utilization over time — shows before/after impact of transform optimizations
+	utilizationQuery := `avg by (component_id) (vector_utilization)`
+	if utilData, err := cc.Client.QueryMetricsRange(ctx, utilizationQuery, start, now, step); err == nil {
+		componentLabel := func(m map[string]string) string { return m["component_id"] }
+		if series, _ := thanos.PerSeriesTimeseries(utilData, componentLabel); len(series) > 0 {
+			r.Details["utilization_total_components"] = len(series)
+			r.Details["utilization_timeseries_by_component"] = topNSeriesByPeak(series, maxChartSeries)
+			seriesCollected++
+		}
+	}
+
+	// Buffer event count over time — shows S3 concurrency drain effectiveness
+	bufferEventsQuery := `sum(vector_buffer_events{buffer_id="hcp_logs"})`
+	if bufEvtData, err := cc.Client.QueryMetricsRange(ctx, bufferEventsQuery, start, now, step); err == nil {
+		if points, _ := thanos.Timeseries(bufEvtData); len(points) > 0 {
+			r.Details["buffer_events_timeseries"] = thanos.PointsToJSON(points)
+			peak := thanos.Peak(points)
+			r.Details["buffer_events_peak"] = int64(sanitizeFloat(peak))
+			seriesCollected++
+		}
+	}
+
+	// Per-component throughput over time — most directly shows config change impact
+	componentRateQuery := `sum by (component_id) (rate(vector_component_sent_events_total[5m]))`
+	if compData, err := cc.Client.QueryMetricsRange(ctx, componentRateQuery, start, now, step); err == nil {
+		componentLabel := func(m map[string]string) string { return m["component_id"] }
+		if series, _ := thanos.PerSeriesTimeseries(compData, componentLabel); len(series) > 0 {
+			r.Details["component_throughput_total"] = len(series)
+			r.Details["component_throughput_timeseries"] = topNSeriesByPeak(series, maxChartSeries)
+			seriesCollected++
 		}
 	}
 

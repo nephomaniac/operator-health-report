@@ -421,6 +421,40 @@ func (c *Client) GetClusterMetadata(clusterID string) (*ClusterMeta, error) {
 		Environment:    c.env,
 	}
 
+	// Fetch log forwarders for HCP clusters
+	if meta.Hypershift {
+		lfResp, lfErr := c.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).ControlPlane().LogForwarders().List().Send()
+		if lfErr == nil && lfResp != nil {
+			lfResp.Items().Each(func(lf *cmv1.LogForwarder) bool {
+				lfType := "unknown"
+				if _, ok := lf.GetS3(); ok {
+					lfType = "S3"
+				} else if _, ok := lf.GetCloudwatch(); ok {
+					lfType = "CloudWatch"
+				}
+				status := "unknown"
+				if s, ok := lf.GetStatus(); ok {
+					status = string(s.State())
+				}
+				var groups []string
+				if gs, ok := lf.GetGroups(); ok {
+					for _, g := range gs {
+						if id, ok := g.GetID(); ok {
+							groups = append(groups, id)
+						}
+					}
+				}
+				meta.LogForwarders = append(meta.LogForwarders, LogForwarderMeta{
+					ID:     lf.ID(),
+					Type:   lfType,
+					Status: status,
+					Groups: groups,
+				})
+				return true
+			})
+		}
+	}
+
 	// Fetch subscription for owner info
 	subID, _ := cl.Subscription().GetID()
 	if subID != "" {
@@ -460,11 +494,19 @@ type ClusterMeta struct {
 	ExistingVPC    bool   `json:"existing_vpc"`
 	ChannelGroup   string `json:"channel_group"`
 	LimitedSupport bool   `json:"limited_support"`
-	Shard          string            `json:"shard"`
-	OwnerOrg       string            `json:"owner_org,omitempty"`
-	OwnerEmail     string            `json:"owner_email,omitempty"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	Environment    string            `json:"environment,omitempty"`
+	Shard          string              `json:"shard"`
+	OwnerOrg       string              `json:"owner_org,omitempty"`
+	OwnerEmail     string              `json:"owner_email,omitempty"`
+	Labels         map[string]string   `json:"labels,omitempty"`
+	Environment    string              `json:"environment,omitempty"`
+	LogForwarders  []LogForwarderMeta  `json:"log_forwarders,omitempty"`
+}
+
+type LogForwarderMeta struct {
+	ID     string   `json:"id"`
+	Type   string   `json:"type"`
+	Status string   `json:"status"`
+	Groups []string `json:"groups,omitempty"`
 }
 
 func (c *Client) wrapError(operation string, err error) error {

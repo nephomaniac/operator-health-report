@@ -105,6 +105,8 @@ func (c *MCCChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) {
 		checkManagedBootImages(ctx, cc)
 		checkAMIConsistency(ctx, cc)
 	}
+
+	checkDynatraceArtifacts(ctx, cc)
 }
 
 func nodeRole(node *corev1.Node) string {
@@ -460,6 +462,31 @@ func checkNodeCounts(ctx context.Context, cc *checks.ClusterContext) {
 
 	// MC/SC clusters have different expectations
 	isMCSC := cc.ClusterType == "management_cluster" || cc.ClusterType == "service_cluster"
+	isHCP := cc.Metadata != nil && cc.Metadata.Hypershift
+
+	r.Details["master_count"] = masterCount
+	r.Details["infra_count"] = infraCount
+	r.Details["worker_count"] = workerCount
+	r.Details["multi_az"] = multiAZ
+	r.Details["cluster_type"] = cc.ClusterType
+	r.Details["is_hcp"] = isHCP
+
+	// HCP clusters have no master or infra nodes on the data plane —
+	// control plane is hosted on the MC, workers are the only expected nodes
+	if isHCP {
+		expectedWorkerMin := 2
+		r.Details["expected_worker_min"] = expectedWorkerMin
+
+		if workerCount < expectedWorkerMin {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("HCP worker count below minimum — %d workers (min %d)", workerCount, expectedWorkerMin)
+		} else {
+			r.Status = checks.StatusPass
+			r.Message = fmt.Sprintf("HCP node counts healthy — %d workers (no masters/infra expected)", workerCount)
+		}
+		cc.AddResult(r)
+		return
+	}
 
 	expectedMasters := 3
 	expectedInfraMin := 2
@@ -472,11 +499,6 @@ func checkNodeCounts(ctx context.Context, cc *checks.ClusterContext) {
 		expectedWorkerMin = 3
 	}
 
-	r.Details["master_count"] = masterCount
-	r.Details["infra_count"] = infraCount
-	r.Details["worker_count"] = workerCount
-	r.Details["multi_az"] = multiAZ
-	r.Details["cluster_type"] = cc.ClusterType
 	r.Details["expected_masters"] = expectedMasters
 	r.Details["expected_infra_min"] = expectedInfraMin
 	r.Details["expected_worker_min"] = expectedWorkerMin
@@ -1459,4 +1481,163 @@ func firstKey(m map[string]int) string {
 		return k
 	}
 	return ""
+}
+
+var (
+	dynakubeGVR = schema.GroupVersionResource{
+		Group: "dynatrace.com", Version: "v1beta1", Resource: "dynakubes",
+	}
+)
+
+func checkDynatraceArtifacts(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("cluster_dynatrace_artifacts")
+
+	r := checks.Result{
+		Check:    "cluster_dynatrace_artifacts",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Detects remaining Dynatrace resources after DT decommission from INT/staging/prod. Checks for namespace, CRDs, DaemonSets, deployments, secrets, and PrometheusRules that reference Dynatrace. Orphaned artifacts can cause spurious alerts and waste resources.",
+			"pass_criteria": "PASS: No Dynatrace artifacts found (fully decommissioned). INFO: Dynatrace artifacts present (expected if removal still in progress). WARN: Partial removal — some artifacts remain after namespace deleted.",
+		},
+	}
+
+	artifacts := map[string]any{}
+
+	// Check for dynatrace namespace
+	dtNamespaces := []string{"dynatrace", "openshift-dynatrace"}
+	var foundNS []string
+	for _, ns := range dtNamespaces {
+		phase, err := cc.Client.GetNamespacePhase(ctx, ns)
+		if err == nil {
+			foundNS = append(foundNS, fmt.Sprintf("%s (%s)", ns, phase))
+		}
+	}
+	if len(foundNS) > 0 {
+		artifacts["namespaces"] = foundNS
+	}
+
+	// Check for Dynatrace CRDs
+	crdGVR := schema.GroupVersionResource{
+		Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions",
+	}
+	crdList, err := cc.Client.ListResources(ctx, crdGVR, "", false)
+	if err == nil && crdList != nil {
+		var dtCRDs []string
+		for _, crd := range crdList.Items {
+			name := crd.GetName()
+			if strings.Contains(strings.ToLower(name), "dynatrace") {
+				dtCRDs = append(dtCRDs, name)
+			}
+		}
+		if len(dtCRDs) > 0 {
+			artifacts["crds"] = dtCRDs
+		}
+	}
+
+	// Check for DynakuBe CRs (if CRD exists)
+	dkList, err := cc.Client.ListResources(ctx, dynakubeGVR, "", false)
+	if err == nil && dkList != nil && len(dkList.Items) > 0 {
+		var dkNames []string
+		for _, dk := range dkList.Items {
+			dkNames = append(dkNames, fmt.Sprintf("%s/%s", dk.GetNamespace(), dk.GetName()))
+		}
+		artifacts["dynakube_crs"] = dkNames
+	}
+
+	// Check for Dynatrace pods/deployments in known namespaces
+	for _, ns := range dtNamespaces {
+		pods, err := cc.Client.GetPods(ctx, ns, "")
+		if err == nil && len(pods.Items) > 0 {
+			var podNames []string
+			for _, p := range pods.Items {
+				podNames = append(podNames, fmt.Sprintf("%s (%s)", p.Name, p.Status.Phase))
+			}
+			artifacts["pods_"+ns] = podNames
+		}
+
+		deps, err := cc.Client.Clientset().AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
+		if err == nil && len(deps.Items) > 0 {
+			var depNames []string
+			for _, d := range deps.Items {
+				depNames = append(depNames, fmt.Sprintf("%s (%d/%d ready)", d.Name, d.Status.ReadyReplicas, d.Status.Replicas))
+			}
+			artifacts["deployments_"+ns] = depNames
+		}
+
+		dsList, err := cc.Client.Clientset().AppsV1().DaemonSets(ns).List(ctx, metav1.ListOptions{})
+		if err == nil && len(dsList.Items) > 0 {
+			var dsNames []string
+			for _, ds := range dsList.Items {
+				dsNames = append(dsNames, fmt.Sprintf("%s (%d/%d ready)", ds.Name, ds.Status.NumberReady, ds.Status.DesiredNumberScheduled))
+			}
+			artifacts["daemonsets_"+ns] = dsNames
+		}
+	}
+
+	// Check for Dynatrace PrometheusRules in openshift-monitoring
+	prGVR := schema.GroupVersionResource{
+		Group: "monitoring.coreos.com", Version: "v1", Resource: "prometheusrules",
+	}
+	prList, err := cc.Client.ListResources(ctx, prGVR, "openshift-monitoring", false)
+	if err == nil && prList != nil {
+		var dtRules []string
+		for _, pr := range prList.Items {
+			name := pr.GetName()
+			if strings.Contains(strings.ToLower(name), "dynatrace") {
+				dtRules = append(dtRules, name)
+			}
+		}
+		if len(dtRules) > 0 {
+			artifacts["prometheusrules"] = dtRules
+		}
+	}
+
+	// Check for Dynatrace ServiceMonitors
+	smGVR := schema.GroupVersionResource{
+		Group: "monitoring.coreos.com", Version: "v1", Resource: "servicemonitors",
+	}
+	for _, ns := range []string{"openshift-monitoring", "dynatrace", "openshift-dynatrace"} {
+		smList, err := cc.Client.ListResources(ctx, smGVR, ns, false)
+		if err == nil && smList != nil {
+			for _, sm := range smList.Items {
+				name := sm.GetName()
+				if strings.Contains(strings.ToLower(name), "dynatrace") {
+					if artifacts["servicemonitors"] == nil {
+						artifacts["servicemonitors"] = []string{}
+					}
+					artifacts["servicemonitors"] = append(artifacts["servicemonitors"].([]string), fmt.Sprintf("%s/%s", ns, name))
+				}
+			}
+		}
+	}
+
+	r.Details["artifacts_found"] = len(artifacts)
+
+	if len(artifacts) == 0 {
+		r.Status = checks.StatusPass
+		r.Message = "No Dynatrace artifacts found — fully decommissioned"
+		cc.AddResult(r)
+		return
+	}
+
+	for k, v := range artifacts {
+		r.Details[k] = v
+	}
+
+	// Determine severity: namespace gone but artifacts remain = partial cleanup
+	hasNamespace := len(foundNS) > 0
+	hasCRDs := artifacts["crds"] != nil
+	hasRules := artifacts["prometheusrules"] != nil
+
+	if !hasNamespace && (hasCRDs || hasRules) {
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("Partial Dynatrace removal — namespace deleted but %d artifact type(s) remain (orphaned CRDs, PrometheusRules, or ServiceMonitors)", len(artifacts))
+	} else if hasNamespace {
+		r.Status = checks.StatusInfo
+		r.Message = fmt.Sprintf("Dynatrace present — %d artifact type(s) found (expected if removal still in progress)", len(artifacts))
+	} else {
+		r.Status = checks.StatusInfo
+		r.Message = fmt.Sprintf("Dynatrace remnants — %d artifact type(s) found", len(artifacts))
+	}
+	cc.AddResult(r)
 }

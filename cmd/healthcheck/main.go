@@ -605,6 +605,16 @@ func main() {
 				Environment:    meta.Environment,
 			}
 
+			// Copy log forwarder metadata for HCP clusters
+			for _, lf := range meta.LogForwarders {
+				clusterMeta.LogForwarders = append(clusterMeta.LogForwarders, checks.LogForwarderInfo{
+					ID:     lf.ID,
+					Type:   lf.Type,
+					Status: lf.Status,
+					Groups: lf.Groups,
+				})
+			}
+
 			var wg sync.WaitGroup
 			for _, opCfg := range managedOps {
 				if checks.Cancelled(ctx) {

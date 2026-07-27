@@ -16,7 +16,7 @@ Single Go binary for comprehensive health monitoring of SRE-managed OpenShift op
 | osd-metrics-exporter | `ome` | `openshift-osd-metrics` | `osd-metrics-exporter` | All managed |
 | splunk-forwarder-operator | `sfo` | `openshift-splunk-forwarder-operator` | `splunk-forwarder-operator` | All managed |
 | rhobs-observability | `rhobs` | `openshift-observability-operator` | — | MC/SC only |
-| rosa-log-router | `rlr` | `hypershift-control-plane-log-forwarding` | — | MC only |
+| rosa-log-router | `rlr` | `hypershift-control-plane-log-forwarding` | — | MC + HCP |
 | pagerduty-operator | `pdo` | `pagerduty-operator` | `pagerduty-operator` | Hive only |
 
 ## Architecture
@@ -231,3 +231,43 @@ make build
 ./healthcheck --list-clusters managed | tee clusters.list # Generate list
 go vet ./... && go build ./...                            # Lint + build
 ```
+
+## Cross-Version Fleet Compatibility — CRITICAL
+
+### The Problem
+Operators like CAMO generate configs deployed to clusters running many different OCP versions (4.17–4.22+). Each OCP version ships a different Alertmanager, Prometheus, or platform component version. A feature that works on newer versions can silently break on older ones. Staging environments often lack older OCP versions, so testing there alone is insufficient.
+
+**Real incident (2026-07-27):** CAMO PR #588 added `{{ .Alerts.Firing | toJson }}` to the AM config. `toJson` requires AM 0.30.0+ (OCP 4.22). All clusters on OCP 4.17–4.21 broke — PD notifications failed silently. Staging only had 4.19+ clusters, so the issue wasn't caught until production.
+
+### Directives for Adding or Modifying Checks
+
+1. **Always check against the oldest supported OCP version**, not just the cluster being tested. Currently supported: OCP 4.17+ (AM 0.27.0+). When adding checks that validate operator-generated configs (AM config, Prometheus rules, webhook templates), verify compatibility across the full supported version range.
+
+2. **Alertmanager version compatibility table** is maintained in `pkg/checks/camo/camo.go`:
+   - `templateFuncMinVersion` — maps template functions to minimum AM version
+   - `ocpToAMVersion` — maps OCP minor version to AM version
+   - Update these tables when new AM versions are released or OCP support matrix changes
+
+3. **When reviewing PRs that modify operator config generation** (CAMO, RMO, RHOBS):
+   - Identify any Go template functions, receiver types, or config fields used
+   - Check what component version introduced them
+   - Verify the oldest supported OCP version includes that component version
+   - If not, the feature needs conditional logic gated on the cluster version
+
+4. **Config vs runtime failures**: Some incompatibilities fail at config reload (receiver types, syntax errors) and are caught by `alertmanager_config_last_reload_successful`. Others fail at runtime only (template functions evaluated at notification time) and are invisible until a notification fires. The `alertmanager_config_compatibility` check in CAMO catches both proactively.
+
+5. **SAAS version delta awareness**: When the health report shows different git SHAs between staging and production SAAS targets, investigate what changed. New features in staging that depend on newer platform versions may break when promoted to production clusters running older OCP.
+
+### Alertmanager Function Availability by Version
+
+| Function | Min AM Version | Min OCP | Notes |
+|----------|---------------|---------|-------|
+| toUpper, toLower, join, match, reReplaceAll, safeHtml | baseline | all | Always available |
+| since, humanizeDuration, date, tz | 0.28.0 | 4.19 | Time formatting |
+| toJson | 0.30.0 | 4.22 | JSON marshaling |
+| list, dict, append, now, toDate | 0.32.0 | future | Not yet in OCP |
+
+### When Adding New Operator Checks
+- Query both the operator's own health metrics AND the platform component metrics it depends on
+- For CAMO: check both CAMO-emitted metrics (`alertmanager_config_validation_failed`) AND Alertmanager-native metrics (`alertmanager_config_last_reload_successful`, `alertmanager_notifications_failed_total`)
+- An operator reporting "healthy" does not mean its output is valid — validate the actual artifacts (configs, CRs, secrets) the operator produces
