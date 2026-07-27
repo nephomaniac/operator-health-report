@@ -2832,6 +2832,53 @@
                         '<div class="stat-label">' + Object.entries(apiErrorsByOperator).map(([op, n]) => op.replace(/configure-alertmanager-operator/, 'CAMO').replace(/route-monitor-operator/, 'RMO').replace(/osd-metrics-exporter/, 'OME').replace(/rhobs-observability/, 'RHOBS') + ': ' + n).join(', ') + '</div>' +
                     '</div>' : '') +
                 '</div>' +
+                // Cluster Version Coverage Table
+                (() => {
+                    const supportedVersions = ['4.17', '4.18', '4.19', '4.20', '4.21', '4.22'];
+                    const amVersionMap = {'4.17': '0.27.0', '4.18': '0.27.0', '4.19': '0.28.0', '4.20': '0.28.1', '4.21': '0.29.0', '4.22': '0.31.1'};
+                    const versionCounts = {};
+                    const seenClusters = new Set();
+                    healthData.forEach(entry => {
+                        const cid = entry.cluster_id || entry.cluster_name;
+                        if (seenClusters.has(cid)) return;
+                        seenClusters.add(cid);
+                        const v = entry.cluster_version || '';
+                        const minor = v.match(/^4\.(\d+)/);
+                        const key = minor ? '4.' + minor[1] : v;
+                        versionCounts[key] = (versionCounts[key] || 0) + 1;
+                    });
+                    const sortedVersions = Object.keys(versionCounts).sort((a, b) => {
+                        const [, aMin] = (a.match(/4\.(\d+)/) || [0, 0]);
+                        const [, bMin] = (b.match(/4\.(\d+)/) || [0, 0]);
+                        return Number(aMin) - Number(bMin);
+                    });
+                    const missingSupported = supportedVersions.filter(v => !versionCounts[v]);
+                    return '<div style="margin-top:20px;padding:16px;background:var(--bg-card);border-radius:var(--radius);border:1px solid var(--border);">' +
+                        '<h3 style="margin:0 0 12px;font-size:0.95em;color:var(--accent);">Cluster Version Coverage</h3>' +
+                        '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;">' +
+                        supportedVersions.map(v => {
+                            const count = versionCounts[v] || 0;
+                            const am = amVersionMap[v] || '?';
+                            const present = count > 0;
+                            const bg = present ? 'rgba(46,204,113,0.12)' : 'rgba(220,53,69,0.12)';
+                            const border = present ? '#2ecc71' : '#dc3545';
+                            const icon = present ? '✓' : '✗';
+                            return '<div style="padding:8px 14px;border-radius:6px;background:' + bg + ';border:1px solid ' + border + ';font-size:0.85em;min-width:90px;text-align:center;" title="AM ' + am + '">' +
+                                '<div style="font-weight:700;font-size:1.1em;">' + icon + ' OCP ' + v + '</div>' +
+                                '<div style="color:var(--text-muted);font-size:0.85em;">' + count + ' cluster' + (count !== 1 ? 's' : '') + '</div>' +
+                                '<div style="color:var(--text-muted);font-size:0.8em;">AM ' + am + '</div>' +
+                            '</div>';
+                        }).join('') +
+                        '</div>' +
+                        (missingSupported.length > 0 ?
+                            '<div style="padding:8px 12px;background:rgba(220,53,69,0.08);border-left:3px solid #dc3545;border-radius:3px;font-size:0.85em;color:#dc3545;">' +
+                            '⚠ Missing coverage for supported OCP versions: <strong>' + missingSupported.join(', ') + '</strong> — compatibility issues on these versions may not be detected by this run' +
+                            '</div>' :
+                            '<div style="padding:8px 12px;background:rgba(46,204,113,0.08);border-left:3px solid #2ecc71;border-radius:3px;font-size:0.85em;color:#2ecc71;">' +
+                            '✓ All supported OCP versions represented in this run' +
+                            '</div>') +
+                    '</div>';
+                })() +
                 // CVE Security Section (optional)
                 (enableCVESection && (cveData.image_tag || cveData.image_sha) ?
                 '<div style="margin-top: 35px; padding: 0; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.15); overflow: hidden;">' +
