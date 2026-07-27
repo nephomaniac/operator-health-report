@@ -920,8 +920,33 @@ func checkAlertmanagerConfigCompatibility(ctx context.Context, cc *checks.Cluste
 		Expression string `json:"expression"`
 	}
 
+	// Known AM baseline template functions (available in all supported versions)
+	baselineFunctions := map[string]bool{
+		"toUpper": true, "toLower": true, "title": true, "trimSpace": true,
+		"join": true, "match": true, "safeHtml": true, "safeUrl": true,
+		"reReplaceAll": true, "stringSlice": true, "urlUnescape": true,
+	}
+	// Go template builtins and keywords to ignore
+	ignoreWords := map[string]bool{
+		"if": true, "else": true, "end": true, "range": true, "with": true,
+		"define": true, "template": true, "block": true, "nil": true, "not": true,
+		"and": true, "or": true, "eq": true, "ne": true, "lt": true, "le": true,
+		"gt": true, "ge": true, "len": true, "index": true, "call": true,
+		"print": true, "printf": true, "println": true, "html": true, "js": true,
+		"urlquery": true, "slice": true, "default": true,
+		"Alerts": true, "Firing": true, "Resolved": true, "Labels": true,
+		"Annotations": true, "Status": true, "CommonLabels": true,
+		"CommonAnnotations": true, "ExternalURL": true, "GroupLabels": true,
+		"GroupKey": true, "Receiver": true, "StartsAt": true, "EndsAt": true,
+		"GeneratorURL": true, "SortedPairs": true, "Values": true,
+		"Names": true, "Remove": true,
+		"pagerduty": true, "severity": true, "alertname": true,
+	}
+
 	var incompatible []incompatFunc
-	checkedFunctions := map[string]bool{}
+	trackedFunctions := map[string]bool{}
+	baselineFound := map[string]bool{}
+	unknownFunctions := map[string]bool{}
 
 	for _, match := range expressions {
 		if len(match) < 2 {
@@ -929,32 +954,61 @@ func checkAlertmanagerConfigCompatibility(ctx context.Context, cc *checks.Cluste
 		}
 		expr := match[1]
 
-		// Extract word tokens from the expression that could be function calls
 		words := regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9]*)\b`).FindAllString(expr, -1)
 		for _, word := range words {
-			if checkedFunctions[word] {
+			if ignoreWords[word] {
 				continue
 			}
-			minVer, tracked := templateFuncMinVersion[word]
-			if !tracked {
+			if baselineFunctions[word] {
+				baselineFound[word] = true
 				continue
 			}
-			checkedFunctions[word] = true
 
-			if semverLessThan(amVersion, minVer) {
-				incompatible = append(incompatible, incompatFunc{
-					Function:   word,
-					RequiresAM: minVer,
-					ClusterAM:  amVersion,
-					Expression: truncate(match[0], 80),
-				})
+			minVer, tracked := templateFuncMinVersion[word]
+			if tracked {
+				if trackedFunctions[word] {
+					continue
+				}
+				trackedFunctions[word] = true
+				if semverLessThan(amVersion, minVer) {
+					incompatible = append(incompatible, incompatFunc{
+						Function:   word,
+						RequiresAM: minVer,
+						ClusterAM:  amVersion,
+						Expression: truncate(match[0], 80),
+					})
+				}
+			} else if len(word) > 1 && word[0] >= 'a' && word[0] <= 'z' {
+				unknownFunctions[word] = true
 			}
 		}
 	}
 
-	if len(checkedFunctions) > 0 {
-		funcList := make([]string, 0, len(checkedFunctions))
-		for f := range checkedFunctions {
+	// Build function inventory for the report
+	type funcInventoryItem struct {
+		Function string `json:"function"`
+		Category string `json:"category"`
+		MinAM    string `json:"min_am,omitempty"`
+		Status   string `json:"status"`
+	}
+	var inventory []funcInventoryItem
+	for f := range baselineFound {
+		inventory = append(inventory, funcInventoryItem{f, "baseline", "", "compatible"})
+	}
+	for f := range trackedFunctions {
+		minVer := templateFuncMinVersion[f]
+		status := "compatible"
+		if semverLessThan(amVersion, minVer) {
+			status = "INCOMPATIBLE"
+		}
+		inventory = append(inventory, funcInventoryItem{f, "version-gated", minVer, status})
+	}
+	r.Details["function_inventory"] = inventory
+	r.Details["baseline_functions_found"] = len(baselineFound)
+
+	if len(trackedFunctions) > 0 {
+		funcList := make([]string, 0, len(trackedFunctions))
+		for f := range trackedFunctions {
 			funcList = append(funcList, f)
 		}
 		r.Details["non_baseline_functions"] = funcList
@@ -964,7 +1018,7 @@ func checkAlertmanagerConfigCompatibility(ctx context.Context, cc *checks.Cluste
 	// would break on older OCP versions still in support
 	oldestSupportedAM := "0.27.0" // OCP 4.17 — oldest currently supported
 	var fleetRisk []incompatFunc
-	for fn := range checkedFunctions {
+	for fn := range trackedFunctions {
 		minVer := templateFuncMinVersion[fn]
 		if !semverLessThan(amVersion, minVer) && semverLessThan(oldestSupportedAM, minVer) {
 			fleetRisk = append(fleetRisk, incompatFunc{

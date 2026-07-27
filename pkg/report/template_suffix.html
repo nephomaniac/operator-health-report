@@ -2604,6 +2604,29 @@
                                         </tr>` : ''}
                                     </tbody>
                                 </table>
+                                        ${check.details.function_inventory && check.details.function_inventory.length > 0 ? `
+                                <div style="margin-top:10px;">
+                                    <strong style="display:block;margin-bottom:6px;color:#667eea;">Template Functions Found (${check.details.function_inventory.length}):</strong>
+                                    <table style="width:100%;border-collapse:collapse;font-size:0.85em;border:1px solid #d0d4e0;border-radius:4px;">
+                                        <thead><tr style="background:#f0f2f8;">
+                                            <th style="padding:5px 10px;text-align:left;">Function</th>
+                                            <th style="padding:5px 10px;text-align:left;">Category</th>
+                                            <th style="padding:5px 10px;text-align:left;">Min AM</th>
+                                            <th style="padding:5px 10px;text-align:left;">Status</th>
+                                        </tr></thead>
+                                        <tbody>${check.details.function_inventory.map(f => {
+                                            const statusColor = f.status === 'INCOMPATIBLE' ? '#dc3545' : '#2ecc71';
+                                            const statusIcon = f.status === 'INCOMPATIBLE' ? '✗' : '✓';
+                                            return '<tr style="border-bottom:1px solid #e8eaf0;">' +
+                                                '<td style="padding:4px 10px;font-family:var(--font-mono);">' + f.function + '</td>' +
+                                                '<td style="padding:4px 10px;color:#888;">' + f.category + '</td>' +
+                                                '<td style="padding:4px 10px;">' + (f.min_am ? f.min_am + '+' : 'all') + '</td>' +
+                                                '<td style="padding:4px 10px;color:' + statusColor + ';font-weight:600;">' + statusIcon + ' ' + f.status + '</td>' +
+                                            '</tr>';
+                                        }).join('')}
+                                        </tbody>
+                                    </table>
+                                </div>` : ''}
                                 ${check.details.incompatible_functions && check.details.incompatible_functions.length > 0 ? `
                                 <div style="margin-top:10px;">
                                     <strong style="display:block;margin-bottom:6px;color:#dc3545;">Incompatible Functions:</strong>
