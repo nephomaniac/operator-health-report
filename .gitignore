@@ -102,7 +102,9 @@ health_*.html
 .idea/
 *.swp
 
-# Environment config
+# Environment config (may contain AWS account IDs and other sensitive values)
 .env
 *.local.sh
 config.env
+.healthcheck.yaml
+.healthcheck.yml

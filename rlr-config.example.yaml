@@ -1,0 +1,47 @@
+# RLR central pipeline configuration
+# Copy to ~/.config/healthcheck/config.yaml and fill in values.
+# Do NOT commit actual values to the repository.
+rlr:
+  environments:
+    integration:
+      central_account_id: ""
+      aws_profile: "rhcontrol"
+      lambda_function_name: "hcp-log-int-log-distributor"
+      authorizer_function_name: "hcp-log-int-api-authorizer"
+      sqs_queue_name: "hcp-log-int-log-delivery-queue"
+      sqs_dlq_name: "hcp-log-int-log-delivery-dlq"
+      dynamodb_table: "hcp-log-int-tenant-configs"
+      api_endpoint_pattern: "https://${region}.hcp-log.int.devshift.net"
+      metrics_namespace: "HCPLF/LogForwarding"
+      regions:
+        - us-west-2
+
+    staging:
+      central_account_id: ""
+      aws_profile: "rhcontrol"
+      lambda_function_name: "hcp-log-stage-log-distributor"
+      authorizer_function_name: "hcp-log-stage-api-authorizer"
+      sqs_queue_name: "hcp-log-stage-log-delivery-queue"
+      sqs_dlq_name: "hcp-log-stage-log-delivery-dlq"
+      dynamodb_table: "hcp-log-stage-tenant-configs"
+      api_endpoint_pattern: "https://${region}.hcp-log.stage.devshift.net"
+      metrics_namespace: "HCPLF/LogForwarding"
+      regions:
+        - us-west-2
+
+    production:
+      central_account_id: ""
+      aws_profile: "rhcontrol"
+      lambda_function_name: "hcp-log-prod-log-distributor"
+      authorizer_function_name: "hcp-log-prod-api-authorizer"
+      sqs_queue_name: "hcp-log-prod-log-delivery-queue"
+      sqs_dlq_name: "hcp-log-prod-log-delivery-dlq"
+      dynamodb_table: "hcp-log-prod-tenant-configs"
+      api_endpoint_pattern: "https://${region}.hcp-log.prod.devshift.net"
+      metrics_namespace: "HCPLF/LogForwarding"
+      regions:
+        - us-east-1
+        - us-east-2
+        - us-west-2
+        - eu-west-1
+        - ap-southeast-1

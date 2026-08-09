@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -34,6 +35,51 @@ type Config struct {
 	// Logging
 	LogLevel    string   `yaml:"log_level"`
 	LogDir      string   `yaml:"log_dir"`
+
+	// Operator-specific configuration
+	RLR         *RLRConfig `yaml:"rlr,omitempty"`
+}
+
+// RLRConfig holds per-environment configuration for rosa-log-router
+// central pipeline checks. Values are sensitive (AWS account IDs, queue
+// names) and must NOT be committed to the codebase — load from a local
+// config file only.
+type RLRConfig struct {
+	Environments map[string]RLREnvConfig `yaml:"environments"`
+}
+
+// RLREnvConfig holds AWS resource identifiers for one RLR environment.
+type RLREnvConfig struct {
+	CentralAccountID     string `yaml:"central_account_id"`
+	AWSProfile           string `yaml:"aws_profile"`
+	LambdaFunctionName   string `yaml:"lambda_function_name"`
+	AuthorizerFunctionName string `yaml:"authorizer_function_name"`
+	SQSQueueName         string `yaml:"sqs_queue_name"`
+	SQSDLQName           string `yaml:"sqs_dlq_name"`
+	DynamoDBTable        string `yaml:"dynamodb_table"`
+	APIEndpointPattern   string `yaml:"api_endpoint_pattern"`
+	MetricsNamespace     string `yaml:"metrics_namespace"`
+	Regions              []string `yaml:"regions"`
+}
+
+// RLREnvForOCMURL returns the RLR environment config matching the OCM URL.
+func (c *Config) RLREnvForOCMURL(ocmURL string) *RLREnvConfig {
+	if c.RLR == nil {
+		return nil
+	}
+	var envKey string
+	switch {
+	case strings.Contains(ocmURL, "integration"):
+		envKey = "integration"
+	case strings.Contains(ocmURL, "stage"):
+		envKey = "staging"
+	default:
+		envKey = "production"
+	}
+	if env, ok := c.RLR.Environments[envKey]; ok {
+		return &env
+	}
+	return nil
 }
 
 // Load reads the config file from the search path.
