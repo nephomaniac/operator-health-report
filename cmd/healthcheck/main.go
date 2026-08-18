@@ -81,6 +81,7 @@ func main() {
 		hiveOCMURL     string
 		byocCommand    string
 		byocFile       string
+		byocBrief      string
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", cfg.ClusterList, "File with cluster IDs (one per line)")
@@ -103,6 +104,7 @@ func main() {
 	flag.StringVar(&configFile, "config", "", "Path to config file (default: .healthcheck.yaml)")
 	flag.StringVar(&byocCommand, "byoc", "", "Bring Your Own Check: ad-hoc command to run on each cluster (exit 0 = PASS)")
 	flag.StringVar(&byocFile, "byof", "", "Bring Your Own File: JSON file with check definitions to run on each cluster")
+	flag.StringVar(&byocBrief, "byoc-brief", "", "Extract compact BYOC results from a results JSON file to stdout (jq-friendly)")
 	flag.Parse()
 
 	if cfgPath != "" {
@@ -158,6 +160,15 @@ func main() {
 	}
 
 	_ = logging.Log
+
+	// BYOC brief mode — extract compact results from existing JSON and exit
+	if byocBrief != "" {
+		if err := runBYOCBrief(byocBrief); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// List clusters mode — query OCM and exit
 	if listClusters != "" {
@@ -1036,4 +1047,90 @@ func classifyHiveEnv(hiveName string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// runBYOCBrief reads a results JSON file and emits compact BYOC results to stdout.
+func runBYOCBrief(resultsFile string) error {
+	data, err := os.ReadFile(resultsFile)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", resultsFile, err)
+	}
+
+	var outputs []checks.ClusterOutput
+	if err := json.Unmarshal(data, &outputs); err != nil {
+		return fmt.Errorf("parsing %s: %w", resultsFile, err)
+	}
+
+	type briefCheck struct {
+		Status     string `json:"status"`
+		Message    string `json:"message"`
+		ExitCode   any    `json:"exit_code,omitempty"`
+		Output     string `json:"output,omitempty"`
+		Stderr     string `json:"stderr,omitempty"`
+		DurationMs any    `json:"duration_ms,omitempty"`
+		Command    string `json:"command,omitempty"`
+	}
+
+	type briefCluster struct {
+		Name    string                `json:"name"`
+		Version string                `json:"version"`
+		Type    string                `json:"type"`
+		Region  string                `json:"region,omitempty"`
+		Status  string                `json:"status"`
+		Checks  map[string]briefCheck `json:"checks"`
+	}
+
+	result := map[string]briefCluster{}
+
+	for _, out := range outputs {
+		if out.OperatorName != "byoc" {
+			continue
+		}
+
+		cluster := briefCluster{
+			Name:    out.ClusterName,
+			Version: out.ClusterVersion,
+			Type:    out.ClusterType,
+			Status:  out.HealthSummary.OverallStatus,
+			Checks:  map[string]briefCheck{},
+		}
+		if out.ClusterMetadata != nil {
+			cluster.Region = out.ClusterMetadata.Region
+		}
+
+		for _, hc := range out.HealthChecks {
+			bc := briefCheck{
+				Status:  string(hc.Status),
+				Message: hc.Message,
+			}
+			if hc.Details != nil {
+				if v, ok := hc.Details["exit_code"]; ok {
+					bc.ExitCode = v
+				}
+				if v, ok := hc.Details["stdout"].(string); ok && v != "" {
+					bc.Output = v
+				}
+				if v, ok := hc.Details["stderr"].(string); ok && v != "" {
+					bc.Stderr = v
+				}
+				if v, ok := hc.Details["duration_ms"]; ok {
+					bc.DurationMs = v
+				}
+				if v, ok := hc.Details["command"].(string); ok {
+					bc.Command = v
+				}
+			}
+			cluster.Checks[hc.Check] = bc
+		}
+
+		result[out.ClusterID] = cluster
+	}
+
+	if len(result) == 0 {
+		return fmt.Errorf("no BYOC results found in %s", resultsFile)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
