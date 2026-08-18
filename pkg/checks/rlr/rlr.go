@@ -107,6 +107,9 @@ func (c *RLRChecker) runMCChecks(ctx context.Context, cc *checks.ClusterContext)
 
 	// Timeseries (7-day trends for charts)
 	collectVectorTimeseries(ctx, cc)
+
+	// Central Pipeline (requires config with AWS credentials for central account)
+	runCentralPipelineChecks(ctx, cc)
 }
 
 func sanitizeFloat(f float64) float64 {

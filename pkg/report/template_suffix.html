@@ -540,6 +540,21 @@
                 'rlr_prometheusrule_alerts': 'PromRule Alerts',
                 'rlr_active_alerts': 'Firing Alerts',
                 'rlr_vector_trends': 'Trends',
+                'rlr_central_credentials': 'AWS Creds',
+                'rlr_sqs_queue_depth': 'SQS Depth',
+                'rlr_sqs_dlq_messages': 'SQS DLQ',
+                'rlr_sqs_oldest_message': 'SQS Age',
+                'rlr_lambda_errors': 'Lambda Errors',
+                'rlr_lambda_invocations': 'Lambda Invocations',
+                'rlr_lambda_recursive_drops': 'Recursive Drops',
+                'rlr_lambda_throttles': 'Lambda Throttles',
+                'rlr_lambda_duration': 'Lambda Duration',
+                'rlr_delivery_success_rate': 'Delivery Rate',
+                'rlr_enrolled_tenant_count': 'Tenant Count',
+                'rlr_api_health': 'API Health',
+                'rlr_api_data_trace': 'Data Trace',
+                'rlr_authorizer_cache': 'Auth Cache',
+                'rlr_vector_batch_config': 'Batch Config',
                 'pdo_deployment_scope': 'Deploy Scope',
                 'pdo_api_key_secret': 'PD API Key',
                 'pdo_controller_availability': 'PDO Controller',
@@ -569,6 +584,14 @@
 
             if (customNames[checkName]) {
                 return customNames[checkName];
+            }
+            // Handle region-suffixed checks (e.g., rlr_sqs_queue_depth_us-east-1)
+            const regionSuffix = checkName.match(/_(us-east-\d|us-west-\d|eu-west-\d|ap-southeast-\d)$/);
+            if (regionSuffix) {
+                const base = checkName.replace(/_[a-z]+-[a-z]+-\d$/, '');
+                if (customNames[base]) {
+                    return customNames[base] + ' (' + regionSuffix[1] + ')';
+                }
             }
             return checkName.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
         }

@@ -635,6 +635,7 @@ func main() {
 						OCMEnv:         ocmEnv,
 						Metadata:       clusterMeta,
 						Client:         client,
+						Config:         cfg,
 						Operator:       op,
 					}
 
@@ -765,7 +766,7 @@ func main() {
 						ClusterVersion: meta.Version, ClusterType: clusterType,
 						HiveShard: meta.Name, // for hive clusters, the shard is the cluster name
 						OCMEnv: hiveOCM.Environment(),
-						Metadata: clusterMeta, Client: client, Operator: op,
+						Metadata: clusterMeta, Client: client, Config: cfg, Operator: op,
 					}
 
 					checks.RunOperatorChecks(rootCtx, cc)

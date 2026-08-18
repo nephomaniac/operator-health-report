@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openshift/operator-health-report/pkg/config"
 	"github.com/openshift/operator-health-report/pkg/kube"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -155,6 +156,7 @@ type ClusterContext struct {
 	Metadata       *ClusterMetadata
 
 	Client   *kube.ClusterClient
+	Config   *config.Config
 	Operator OperatorConfig
 
 	CurrentCheck  string
