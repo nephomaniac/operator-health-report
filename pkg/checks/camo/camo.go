@@ -32,6 +32,7 @@ func (c *CAMOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) 
 	checkReconciliationBehavior(ctx, cc, recentLogCount)
 	checkConfigurationErrors(ctx, cc)
 	checkPrometheusMetrics(ctx, cc)
+	checkClusterReadiness(ctx, cc)
 	checkAlertmanagerReloadHealth(ctx, cc)
 	checkAlertmanagerConfigCompatibility(ctx, cc)
 	checkAlertmanagerLogs(ctx, cc)
@@ -594,6 +595,107 @@ func checkPrometheusMetrics(ctx context.Context, cc *checks.ClusterContext) {
 			r.Message = fmt.Sprintf("Available metrics healthy (%d of %d metrics unavailable)", queryFailures, len(metrics))
 		} else {
 			r.Message = "All alerting config metrics healthy"
+		}
+	}
+
+	cc.AddResult(r)
+}
+
+// checkClusterReadiness validates that CAMO has completed PagerDuty configuration.
+// CAMO gates PD/GoAlert setup on cluster readiness (all ClusterOperators healthy or
+// cluster age > 90min). On established clusters, am_secret_contains_pd=0 indicates
+// a real problem. On new clusters, it's expected during the readiness window.
+// This check replaces the former osd-cluster-ready Job (ROSAENG-1342).
+func checkClusterReadiness(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("camo_cluster_readiness")
+	log := logging.WithCheck("camo_cluster_readiness")
+
+	r := checks.Result{
+		Check:    "camo_cluster_readiness",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Validates that CAMO has completed PagerDuty configuration for this cluster. CAMO gates PD/GoAlert activation on cluster readiness: all ClusterOperators must be Available=true, Progressing=false, Degraded=false, or the cluster must be older than 90 minutes (fallback). Until ready, PD is not configured and alerts won't page. This replaced the former osd-cluster-ready Job (ROSAENG-1342). DMS (DeadMansSnitch) is always configured regardless of readiness.",
+			"pass_criteria": "PASS: PD configured (am_secret_contains_pd=1). INFO: cluster <90min old and PD not yet configured (expected during readiness window). WARN: cluster >90min old but PD not configured — readiness may be stuck. FAIL: cluster >4h old and PD not configured — PD configuration has failed.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+		return
+	}
+
+	// Check if PD is configured
+	pdBody, err := cc.Client.QueryMetrics(ctx, fmt.Sprintf(`am_secret_contains_pd{namespace="%s"}`, cc.Operator.Namespace))
+	cc.RecordError("Query am_secret_contains_pd", err)
+
+	pdConfigured := false
+	if err == nil && pdBody != "" {
+		if val, _, ok := thanos.InstantValue(pdBody); ok {
+			r.Details["am_secret_contains_pd"] = val
+			pdConfigured = val == "1"
+		}
+	}
+
+	if pdConfigured {
+		r.Status = checks.StatusPass
+		r.Message = "PagerDuty configured — cluster readiness complete"
+		cc.AddResult(r)
+		return
+	}
+
+	// PD not configured — determine cluster age to assess severity
+	// Use cluster_version{type="initial"} (same metric CAMO uses for readiness)
+	var clusterAgeHours float64
+	ageSource := ""
+
+	cvBody, cvErr := cc.Client.QueryMetrics(ctx, `cluster_version{type="initial"}`)
+	if cvErr == nil && cvBody != "" {
+		if val, _, ok := thanos.InstantValue(cvBody); ok {
+			if ts, parseErr := strconv.ParseFloat(val, 64); parseErr == nil && ts > 0 {
+				clusterAgeHours = time.Since(time.Unix(int64(ts), 0)).Hours()
+				ageSource = "cluster_version_metric"
+			}
+		}
+	}
+
+	// Fallback: use OCM metadata creation time
+	if clusterAgeHours == 0 && cc.Metadata != nil {
+		if created, parseErr := time.Parse(time.RFC3339, cc.Metadata.CreatedAt); parseErr == nil {
+			clusterAgeHours = time.Since(created).Hours()
+			ageSource = "ocm_metadata"
+		}
+	}
+
+	r.Details["cluster_age_hours"] = fmt.Sprintf("%.1f", clusterAgeHours)
+	r.Details["age_source"] = ageSource
+
+	log.WithField("cluster_age_hours", clusterAgeHours).WithField("pd_configured", pdConfigured).Debug("Cluster readiness assessment")
+
+	switch {
+	case clusterAgeHours == 0:
+		r.Status = checks.StatusWarning
+		r.Message = "PagerDuty NOT configured — cannot determine cluster age to assess severity"
+	case clusterAgeHours < 1.5:
+		r.Status = checks.StatusInfo
+		r.Severity = checks.SeverityInfo
+		r.Message = fmt.Sprintf("PagerDuty not yet configured — cluster is %.0fm old (readiness window is 90m)", clusterAgeHours*60)
+	case clusterAgeHours < 4:
+		r.Status = checks.StatusWarning
+		r.Message = fmt.Sprintf("PagerDuty NOT configured — cluster is %.1fh old (past 90m readiness window) — CAMO readiness check may be stuck", clusterAgeHours)
+	default:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("PagerDuty NOT configured — cluster is %.0fh old — alerts are NOT paging (ROSAENG-1342)", clusterAgeHours)
+	}
+
+	// Also check DMS (should always be configured regardless of readiness)
+	dmsBody, dmsErr := cc.Client.QueryMetrics(ctx, fmt.Sprintf(`am_secret_contains_dms{namespace="%s"}`, cc.Operator.Namespace))
+	if dmsErr == nil && dmsBody != "" {
+		if val, _, ok := thanos.InstantValue(dmsBody); ok {
+			r.Details["am_secret_contains_dms"] = val
+			if val != "1" {
+				r.Details["dms_issue"] = "DMS not configured — should be present regardless of cluster readiness"
+			}
 		}
 	}
 

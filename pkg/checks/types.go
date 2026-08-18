@@ -100,6 +100,7 @@ type ClusterMetadata struct {
 	ChannelGroup    string `json:"channel_group"`
 	LimitedSupport  bool   `json:"limited_support"`
 	Shard           string `json:"shard"`
+	CreatedAt       string            `json:"created_at,omitempty"`
 	OwnerOrg        string            `json:"owner_org,omitempty"`
 	OwnerEmail      string            `json:"owner_email,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
@@ -376,6 +377,14 @@ var (
 		OLMSaas:    "saas-managed-node-metadata-operator.yaml",
 	}
 
+	MUOConfig = OperatorConfig{
+		Name:       "managed-upgrade-operator",
+		ShortName:  "muo",
+		Namespace:  "openshift-managed-upgrade-operator",
+		Deployment: "managed-upgrade-operator",
+		OLMSaas:    "saas-managed-upgrade-operator.yaml",
+	}
+
 	AllOperators = map[string]OperatorConfig{
 		"camo":    CAMOConfig,
 		"rmo":     RMOConfig,
@@ -388,5 +397,6 @@ var (
 		"cluster": ClusterConfig,
 		"hcp":     HCPConfig,
 		"mnmo":    MNMOConfig,
+		"muo":     MUOConfig,
 	}
 )

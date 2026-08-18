@@ -418,6 +418,7 @@ func (c *Client) GetClusterMetadata(clusterID string) (*ClusterMeta, error) {
 		LimitedSupport: cl.Status().LimitedSupportReasonCount() > 0,
 		Shard:          shard,
 		Labels:         labels,
+		CreatedAt:      cl.CreationTimestamp().Format(time.RFC3339),
 		Environment:    c.env,
 	}
 
@@ -498,6 +499,7 @@ type ClusterMeta struct {
 	OwnerOrg       string              `json:"owner_org,omitempty"`
 	OwnerEmail     string              `json:"owner_email,omitempty"`
 	Labels         map[string]string   `json:"labels,omitempty"`
+	CreatedAt      string              `json:"created_at,omitempty"`
 	Environment    string              `json:"environment,omitempty"`
 	LogForwarders  []LogForwarderMeta  `json:"log_forwarders,omitempty"`
 }

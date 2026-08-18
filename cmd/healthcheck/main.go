@@ -31,6 +31,7 @@ import (
 	_ "github.com/openshift/operator-health-report/pkg/checks/hcp"
 	_ "github.com/openshift/operator-health-report/pkg/checks/mcc"
 	_ "github.com/openshift/operator-health-report/pkg/checks/mnmo"
+	_ "github.com/openshift/operator-health-report/pkg/checks/muo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/ome"
 	_ "github.com/openshift/operator-health-report/pkg/checks/pdo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/rhobs"
@@ -599,6 +600,7 @@ func main() {
 				ChannelGroup:   meta.ChannelGroup,
 				LimitedSupport: meta.LimitedSupport,
 				Shard:          meta.Shard,
+				CreatedAt:      meta.CreatedAt,
 				OwnerOrg:       meta.OwnerOrg,
 				OwnerEmail:     maskedEmail,
 				Labels:         meta.Labels,
@@ -750,7 +752,7 @@ func main() {
 					State: meta.State, Product: meta.Product, Provider: meta.Provider,
 					Version: meta.Version, Region: meta.Region, STS: meta.STS,
 					Hypershift: meta.Hypershift, Labels: meta.Labels,
-					Environment: meta.Environment,
+					CreatedAt: meta.CreatedAt, Environment: meta.Environment,
 				}
 
 				for _, op := range hiveOps {
