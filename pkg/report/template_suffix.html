@@ -564,6 +564,7 @@
                 'pdo_reconciliation_behavior': 'Recon Behavior',
                 'pdo_configuration_errors': 'Config Errors',
                 'pdo_firing_alerts': 'PDO Alerts',
+                'byoc_command': 'BYOC Command',
                 'muo_controller_availability': 'MUO Controller',
                 'muo_configmap_health': 'MUO Config',
                 'muo_servicemonitor': 'MUO SvcMon',
@@ -2345,6 +2346,21 @@
                         <div class="detail-grid">
                             ${Object.entries(check.details || {}).map(([key, value]) => {
                                 if (key.includes('timeseries') || key.includes('restart_details') || key === 'pod_events' || key === 'node_events' || key.includes('error_samples') || key.includes('warning_samples') || key === 'source_repo' || key === 'description' || key === 'pass_criteria' || key === 'concerning_pods' || key === 'namespace_health' || key === 'hcp_status' || key === 'hcp_namespaces' || key === 'node_resources' || key === 'role_utilization' || key === 'nodes' || key === 'degraded_names' || key === 'findings' || key.endsWith('_workload_list')) return '';
+
+                                // BYOC: render stdout/stderr/command as monospace pre blocks
+                                if ((key === 'stdout' || key === 'stderr') && typeof value === 'string' && value.length > 0) {
+                                    const label = key === 'stdout' ? 'Output' : 'Stderr';
+                                    const bg = key === 'stderr' ? '#fff5f5' : '#f8f9fa';
+                                    const border = key === 'stderr' ? '#f5c6cb' : '#dee2e6';
+                                    return '<div class="detail-item" style="grid-column: 1/-1;"><span class="detail-label">' + label + '</span>' +
+                                        '<pre style="margin:4px 0 0;padding:8px;background:' + bg + ';border:1px solid ' + border + ';border-radius:4px;font-size:0.85em;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;">' +
+                                        value.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre></div>';
+                                }
+                                if (key === 'command' && typeof value === 'string') {
+                                    return '<div class="detail-item" style="grid-column: 1/-1;"><span class="detail-label">Command</span>' +
+                                        '<pre style="margin:4px 0 0;padding:6px 8px;background:#f0f0f0;border:1px solid #ddd;border-radius:3px;font-size:0.85em;overflow-x:auto;white-space:pre-wrap;">$ ' +
+                                        value.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre></div>';
+                                }
 
                                 // Custom rendering for OME per-metric table
                                 if (key === 'metrics' && Array.isArray(value) && value.length > 0 && value[0].name) {

@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	// Import operator checkers for init() registration
+	"github.com/openshift/operator-health-report/pkg/checks/byoc"
 	_ "github.com/openshift/operator-health-report/pkg/checks/camo"
 	_ "github.com/openshift/operator-health-report/pkg/checks/hcp"
 	_ "github.com/openshift/operator-health-report/pkg/checks/mcc"
@@ -78,6 +79,8 @@ func main() {
 		includePattern string
 		saasOnly       bool
 		hiveOCMURL     string
+		byocCommand    string
+		byocFile       string
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", cfg.ClusterList, "File with cluster IDs (one per line)")
@@ -98,6 +101,8 @@ func main() {
 	flag.BoolVar(&saasOnly, "saas-only", cfg.SaasOnly, "Show SAAS targets and pipeline only (no cluster checks)")
 	flag.StringVar(&hiveOCMURL, "hive-ocm-url", "", "OCM API URL for hive cluster connections (default: auto-detect or production)")
 	flag.StringVar(&configFile, "config", "", "Path to config file (default: .healthcheck.yaml)")
+	flag.StringVar(&byocCommand, "byoc", "", "Bring Your Own Check: ad-hoc command to run on each cluster (exit 0 = PASS)")
+	flag.StringVar(&byocFile, "byof", "", "Bring Your Own File: JSON file with check definitions to run on each cluster")
 	flag.Parse()
 
 	if cfgPath != "" {
@@ -107,6 +112,37 @@ func main() {
 	// Apply operators from config if none provided via CLI
 	if len(operators) == 0 && len(cfg.Operators) > 0 {
 		operators = cfg.Operators
+	}
+
+	// Load BYOC check definitions
+	if byocFile != "" {
+		defs, loadErr := byoc.LoadCheckDefs(byocFile)
+		if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "Error loading --byof: %v\n", loadErr)
+			os.Exit(1)
+		}
+		byoc.CheckDefs = defs
+		fmt.Fprintf(os.Stderr, "BYOC: loaded %d check(s) from %s\n", len(defs), byocFile)
+	}
+	if byocCommand != "" {
+		byoc.CheckDefs = append(byoc.CheckDefs, byoc.SingleCommandDef(byocCommand))
+		fmt.Fprintf(os.Stderr, "BYOC: added ad-hoc command\n")
+	}
+	if len(byoc.CheckDefs) > 0 {
+		hasBYOC := false
+		for _, op := range operators {
+			if op == "byoc" {
+				hasBYOC = true
+				break
+			}
+		}
+		if !hasBYOC {
+			if len(operators) == 0 {
+				operators = stringSlice{"byoc"}
+			} else {
+				operators = append(operators, "byoc")
+			}
+		}
 	}
 
 	// Configure logging
@@ -138,9 +174,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Default to all registered operators if none specified
+	// Default to all registered operators if none specified (excluding byoc — opt-in only)
 	if len(operators) == 0 {
 		for name := range checks.AllOperators {
+			if name == "byoc" {
+				continue
+			}
 			operators = append(operators, name)
 		}
 		sort.Strings(operators)

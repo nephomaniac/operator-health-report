@@ -387,6 +387,13 @@ var (
 		OLMSaas:    "saas-managed-upgrade-operator.yaml",
 	}
 
+	BYOCConfig = OperatorConfig{
+		Name:             "byoc",
+		ShortName:        "byoc",
+		SkipCommonChecks: true,
+		ClusterScope:     ScopeBoth,
+	}
+
 	AllOperators = map[string]OperatorConfig{
 		"camo":    CAMOConfig,
 		"rmo":     RMOConfig,
@@ -400,5 +407,6 @@ var (
 		"hcp":     HCPConfig,
 		"mnmo":    MNMOConfig,
 		"muo":     MUOConfig,
+		"byoc":    BYOCConfig,
 	}
 )
