@@ -10,12 +10,12 @@ make build
 
 # Run against staging clusters
 ./healthcheck \
-  --ocm-config ~/.config/ocm/ocm.json \
+  --ocm-config ~/.config/ocm/ocm.staging_env.json \
   --list-clusters managed --exclude "osde2e|^ci-|^qe-" \
   | tee stage_clusters.list
 
 ./healthcheck \
-  --ocm-config ~/.config/ocm/ocm.json \
+  --ocm-config ~/.config/ocm/ocm.staging_env.json \
   --cluster-list stage_clusters.list \
   --oper camo --oper rmo --oper ome \
   --parallel 8

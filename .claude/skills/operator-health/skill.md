@@ -34,7 +34,7 @@ make build
 ./healthcheck --saas-only --oper camo --oper rmo --oper ome
 
 # With explicit OCM config
-./healthcheck --ocm-config ~/.config/ocm/ocm.json --cluster-list clusters.list
+./healthcheck --ocm-config ~/.config/ocm/ocm.staging_env.json --cluster-list clusters.list
 
 # Hive clusters (production PDO, etc.)
 ./healthcheck --cluster-list hive.list --oper pdo --hive-ocm-url production
