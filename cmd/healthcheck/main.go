@@ -594,6 +594,7 @@ func main() {
 				return
 			}
 			defer client.Disconnect()
+			client.OCMConfigPath = ocmConfigPath
 
 			// Initialize RHOBS remote client if cell URL is available
 			if cellURL := meta.Labels["ext-hypershift.openshift.io/rhobs-cell"]; cellURL != "" {
@@ -786,6 +787,7 @@ func main() {
 					mu.Unlock()
 					continue
 				}
+				client.OCMConfigPath = ocmConfigPath
 
 				fmt.Fprintf(os.Stderr, "  ✓ Connected to %s\n", hiveName)
 
@@ -1083,7 +1085,7 @@ func runBYOCBrief(resultsFile string) error {
 	result := map[string]briefCluster{}
 
 	for _, out := range outputs {
-		if out.OperatorName != "byoc" {
+		if out.OperatorName != "byoc" || out.ClusterID == "" {
 			continue
 		}
 

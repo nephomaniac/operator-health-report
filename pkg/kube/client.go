@@ -9,6 +9,8 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -34,9 +36,10 @@ import (
 
 // ClusterClient provides native k8s access to a cluster via backplane.
 type ClusterClient struct {
-	ClusterID string
-	Reason    string
-	NoElevate bool
+	ClusterID     string
+	Reason        string
+	NoElevate     bool
+	OCMConfigPath string
 
 	restConfig     *rest.Config
 	elevatedConfig *rest.Config
@@ -67,6 +70,10 @@ type ClusterClient struct {
 	alertsOnce   sync.Once
 	alertsResult string
 	alertsErr    error
+
+	// Temporary kubeconfig for external command execution (BYOC)
+	kubeconfigPath string
+	kubeconfigOnce sync.Once
 }
 
 // portForwardSession manages a port-forward to a Thanos/Prometheus pod.
@@ -321,11 +328,56 @@ func ConnectToClusterWithConn(ctx context.Context, clusterID, reason string, noE
 // Disconnect cleans up the connection (no-op for backplane — session is per-request)
 func (cc *ClusterClient) Disconnect() {
 	cc.closePortForward()
+	cc.cleanupKubeconfig()
 	log := logging.Log.WithField("cluster_id", cc.ClusterID)
 	if cc.ElevatedCallCount > 0 {
 		log.WithField("elevated_calls", cc.ElevatedCallCount).Info("Cluster disconnected (elevated operations used)")
 	} else {
 		log.Debug("Cluster disconnected (no elevated operations)")
+	}
+}
+
+// KubeconfigPath returns a path to a temporary kubeconfig file for this cluster.
+// Created via `ocm backplane login` on first call, cleaned up on Disconnect.
+// Used by BYOC to give shell commands (oc, kubectl) cluster context.
+func (cc *ClusterClient) KubeconfigPath() string {
+	cc.kubeconfigOnce.Do(func() {
+		if cc.ClusterID == "" {
+			return
+		}
+		f, err := os.CreateTemp("", "healthcheck-kubeconfig-*.yaml")
+		if err != nil {
+			logging.Log.WithField("cluster_id", cc.ClusterID).Warnf("Failed to create temp kubeconfig: %v", err)
+			return
+		}
+		f.Close()
+		tmpPath := f.Name()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "ocm", "backplane", "login", cc.ClusterID)
+		env := append(os.Environ(), "KUBECONFIG="+tmpPath)
+		if cc.OCMConfigPath != "" {
+			env = append(env, "OCM_CONFIG="+cc.OCMConfigPath)
+		}
+		cmd.Env = env
+		out, loginErr := cmd.CombinedOutput()
+		if loginErr != nil {
+			logging.Log.WithField("cluster_id", cc.ClusterID).Warnf("BYOC kubeconfig login failed: %v: %s", loginErr, string(out))
+			os.Remove(tmpPath)
+			return
+		}
+		cc.kubeconfigPath = tmpPath
+		logging.Log.WithField("cluster_id", cc.ClusterID).Debug("BYOC kubeconfig created")
+	})
+	return cc.kubeconfigPath
+}
+
+func (cc *ClusterClient) cleanupKubeconfig() {
+	if cc.kubeconfigPath != "" {
+		os.Remove(cc.kubeconfigPath)
+		cc.kubeconfigPath = ""
 	}
 }
 

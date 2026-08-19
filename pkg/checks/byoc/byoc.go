@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/openshift/operator-health-report/pkg/checks"
@@ -111,6 +112,18 @@ func runCheck(ctx context.Context, cc *checks.ClusterContext, def CheckDef) {
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, "bash", "-c", def.Command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
+	// Set KUBECONFIG so oc/kubectl commands target the connected cluster
+	if cc.Client != nil {
+		if kcPath := cc.Client.KubeconfigPath(); kcPath != "" {
+			cmd.Env = append(os.Environ(), "KUBECONFIG="+kcPath)
+		}
+	}
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -162,12 +175,15 @@ func runCheck(ctx context.Context, cc *checks.ClusterContext, def CheckDef) {
 		issues = append(issues, fmt.Sprintf("exit code %d (expected %d)", exitCode, expectedExit))
 	}
 
+	// Trim stdout for regex matching (wc, awk etc. may add leading/trailing whitespace)
+	trimmedOut := strings.TrimSpace(stdout.String())
+
 	// Output regex match
 	if def.OutputRegex != "" {
 		re, compileErr := regexp.Compile(def.OutputRegex)
 		if compileErr != nil {
 			issues = append(issues, fmt.Sprintf("invalid output_regex %q: %v", def.OutputRegex, compileErr))
-		} else if !re.MatchString(stdout.String()) {
+		} else if !re.MatchString(trimmedOut) {
 			issues = append(issues, fmt.Sprintf("output did not match regex %q", def.OutputRegex))
 			r.Details["regex_matched"] = false
 		} else {
@@ -180,7 +196,7 @@ func runCheck(ctx context.Context, cc *checks.ClusterContext, def CheckDef) {
 		re, compileErr := regexp.Compile(def.OutputNotRegex)
 		if compileErr != nil {
 			issues = append(issues, fmt.Sprintf("invalid output_not_regex %q: %v", def.OutputNotRegex, compileErr))
-		} else if re.MatchString(stdout.String()) {
+		} else if re.MatchString(trimmedOut) {
 			issues = append(issues, fmt.Sprintf("output matched exclusion regex %q", def.OutputNotRegex))
 			r.Details["not_regex_violated"] = true
 		}
