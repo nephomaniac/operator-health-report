@@ -16,6 +16,7 @@ import (
 
 	"github.com/openshift/operator-health-report/pkg/checks"
 	"github.com/openshift/operator-health-report/pkg/config"
+	"github.com/openshift/operator-health-report/pkg/fleet"
 	"github.com/openshift/operator-health-report/pkg/kube"
 	"github.com/openshift/operator-health-report/pkg/logging"
 	"github.com/openshift/operator-health-report/pkg/ocm"
@@ -82,6 +83,9 @@ func main() {
 		byocCommand    string
 		byocFile       string
 		byocBrief      string
+		byHive         string
+		ownerDomain    string
+		sector         string
 	)
 
 	flag.StringVar(&clusterList, "cluster-list", cfg.ClusterList, "File with cluster IDs (one per line)")
@@ -105,6 +109,9 @@ func main() {
 	flag.StringVar(&byocCommand, "byoc", "", "Bring Your Own Check: ad-hoc command to run on each cluster (exit 0 = PASS)")
 	flag.StringVar(&byocFile, "byof", "", "Bring Your Own File: JSON file with check definitions to run on each cluster")
 	flag.StringVar(&byocBrief, "byoc-brief", "", "Extract compact BYOC results from a results JSON file to stdout (jq-friendly)")
+	flag.StringVar(&byHive, "by-hive", "", "Discover clusters from hive shard(s) — name, pattern, or 'all' (e.g., hive-stage-01, stage, canary, all)")
+	flag.StringVar(&ownerDomain, "owner-domain", "", "Filter clusters by owner email domain (e.g., redhat.com)")
+	flag.StringVar(&sector, "sector", "", "Filter MC/SC clusters by HCP sector (e.g., canary, main, perf)")
 	flag.Parse()
 
 	if cfgPath != "" {
@@ -221,8 +228,8 @@ func main() {
 		}
 	}
 
-	if clusterList == "" && !saasOnly && needsManagedClusters {
-		fmt.Fprintln(os.Stderr, "Error: --cluster-list is required (or use --saas-only)")
+	if clusterList == "" && byHive == "" && !saasOnly && needsManagedClusters {
+		fmt.Fprintln(os.Stderr, "Error: --cluster-list or --by-hive is required (or use --saas-only)")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -230,9 +237,10 @@ func main() {
 	// Read cluster IDs (skip if saas-only mode or no managed operators)
 	var clusterIDs []string
 	var rawIDs []string
+	clusterNames := map[string]string{} // ID → name from list file (for sector filtering)
 	if !saasOnly && clusterList != "" {
 		var readErr error
-		rawIDs, readErr = readClusterList(clusterList)
+		rawIDs, clusterNames, readErr = readClusterList(clusterList)
 		if readErr != nil {
 			fmt.Fprintf(os.Stderr, "Error reading cluster list: %v\n", readErr)
 			os.Exit(1)
@@ -243,7 +251,7 @@ func main() {
 	if parallel < 1 {
 		parallel = 1
 	}
-	if parallel > len(clusterIDs) {
+	if len(clusterIDs) > 0 && parallel > len(clusterIDs) {
 		parallel = len(clusterIDs)
 	}
 
@@ -384,6 +392,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Prod OCM: skipping pipeline URL resolution (%v)\n", prodErr)
 	}
 
+	// Fetch fleet topology (MC/SC sectors, parent relationships).
+	// Use the primary OCM client so cluster IDs match the current environment.
+	var fleetTopo *fleet.Topology
+	{
+		topo, topoErr := fleet.FetchTopology(context.Background(), ocmClient.Conn())
+		if topoErr == nil && topo != nil {
+			fleetTopo = topo
+			fmt.Fprintf(os.Stderr, "Fleet topology: %s\n", topo.String())
+		}
+	}
+
 	var saasMetadata []saasTargetMeta
 	for _, op := range opConfigs {
 		ctx := context.Background()
@@ -423,6 +442,223 @@ func main() {
 		fmt.Fprintf(os.Stderr, "OSDFM Vector image (%s): %s\n", ocmClient.Environment(), vectorImage)
 	} else {
 		logging.Log.WithError(osdfmErr).Debug("Could not fetch OSDFM Vector image — RLR version check will report INFO")
+	}
+
+	// Shared hive OCM client — lazily created, used by both --by-hive discovery
+	// and hive operator processing. Hive clusters are always in production OCM.
+	var hiveOCM *ocm.Client
+	getHiveOCM := func() *ocm.Client {
+		if hiveOCM != nil {
+			return hiveOCM
+		}
+		hiveURL := hiveOCMURL
+		if hiveURL == "" {
+			hiveURL = "https://api.openshift.com"
+		}
+		hiveClient, hiveErr := ocm.NewClientWithOptions(ocm.Options{URL: hiveURL})
+		if hiveErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ Cannot connect to hive OCM (%s): %v\n", hiveURL, hiveErr)
+			return nil
+		}
+		hiveOCM = hiveClient
+		return hiveOCM
+	}
+	defer func() {
+		if hiveOCM != nil {
+			hiveOCM.Close()
+		}
+	}()
+
+	// Hive-based cluster discovery: connect to hive shards, list ClusterDeployments
+	var hiveSyncData map[string]*fleet.ClusterSyncStatus // OCM ID → sync status
+	if byHive != "" && !saasOnly {
+		hiveConn := getHiveOCM()
+		if hiveConn == nil {
+			fmt.Fprintf(os.Stderr, "Error: --by-hive requires hive OCM connection\n")
+			os.Exit(1)
+		}
+		_ = hiveConn // used below via hiveOCM
+		// Collect all SAAS targets to resolve hive patterns
+		var allTargets []saas.Target
+		for _, op := range opConfigs {
+			targets, tErr := saas.FetchAllTargets(context.Background(), op.PKOSaas, op.OLMSaas)
+			if tErr == nil {
+				allTargets = append(allTargets, targets...)
+			}
+		}
+
+		hiveNames := fleet.ResolveHivePattern(byHive, allTargets, ocmClient.Environment())
+		if len(hiveNames) == 0 {
+			fmt.Fprintf(os.Stderr, "Error: --by-hive %q matched no hive shards for %s\n", byHive, ocmClient.Environment())
+			os.Exit(1)
+		}
+		sort.Strings(hiveNames)
+		fmt.Fprintf(os.Stderr, "Hive discovery: %s → %s\n", byHive, strings.Join(hiveNames, ", "))
+
+		discoveredIDs := map[string]bool{}
+		discoveredNames := map[string]string{} // ID → name
+		hiveSyncData = map[string]*fleet.ClusterSyncStatus{}
+
+		for _, hiveName := range hiveNames {
+			hiveID, resolveErr := hiveOCM.ResolveClusterByName(hiveName)
+			if resolveErr != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ Cannot find hive %s: %v\n", hiveName, resolveErr)
+				continue
+			}
+
+			hiveNoElev := !explicitElevate
+			client, connErr := kube.ConnectToClusterWithConn(context.Background(), hiveID, reason, hiveNoElev, hiveOCM.Conn())
+			if connErr != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ Cannot connect to hive %s: %v\n", hiveName, connErr)
+				continue
+			}
+
+			clusters, discErr := fleet.DiscoverClustersFromHive(context.Background(), client)
+			if discErr != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ Cannot list ClusterDeployments on %s: %v\n", hiveName, discErr)
+				client.Disconnect()
+				continue
+			}
+
+			for _, ci := range clusters {
+				discoveredIDs[ci.OCMID] = true
+				discoveredNames[ci.OCMID] = ci.Name
+			}
+
+			syncData, syncErr := fleet.CollectClusterSync(context.Background(), client)
+			if syncErr != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠ ClusterSync collection failed on %s: %v\n", hiveName, syncErr)
+			} else if syncData != nil {
+				nsToID := map[string]string{}
+				for _, ci := range clusters {
+					nsToID[ci.Namespace] = ci.OCMID
+				}
+				for ns, cs := range syncData {
+					if ocmID, ok := nsToID[ns]; ok {
+						hiveSyncData[ocmID] = cs
+					}
+				}
+			}
+
+			client.Disconnect()
+			fmt.Fprintf(os.Stderr, "  ✓ %s: %d clusters discovered", hiveName, len(clusters))
+			if syncData != nil {
+				failCount := 0
+				for _, cs := range syncData {
+					if cs.Failed {
+						failCount++
+					}
+				}
+				if failCount > 0 {
+					fmt.Fprintf(os.Stderr, " (%d with sync failures)", failCount)
+				}
+			}
+			fmt.Fprintln(os.Stderr)
+		}
+
+		if clusterList != "" {
+			filtered := make([]string, 0, len(clusterIDs))
+			for _, id := range clusterIDs {
+				if discoveredIDs[id] {
+					filtered = append(filtered, id)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "Hive filter: %d of %d clusters match\n", len(filtered), len(clusterIDs))
+			clusterIDs = filtered
+		} else {
+			clusterIDs = make([]string, 0, len(discoveredIDs))
+			for id := range discoveredIDs {
+				clusterIDs = append(clusterIDs, id)
+			}
+			sort.Strings(clusterIDs)
+			fmt.Fprintf(os.Stderr, "Discovered %d clusters from hive\n", len(clusterIDs))
+		}
+
+		// Merge discovered names into clusterNames for downstream filters
+		for id, name := range discoveredNames {
+			clusterNames[id] = name
+		}
+	}
+
+	// Owner domain filter — post-filter using batch subscriptions API
+	if ownerDomain != "" && len(clusterIDs) > 0 {
+		filtered, filterErr := ocmClient.FilterByOwnerDomain(context.Background(), clusterIDs, ownerDomain)
+		if filterErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ Owner domain filter failed: %v\n", filterErr)
+		} else {
+			fmt.Fprintf(os.Stderr, "Owner domain filter (@%s): %d of %d clusters match\n",
+				strings.TrimPrefix(ownerDomain, "@"), len(filtered), len(clusterIDs))
+			clusterIDs = filtered
+		}
+	}
+
+	// Sector filter — keep only MC/SC clusters in the specified sector
+	if sector != "" && len(clusterIDs) > 0 && fleetTopo != nil {
+		sectorFCs := fleetTopo.BySector[sector]
+		if len(sectorFCs) == 0 {
+			fmt.Fprintf(os.Stderr, "⚠ Sector %q not found in fleet topology (known: %s)\n", sector, strings.Join(fleetTopo.Sectors(), ", "))
+		} else {
+			allowedByID := map[string]bool{}
+			allowedByName := map[string]bool{}
+			for _, fc := range sectorFCs {
+				if fc.ClusterID != "" {
+					allowedByID[fc.ClusterID] = true
+				}
+				if fc.Name != "" {
+					allowedByName[fc.Name] = true
+				}
+			}
+			var filtered []string
+			for _, id := range clusterIDs {
+				if allowedByID[id] {
+					filtered = append(filtered, id)
+				} else if name := clusterNames[id]; name != "" && allowedByName[name] {
+					filtered = append(filtered, id)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "Sector filter (%s): %d of %d clusters match\n", sector, len(filtered), len(clusterIDs))
+			clusterIDs = filtered
+		}
+	}
+
+	// Name regex filter (--exclude, --include) — applied to all discovery paths
+	if len(clusterIDs) > 0 && (excludePattern != "" || includePattern != "") {
+		var excludeRe, includeRe *regexp.Regexp
+		if excludePattern != "" {
+			var err error
+			excludeRe, err = regexp.Compile(excludePattern)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --exclude regex %q: %v\n", excludePattern, err)
+				os.Exit(1)
+			}
+		}
+		if includePattern != "" {
+			var err error
+			includeRe, err = regexp.Compile(includePattern)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --include regex %q: %v\n", includePattern, err)
+				os.Exit(1)
+			}
+		}
+		before := len(clusterIDs)
+		var filtered []string
+		for _, id := range clusterIDs {
+			name := clusterNames[id]
+			if name == "" {
+				name = id
+			}
+			if excludeRe != nil && excludeRe.MatchString(name) {
+				continue
+			}
+			if includeRe != nil && !includeRe.MatchString(name) {
+				continue
+			}
+			filtered = append(filtered, id)
+		}
+		if len(filtered) != before {
+			fmt.Fprintf(os.Stderr, "Name filter: %d of %d clusters match\n", len(filtered), before)
+		}
+		clusterIDs = filtered
 	}
 
 	// Signal handling — graceful shutdown on ctrl-c
@@ -487,9 +723,11 @@ func main() {
 			if tErr == nil {
 				for _, t := range targets {
 					if t.HiveCluster != "" {
-						// Filter by current OCM environment
-						env := classifyHiveEnv(t.HiveCluster)
-						if env == ocmClient.Environment() || (env == "staging" && ocmClient.Environment() == "staging") {
+						env := t.OCMEnv
+						if env == "" {
+							env = classifyHiveEnv(t.HiveCluster)
+						}
+						if envMatch(env, ocmClient.Environment()) {
 							hiveClusterNames[t.HiveCluster] = true
 						}
 					}
@@ -522,6 +760,13 @@ func main() {
 	// Process clusters — concurrently up to --parallel limit
 	var allOutputs []checks.ClusterOutput
 	var skippedClusters []skippedCluster
+	if parallel < 1 {
+		parallel = 1
+	}
+	if len(clusterIDs) > 0 && parallel > len(clusterIDs) {
+		parallel = len(clusterIDs)
+	}
+
 	var mu sync.Mutex
 	sem := make(chan struct{}, parallel)
 	var clusterWg sync.WaitGroup
@@ -651,6 +896,7 @@ func main() {
 				ChannelGroup:   meta.ChannelGroup,
 				LimitedSupport: meta.LimitedSupport,
 				Shard:          meta.Shard,
+				Sector:         enrichSector(fleetTopo, cid, clusterName),
 				CreatedAt:      meta.CreatedAt,
 				OwnerOrg:       meta.OwnerOrg,
 				OwnerEmail:     maskedEmail,
@@ -683,6 +929,7 @@ func main() {
 						ClusterVersion: clusterVersion,
 						ClusterType:    clusterType,
 						HiveShard:      hiveShard,
+						Sector:         clusterMeta.Sector,
 						OCMEnv:         ocmEnv,
 						Metadata:       clusterMeta,
 						Client:         client,
@@ -694,6 +941,12 @@ func main() {
 
 					output := cc.ToOutput(version)
 					output.OperatorVersion = detectOperatorVersion(ctx, client, op)
+
+					if hiveSyncData != nil {
+						if syncStatus, ok := hiveSyncData[cid]; ok {
+							output.SyncStatus = syncStatus
+						}
+					}
 
 					mu.Lock()
 					allOutputs = append(allOutputs, output)
@@ -733,20 +986,10 @@ func main() {
 	// Wait for managed cluster processing to complete before starting hive
 	clusterWg.Wait()
 
-	// Process hive clusters for hive-scoped operators
-	if hasHiveOperators && len(hiveClusterNames) > 0 && rootCtx.Err() == nil {
-		// Create hive OCM connection — hive clusters are always in production OCM
-		hiveURL := hiveOCMURL
-		if hiveURL == "" {
-			hiveURL = "https://api.openshift.com" // hive clusters are registered in production
-		}
-
-		hiveOCM, hiveErr := ocm.NewClientWithOptions(ocm.Options{URL: hiveURL})
-		if hiveErr != nil {
-			fmt.Fprintf(os.Stderr, "⚠ Cannot connect to hive OCM (%s): %v\n", hiveURL, hiveErr)
-		} else {
-			defer hiveOCM.Close()
-			fmt.Fprintf(os.Stderr, "\nProcessing %d hive cluster(s) for %d operator(s)...\n", len(hiveClusterNames), len(hiveOps))
+	// Process hive clusters for hive-scoped operators (reuses shared hiveOCM client)
+	if hasHiveOperators && len(hiveClusterNames) > 0 && rootCtx.Err() == nil && getHiveOCM() != nil {
+		fmt.Fprintf(os.Stderr, "\nProcessing %d hive cluster(s) for %d operator(s)...\n", len(hiveClusterNames), len(hiveOps))
+		{
 
 			for hiveName := range hiveClusterNames {
 				if checks.Cancelled(rootCtx) {
@@ -895,12 +1138,15 @@ func (s *stringSlice) Set(v string) error {
 	return nil
 }
 
-func readClusterList(path string) ([]string, error) {
+// readClusterList reads cluster identifiers from a file (one per line, first field).
+// Also returns a map of ID → name when the second column is present.
+func readClusterList(path string) ([]string, map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var ids []string
+	names := map[string]string{}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -909,9 +1155,12 @@ func readClusterList(path string) ([]string, error) {
 		fields := strings.Fields(line)
 		if len(fields) > 0 {
 			ids = append(ids, fields[0])
+			if len(fields) > 1 {
+				names[fields[0]] = fields[1]
+			}
 		}
 	}
-	return ids, nil
+	return ids, names, nil
 }
 
 func detectOperatorVersion(ctx context.Context, client *kube.ClusterClient, op checks.OperatorConfig) string {
@@ -1036,6 +1285,30 @@ func orDefault(val, def string) string {
 		return val
 	}
 	return def
+}
+
+func envMatch(a, b string) bool {
+	return normalizeEnv(a) == normalizeEnv(b)
+}
+
+func normalizeEnv(env string) string {
+	if env == "stage" || env == "staging" {
+		return "staging"
+	}
+	return env
+}
+
+func enrichSector(topo *fleet.Topology, clusterID, clusterName string) string {
+	if topo == nil {
+		return ""
+	}
+	if fc := topo.EnrichCluster(clusterID); fc != nil {
+		return fc.Sector
+	}
+	if fc := topo.EnrichByName(clusterName); fc != nil {
+		return fc.Sector
+	}
+	return ""
 }
 
 func classifyHiveEnv(hiveName string) string {

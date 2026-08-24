@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openshift/operator-health-report/pkg/logging"
@@ -34,6 +35,7 @@ type Target struct {
 	Publish     []string `json:"publish"`       // channels this target publishes to
 	Subscribe   []string `json:"subscribe"`     // channels this target subscribes to
 	HiveCluster string   `json:"hive_cluster"`  // hive cluster name from namespace ref
+	OCMEnv      string   `json:"ocm_env"`       // resolved OCM environment from app-interface (integration, stage, production)
 	ResolvedSHA string   `json:"resolved_sha,omitempty"` // commit SHA when ref is a branch name
 }
 
@@ -243,6 +245,7 @@ func fetchTargets(ctx context.Context, saasFileName string) ([]Target, error) {
 				Publish:     st.Promotion.Publish,
 				Subscribe:   st.Promotion.Subscribe,
 				HiveCluster: extractHiveFromRef(st.Namespace.Ref),
+				OCMEnv:      ResolveHiveEnv(ctx, st.Namespace.Ref),
 			}
 
 			// Resolve image tag from Quay (passes repo URL for branch→SHA resolution)
@@ -385,6 +388,112 @@ func extractHiveFromRef(ref string) string {
 		}
 	}
 	return ""
+}
+
+// namespaceEnvFile is the YAML structure for an app-interface namespace cluster-scope file
+type namespaceEnvFile struct {
+	Environment saasNamespace `yaml:"environment"`
+}
+
+// envFile is the YAML structure for an app-interface environment file
+type envFile struct {
+	Labels     map[string]string `yaml:"labels"`
+	Parameters map[string]string `yaml:"parameters"`
+}
+
+const appInterfaceBaseURL = "https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data"
+
+// envCache stores resolved hive cluster → OCM environment type mappings
+var (
+	envCache   = map[string]string{}
+	envCacheMu sync.RWMutex
+)
+
+// ResolveHiveEnv resolves a hive cluster's OCM environment by following the
+// app-interface ref chain: namespace $ref → cluster-scope.yml → environment $ref → environment.yml.
+// Returns the environment type from labels.type (e.g., "integration", "stage", "production").
+// Results are cached by hive cluster name.
+func ResolveHiveEnv(ctx context.Context, namespaceRef string) string {
+	hive := extractHiveFromRef(namespaceRef)
+	if hive == "" {
+		return ""
+	}
+
+	envCacheMu.RLock()
+	if cached, ok := envCache[hive]; ok {
+		envCacheMu.RUnlock()
+		return cached
+	}
+	envCacheMu.RUnlock()
+
+	log := logging.Log
+
+	// Fetch the namespace cluster-scope.yml to get the environment $ref
+	nsURL := fmt.Sprintf("%s%s?ref_type=heads", appInterfaceBaseURL, namespaceRef)
+	req, err := http.NewRequestWithContext(ctx, "GET", nsURL, nil)
+	if err != nil {
+		log.WithField("error", err).Debug("Failed to create namespace request")
+		return ""
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.WithField("error", err).Debug("Failed to fetch namespace file")
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.WithField("status", resp.StatusCode).WithField("hive", hive).Debug("Namespace file not found")
+		return ""
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+
+	var ns namespaceEnvFile
+	if err := yaml.Unmarshal(body, &ns); err != nil {
+		log.WithField("error", err).Debug("Failed to parse namespace file")
+		return ""
+	}
+	if ns.Environment.Ref == "" {
+		return ""
+	}
+
+	// Fetch the environment file to get labels.type
+	envURL := fmt.Sprintf("%s%s?ref_type=heads", appInterfaceBaseURL, ns.Environment.Ref)
+	req2, err := http.NewRequestWithContext(ctx, "GET", envURL, nil)
+	if err != nil {
+		return ""
+	}
+	resp2, err := httpClient.Do(req2)
+	if err != nil {
+		log.WithField("error", err).Debug("Failed to fetch environment file")
+		return ""
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		log.WithField("status", resp2.StatusCode).WithField("ref", ns.Environment.Ref).Debug("Environment file not found")
+		return ""
+	}
+	body2, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		return ""
+	}
+
+	var ef envFile
+	if err := yaml.Unmarshal(body2, &ef); err != nil {
+		log.WithField("error", err).Debug("Failed to parse environment file")
+		return ""
+	}
+
+	envType := ef.Labels["type"]
+	if envType != "" {
+		envCacheMu.Lock()
+		envCache[hive] = envType
+		envCacheMu.Unlock()
+		log.WithField("hive", hive).WithField("env", envType).Debug("Resolved hive environment from app-interface")
+	}
+	return envType
 }
 
 const osdfmDeployURL = "https://gitlab.cee.redhat.com/service/app-interface/-/raw/master/data/services/ocm/osd-fleet-manager/cicd/deploy.yaml?ref_type=heads"

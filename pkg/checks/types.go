@@ -101,6 +101,8 @@ type ClusterMetadata struct {
 	ChannelGroup    string `json:"channel_group"`
 	LimitedSupport  bool   `json:"limited_support"`
 	Shard           string `json:"shard"`
+	Sector          string `json:"sector,omitempty"`
+	ParentSC        string `json:"parent_sc,omitempty"`
 	CreatedAt       string            `json:"created_at,omitempty"`
 	OwnerOrg        string            `json:"owner_org,omitempty"`
 	OwnerEmail      string            `json:"owner_email,omitempty"`
@@ -124,6 +126,7 @@ type ClusterOutput struct {
 	ClusterName     string           `json:"cluster_name"`
 	ClusterType     string           `json:"cluster_type"`
 	HiveShard       string           `json:"hive_shard"`
+	Sector          string           `json:"sector,omitempty"`
 	ClusterVersion  string           `json:"cluster_version"`
 	OperatorName    string           `json:"operator_name"`
 	OperatorVersion string           `json:"operator_version"`
@@ -136,6 +139,7 @@ type ClusterOutput struct {
 	HealthChecks    []Result         `json:"health_checks"`
 	APIErrors       []APIError       `json:"api_errors"`
 	ElevatedOps     []string         `json:"elevated_ops,omitempty"`
+	SyncStatus      any              `json:"cluster_sync_status,omitempty"`
 }
 
 // HealthSummary aggregates check results
@@ -152,6 +156,7 @@ type ClusterContext struct {
 	ClusterVersion string
 	ClusterType    string
 	HiveShard      string
+	Sector         string
 	OCMEnv         string
 	Metadata       *ClusterMetadata
 
@@ -268,6 +273,7 @@ func (cc *ClusterContext) ToOutput(version string) ClusterOutput {
 		ClusterName:     cc.ClusterName,
 		ClusterType:     cc.ClusterType,
 		HiveShard:       cc.HiveShard,
+		Sector:          cc.Sector,
 		ClusterVersion:  cc.ClusterVersion,
 		OperatorName:    cc.Operator.Name,
 		Namespace:       cc.Operator.Namespace,

@@ -1,6 +1,7 @@
 package ocm
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	sdk "github.com/openshift-online/ocm-sdk-go"
+	amv1 "github.com/openshift-online/ocm-sdk-go/accountsmgmt/v1"
 	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
 
 	ocmConfig "github.com/openshift-online/ocm-common/pkg/ocm/config"
@@ -94,6 +96,26 @@ func NewClientForEnvWithWorkload(env string, clusterCount, operatorCount, parall
 	})
 }
 
+// urlAliases maps environment names/shorthand to OCM API URLs.
+var urlAliases = map[string]string{
+	"production":  "https://api.openshift.com",
+	"prod":        "https://api.openshift.com",
+	"staging":     "https://api.stage.openshift.com",
+	"stage":       "https://api.stage.openshift.com",
+	"integration": "https://api.integration.openshift.com",
+	"int":         "https://api.integration.openshift.com",
+}
+
+// ResolveOCMURL resolves an OCM URL or alias to a full URL.
+// Accepts "production", "prod", "staging", "stage", "integration", "int",
+// or a full URL like "https://api.openshift.com".
+func ResolveOCMURL(urlOrAlias string) string {
+	if resolved, ok := urlAliases[strings.ToLower(urlOrAlias)]; ok {
+		return resolved
+	}
+	return urlOrAlias
+}
+
 // NewClientWithOptions creates an OCM client using the provided options.
 func NewClientWithOptions(opts Options) (*Client, error) {
 	config, err := resolveConfig(opts)
@@ -104,9 +126,9 @@ func NewClientWithOptions(opts Options) (*Client, error) {
 		return nil, fmt.Errorf("OCM not configured — run 'ocm login' first")
 	}
 
-	// Apply overrides
+	// Apply overrides (resolve aliases like "production" → full URL)
 	if opts.URL != "" {
-		config.URL = opts.URL
+		config.URL = ResolveOCMURL(opts.URL)
 	}
 	if opts.TokenURL != "" {
 		config.TokenURL = opts.TokenURL
@@ -658,4 +680,64 @@ func refreshLogin(url string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 	return cmd.Run()
+}
+
+// FilterByOwnerDomain filters cluster IDs to only those owned by users with
+// the given email domain (e.g., "redhat.com"). Uses the subscriptions API with
+// batched cluster_id IN (...) queries to avoid pulling all subscriptions.
+func (c *Client) FilterByOwnerDomain(ctx context.Context, clusterIDs []string, domain string) ([]string, error) {
+	if len(clusterIDs) == 0 || domain == "" {
+		return clusterIDs, nil
+	}
+
+	if !strings.HasPrefix(domain, "@") {
+		domain = "@" + domain
+	}
+
+	log := logging.Log
+	batchSize := 50
+	matched := map[string]bool{}
+
+	for i := 0; i < len(clusterIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(clusterIDs) {
+			end = len(clusterIDs)
+		}
+		batch := clusterIDs[i:end]
+
+		// Build cluster_id IN ('id1','id2',...) clause
+		var quoted []string
+		for _, id := range batch {
+			quoted = append(quoted, "'"+id+"'")
+		}
+		search := fmt.Sprintf("cluster_id in (%s) and creator.email like '%%%s'",
+			strings.Join(quoted, ","), domain)
+
+		resp, err := c.conn.AccountsMgmt().V1().Subscriptions().List().
+			Search(search).
+			Size(len(batch)).
+			SendContext(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("subscriptions search: %w", err)
+		}
+
+		resp.Items().Each(func(sub *amv1.Subscription) bool {
+			if cid, ok := sub.GetClusterID(); ok {
+				matched[cid] = true
+			}
+			return true
+		})
+	}
+
+	var result []string
+	for _, id := range clusterIDs {
+		if matched[id] {
+			result = append(result, id)
+		}
+	}
+
+	log.WithField("matched", len(result)).WithField("total", len(clusterIDs)).
+		WithField("domain", domain).Debug("Filtered clusters by owner domain")
+
+	return result, nil
 }
