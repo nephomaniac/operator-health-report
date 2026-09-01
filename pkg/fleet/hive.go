@@ -235,15 +235,28 @@ func ResolveHivePattern(pattern string, targets []saas.Target, ocmEnv string) []
 		return all
 	}
 
+	// Support comma-separated patterns (e.g., "hivep03uw1,hivep04ew2")
+	patterns := strings.Split(pattern, ",")
+
+	matchedSet := map[string]bool{}
 	var matched []string
-	lower := strings.ToLower(pattern)
-	for _, hive := range all {
-		hiveLower := strings.ToLower(hive)
-		if hiveLower == lower ||
-			hiveLower == "hive-"+lower ||
-			hiveLower == "hive"+lower ||
-			strings.Contains(hiveLower, lower) {
-			matched = append(matched, hive)
+	for _, p := range patterns {
+		lower := strings.ToLower(strings.TrimSpace(p))
+		if lower == "" {
+			continue
+		}
+		for _, hive := range all {
+			if matchedSet[hive] {
+				continue
+			}
+			hiveLower := strings.ToLower(hive)
+			if hiveLower == lower ||
+				hiveLower == "hive-"+lower ||
+				hiveLower == "hive"+lower ||
+				strings.Contains(hiveLower, lower) {
+				matchedSet[hive] = true
+				matched = append(matched, hive)
+			}
 		}
 	}
 

@@ -96,6 +96,7 @@ func (c *RHOBSChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext)
 	// Synthetics agent — MC only (source: rhobs-synthetics-agent)
 	if cc.ClusterType == "management_cluster" {
 		checkSyntheticsAgent(ctx, cc)
+		checkSyntheticsAPIFetch(ctx, cc)
 		checkSyntheticsProbeHealth(ctx, cc)
 	}
 }
@@ -1680,6 +1681,81 @@ func checkSyntheticsAgent(ctx context.Context, cc *checks.ClusterContext) {
 		r.Severity = checks.SeverityCritical
 		r.Message = fmt.Sprintf("Synthetics agent excessive updates — %.1f%% applied (%.4f/s) — possible pre-fix version or config drift causing unnecessary Probe CR writes", (1-skipRatio)*100, appliedRate)
 	}
+	cc.AddResult(r)
+}
+
+func checkSyntheticsAPIFetch(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("rhobs_synthetics_api_fetch")
+
+	r := checks.Result{
+		Check:    "rhobs_synthetics_api_fetch",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"description":   "Checks the synthetics agent's ability to fetch probe definitions from the synthetics API. Queries rhobs_synthetics_agent_probe_list_fetch_total by status (success/error). Sustained fetch failures mean new probes will not be created and existing probes will not be reconciled — triggers SyntheticsAgentFetchFailures alert after 10 minutes.",
+			"pass_criteria": "PASS: recent successful fetches with zero or low errors. WARN: some errors but fetches still succeeding. FAIL: no successful fetches (matches SyntheticsAgentFetchFailures alert condition).",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		r.Status = checks.StatusSkip
+		r.Message = "Metrics unavailable"
+		cc.AddResult(r)
+		return
+	}
+
+	successQuery := `sum(rate(rhobs_synthetics_agent_probe_list_fetch_total{status="success"}[10m]))`
+	errorQuery := `sum(rate(rhobs_synthetics_agent_probe_list_fetch_total{status="error"}[10m]))`
+
+	successBody, successErr := cc.Client.QueryMetrics(ctx, successQuery)
+	errorBody, errorErr := cc.Client.QueryMetrics(ctx, errorQuery)
+
+	if successErr != nil && errorErr != nil {
+		r.Status = checks.StatusInfo
+		r.Message = "API fetch metrics not available — agent may be pre-metrics version or not configured"
+		cc.AddResult(r)
+		return
+	}
+
+	successRate := 0.0
+	errorRate := 0.0
+	if successErr == nil && thanos.HasResults(successBody) {
+		if v, ok := thanos.InstantFloat(successBody); ok {
+			successRate = v
+		}
+	}
+	if errorErr == nil && thanos.HasResults(errorBody) {
+		if v, ok := thanos.InstantFloat(errorBody); ok {
+			errorRate = v
+		}
+	}
+
+	r.Details["success_rate_per_sec"] = thanos.Round(successRate, 4)
+	r.Details["error_rate_per_sec"] = thanos.Round(errorRate, 4)
+
+	totalRate := successRate + errorRate
+
+	switch {
+	case totalRate == 0:
+		r.Status = checks.StatusInfo
+		r.Message = "No API fetch activity in the last 10 minutes — agent may not be configured for API-driven probes"
+	case successRate == 0 && errorRate > 0:
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("Synthetics agent cannot fetch probes from API — all fetches failing (%.4f errors/s, 0 successes) — SyntheticsAgentFetchFailures likely firing", errorRate)
+	case errorRate > 0 && successRate > 0:
+		errorRatio := errorRate / totalRate
+		r.Details["error_ratio"] = thanos.Round(errorRatio, 4)
+		if errorRatio > 0.5 {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("Synthetics agent API fetch degraded — %.0f%% errors (%.4f errors/s, %.4f success/s)", errorRatio*100, errorRate, successRate)
+		} else {
+			r.Status = checks.StatusPass
+			r.Message = fmt.Sprintf("Synthetics agent API fetch healthy with some errors — %.4f success/s, %.4f errors/s", successRate, errorRate)
+		}
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("Synthetics agent API fetch healthy — %.4f success/s", successRate)
+	}
+
 	cc.AddResult(r)
 }
 

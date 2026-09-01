@@ -682,8 +682,10 @@ func checkOperatorMetrics(ctx context.Context, cc *checks.ClusterContext) {
 		},
 	}
 
-	if !cc.Client.CanElevate() {
-		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
+	if !cc.Client.CanQueryMetrics() {
+		r.Status = checks.StatusSkip
+		r.Message = "Metrics unavailable — no port-forward, elevation, or RHOBS remote configured"
+		cc.AddResult(r)
 		return
 	}
 
@@ -1204,13 +1206,6 @@ func checkRHOBSIntegration(ctx context.Context, cc *checks.ClusterContext) {
 		return
 	}
 
-	if !cc.Client.CanElevate() {
-		r.Status = checks.StatusSkip
-		r.Message = "RHOBS enabled but OIDC check requires elevation"
-		cc.AddResult(r)
-		return
-	}
-
 	// Check OIDC token refresh metrics
 	oidcQueryRaw := fmt.Sprintf(`rhobs_route_monitor_operator_oidc_token_refresh_total{namespace="%s"}`, cc.Operator.Namespace)
 	oidcData, err := cc.Client.QueryMetrics(ctx, oidcQueryRaw)
@@ -1266,17 +1261,14 @@ func checkLimitedSupportDisagreement(ctx context.Context, cc *checks.ClusterCont
 		},
 	}
 
-	if !cc.Client.CanElevate() {
-		cc.AddResult(cc.ElevationSkipResult(cc.CurrentCheck))
-		return
-	}
-
 	// Get label from HCP — list all HCPs across namespaces and take the first
-	hcpList, err := cc.Client.ListResources(ctx, hostedControlPlaneGVR, "", true)
 	labelValue := ""
-	if err == nil && len(hcpList.Items) > 0 {
-		labels := hcpList.Items[0].GetLabels()
-		labelValue = labels["api.openshift.com/limited-support"]
+	if cc.Client.CanElevate() {
+		hcpList, err := cc.Client.ListResources(ctx, hostedControlPlaneGVR, "", true)
+		if err == nil && len(hcpList.Items) > 0 {
+			labels := hcpList.Items[0].GetLabels()
+			labelValue = labels["api.openshift.com/limited-support"]
+		}
 	}
 	r.Details["hcp_label_value"] = labelValue
 
@@ -1293,6 +1285,20 @@ func checkLimitedSupportDisagreement(ctx context.Context, cc *checks.ClusterCont
 		}
 	}
 	r.Details["metric_value"] = metricValue
+
+	if !cc.Client.CanElevate() {
+		// Without elevation we can't read HCP labels — report metric only
+		metricLS := metricValue == "1"
+		r.Status = checks.StatusInfo
+		if metricLS {
+			r.Message = "Cluster in limited support (metric only — HCP label requires elevation)"
+		} else {
+			r.Message = "Cluster not in limited support (metric only — HCP label requires elevation)"
+		}
+		r.Details["degraded"] = "HCP label comparison unavailable without elevation"
+		cc.AddResult(r)
+		return
+	}
 
 	labelLS := labelValue == "true"
 	metricLS := metricValue == "1"
