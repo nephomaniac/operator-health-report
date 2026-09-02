@@ -39,6 +39,8 @@ func (c *CAMOChecker) RunChecks(ctx context.Context, cc *checks.ClusterContext) 
 	checkAlertmanagerEvents(ctx, cc)
 	checkCAMOEvents(ctx, cc)
 	checkAlertmanagerSecret(ctx, cc)
+	checkDMSWatchdog(ctx, cc)
+	checkDMSHeartbeatDelivery(ctx, cc)
 }
 
 // checkAlertmanagerPods checks AM pod status, restarts, and termination reasons
@@ -1399,4 +1401,123 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// --- DMS (Dead Man's Snitch) checks on managed clusters ---
+
+func checkDMSWatchdog(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("dms_watchdog_firing")
+
+	r := checks.Result{
+		Check:    "dms_watchdog_firing",
+		Severity: checks.SeverityCritical,
+		Details: map[string]any{
+			"description":   "Verifies the Watchdog alert is actively firing. Watchdog is a heartbeat alert that fires continuously when Prometheus and Alertmanager are healthy. CAMO configures Alertmanager to forward Watchdog to Dead Man's Snitch via the dms-secret URL. If Watchdog stops firing, DMS will time out and page — but if Watchdog was never firing, DMS provides no protection.",
+			"pass_criteria": "PASS: Watchdog alert is firing. FAIL: Watchdog alert not found in firing alerts. SKIP: cannot query metrics.",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		r.Status = checks.StatusSkip
+		r.Message = "Metrics unavailable"
+		cc.AddResult(r)
+		return
+	}
+
+	query := `ALERTS{alertname="Watchdog",alertstate="firing"}`
+	body, err := cc.Client.QueryMetrics(ctx, query)
+	cc.RecordError("Query Watchdog alert", err)
+
+	if err != nil {
+		r.Status = checks.StatusSkip
+		r.Message = fmt.Sprintf("Cannot query Watchdog alert: %v", err)
+		cc.AddResult(r)
+		return
+	}
+
+	if thanos.HasResults(body) {
+		r.Status = checks.StatusPass
+		r.Message = "Watchdog alert is firing — DMS heartbeat active"
+	} else {
+		r.Status = checks.StatusFail
+		r.Message = "Watchdog alert not firing — DMS heartbeat stopped, snitch will time out and page"
+	}
+	cc.AddResult(r)
+}
+
+func checkDMSHeartbeatDelivery(ctx context.Context, cc *checks.ClusterContext) {
+	cc.SetCheck("dms_heartbeat_delivery")
+
+	r := checks.Result{
+		Check:    "dms_heartbeat_delivery",
+		Severity: checks.SeverityWarning,
+		Details: map[string]any{
+			"description":   "Checks Alertmanager notification metrics for the DMS/Watchdog webhook receiver. Queries alertmanager_notifications_total and alertmanager_notifications_failed_total for the watchdog integration to verify heartbeats are being delivered to the Dead Man's Snitch endpoint. Failed deliveries mean DMS will time out even though Watchdog is firing.",
+			"pass_criteria": "PASS: notifications being sent with zero or low failure rate. WARN: notification failures detected. FAIL: all notifications failing. INFO: no notification metrics found (DMS may not be configured).",
+		},
+	}
+
+	if !cc.Client.CanQueryMetrics() {
+		r.Status = checks.StatusSkip
+		r.Message = "Metrics unavailable"
+		cc.AddResult(r)
+		return
+	}
+
+	// AM uses integration name "webhook" for generic webhook receivers (DMS uses webhook)
+	// The receiver name is typically "watchdog" or "make-it-warning"
+	successQuery := `sum(rate(alertmanager_notifications_total{integration="webhook"}[1h]))`
+	failQuery := `sum(rate(alertmanager_notifications_failed_total{integration="webhook"}[1h]))`
+
+	successBody, sErr := cc.Client.QueryMetrics(ctx, successQuery)
+	failBody, fErr := cc.Client.QueryMetrics(ctx, failQuery)
+
+	if sErr != nil && fErr != nil {
+		r.Status = checks.StatusInfo
+		r.Message = "AM webhook notification metrics not available"
+		cc.AddResult(r)
+		return
+	}
+
+	successRate := 0.0
+	failRate := 0.0
+	if sErr == nil && thanos.HasResults(successBody) {
+		if v, ok := thanos.InstantFloat(successBody); ok {
+			successRate = v
+		}
+	}
+	if fErr == nil && thanos.HasResults(failBody) {
+		if v, ok := thanos.InstantFloat(failBody); ok {
+			failRate = v
+		}
+	}
+
+	r.Details["success_rate_per_sec"] = thanos.Round(successRate, 4)
+	r.Details["fail_rate_per_sec"] = thanos.Round(failRate, 4)
+
+	totalRate := successRate + failRate
+
+	switch {
+	case totalRate == 0:
+		r.Status = checks.StatusInfo
+		r.Message = "No webhook notifications in the last hour — DMS receiver may not be configured"
+	case successRate == 0 && failRate > 0:
+		r.Status = checks.StatusFail
+		r.Severity = checks.SeverityCritical
+		r.Message = fmt.Sprintf("All webhook notifications failing (%.4f/s) — DMS heartbeat not being delivered", failRate)
+	case failRate > 0:
+		failRatio := failRate / totalRate
+		r.Details["fail_ratio"] = thanos.Round(failRatio, 4)
+		if failRatio > 0.1 {
+			r.Status = checks.StatusWarning
+			r.Message = fmt.Sprintf("Webhook notification failures: %.0f%% failing (%.4f/s success, %.4f/s fail)", failRatio*100, successRate, failRate)
+		} else {
+			r.Status = checks.StatusPass
+			r.Message = fmt.Sprintf("DMS heartbeat delivery healthy with minor errors — %.4f/s success, %.4f/s fail", successRate, failRate)
+		}
+	default:
+		r.Status = checks.StatusPass
+		r.Message = fmt.Sprintf("DMS heartbeat delivery healthy — %.4f notifications/s", successRate)
+	}
+	cc.AddResult(r)
 }

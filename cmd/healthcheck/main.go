@@ -30,6 +30,7 @@ import (
 	// Import operator checkers for init() registration
 	"github.com/openshift/operator-health-report/pkg/checks/byoc"
 	_ "github.com/openshift/operator-health-report/pkg/checks/camo"
+	_ "github.com/openshift/operator-health-report/pkg/checks/dms"
 	_ "github.com/openshift/operator-health-report/pkg/checks/hcp"
 	_ "github.com/openshift/operator-health-report/pkg/checks/mcc"
 	_ "github.com/openshift/operator-health-report/pkg/checks/mnmo"
@@ -469,9 +470,10 @@ func main() {
 		}
 	}()
 
-	// Hive-based cluster discovery: connect to hive shards, list ClusterDeployments
+	// Hive-based cluster discovery: connect to hive shards, list ClusterDeployments.
+	// Only discover managed clusters when there are managed operators to run.
 	var hiveSyncData map[string]*fleet.ClusterSyncStatus // OCM ID → sync status
-	if byHive != "" && !saasOnly {
+	if byHive != "" && !saasOnly && needsManagedClusters {
 		hiveConn := getHiveOCM()
 		if hiveConn == nil {
 			fmt.Fprintf(os.Stderr, "Error: --by-hive requires hive OCM connection\n")

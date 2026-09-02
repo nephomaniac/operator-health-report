@@ -16,7 +16,7 @@ var (
 		Group: "hive.openshift.io", Version: "v1", Resource: "clusterdeployments",
 	}
 	clusterSyncGVR = schema.GroupVersionResource{
-		Group: "hiveinternal.openshift.io", Version: "v1alpha1", Resource: "clustersync",
+		Group: "hiveinternal.openshift.io", Version: "v1alpha1", Resource: "clustersyncs",
 	}
 )
 

@@ -352,6 +352,15 @@ var (
 		ClusterScope: ScopeHive,
 	}
 
+	DMSConfig = OperatorConfig{
+		Name:         "deadmanssnitch-operator",
+		ShortName:    "dms",
+		Namespace:    "deadmanssnitch-operator",
+		Deployment:   "deadmanssnitch-operator",
+		PKOSaas:      "saas-deadmanssnitch-operator-pko.yaml",
+		ClusterScope: ScopeHive,
+	}
+
 	SAEConfig = OperatorConfig{
 		Name:             "splunk-audit-exporter",
 		ShortName:        "sae",
@@ -408,6 +417,7 @@ var (
 		"rhobs":   RHOBSConfig,
 		"rlr":     RLRConfig,
 		"pdo":     PDOConfig,
+		"dms":     DMSConfig,
 		"sae":     SAEConfig,
 		"cluster": ClusterConfig,
 		"hcp":     HCPConfig,
